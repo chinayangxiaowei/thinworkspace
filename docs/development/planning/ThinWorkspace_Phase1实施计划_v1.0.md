@@ -31,7 +31,7 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 |---|---|---|---|---|
 | P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | Done |
 | P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | In Review |
-| P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | Backlog |
+| P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | In Progress |
 | P0-04 生命周期故障注入 | 证明创建/删除中断后状态可解释、可重放或安全停止 | P0-02、P0-03 | R4 | Backlog |
 
 P0-02 和 P0-03 可在 P0-01 输出稳定后并行；P0-04 必须等两者的证据格式和 ADR 结论可用。
@@ -52,7 +52,7 @@ P0.a 已完成任务级与小阶段验收，P0-01 已获规定模型正式 Appro
 
 P0-02 的准备、验收断言、实际领取基线和候选验证记录在 [P0-02 实施记录](../implementation/P0-02_APFS物化实验.md)。本地候选门禁通过后进入正式评审，尚待远端 CI、Verification 和合并；具体证据与保留边界只在该记录维护，不代表 P0.b 或整个 P0 放行。
 
-P0-03 的准入、候选 ADR 验证范围和未解决边界记录在 [P0-03 实施记录](../implementation/P0-03_Git与Base实验.md)。当前为 Backlog，只做准备，不把待确认的属性兼容策略提前变成产品规则。
+P0-03 的准入、候选 ADR 验证范围和未解决边界记录在 [P0-03 实施记录](../implementation/P0-03_Git与Base实验.md)。首个属性类型判别切片已由主 Agent 准入并在基线门禁通过后领取；不把待确认的属性兼容策略提前变成产品规则，也不代表完整 Git/Base 结论已冻结。
 
 ---
 

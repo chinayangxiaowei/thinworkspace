@@ -63,7 +63,7 @@ P0-01 不实施文件克隆、产品初始化、SQLite、Workspace 生命周期�
 
 ### 待完成验证
 
-当前冻结源码已通过本地通用、release、真实跨卷、全 crate 变异、fuzz 与供应链门禁；[PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1) 已创建。首次远端工作流校验失败，任务返回 In Progress 修正 CI，正式 Approve 暂停。P0-01/P0.a 尚未收口，未作 P0 阶段放行声明。
+当前冻结源码已通过本地及远端通用、release、真实跨卷、全 crate 变异、fuzz 与供应链门禁；[PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1) 已创建。但远端整轮 CI 因最后的实验卷卸载失败而未通过，任务保持 In Progress 修正清理，正式 Approve 暂停。P0-01/P0.a 尚未收口，未作 P0 阶段放行声明。
 
 本次临时 APFS 卷已按精确挂载路径卸载，`hdiutil detach` 退出 0；随后删除本任务的 128 MiB 合成镜像和空临时父目录。没有删除用户数据，镜像可按已验证命令重建；失败与最终变异日志均保留于当前工作区的忽略目录。工作区暂保留用于 PR/CI 复核，合并后再记录保留或清理决定。
 
@@ -71,7 +71,22 @@ P0-01 不实施文件克隆、产品初始化、SQLite、Workspace 生命周期�
 
 首个提交 `a420176` 对应[运行 34684128712](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34684128712)：completed/failure，耗时 0 秒，jobs 为空，Rust 门禁未执行。普通 YAML 解析通过不能证明 GitHub 表达式合法；工作流在 job 级 `env` 使用了不允许的 `runner.temp` 上下文，依据 [GitHub 上下文可用性表](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)，已改为在运行步骤中从 `RUNNER_TEMP` 写入 `GITHUB_ENV`，后续步骤继续使用同一变量名。此修正不改 Rust 源码、测试范围或质量门槛，仍须以新的真实 CI 结果验证。
 
-CI 补丁已由 GPT-6 Astra / `xhigh` 专项复核通过。主 Agent 重跑两 workspace 的 fmt/Clippy 与通用 `cargo test --workspace --all-targets`：退出 0，普通测试 49 passed、1 ignored（专用镜像已清理）；这次增量复跑不替代下表同一 Rust 源码的 50 项完整跨卷验证。新工作流结构解析与路径初始化脚本 `bash -n` 通过，远端语义校验仍待新的 CI 执行。
+路径初始化补丁已由 GPT-6 Astra / `xhigh` 专项复核通过。主 Agent 重跑两 workspace 的 fmt/Clippy 与通用 `cargo test --workspace --all-targets`：退出 0，普通测试 49 passed、1 ignored（专用镜像已清理）；这次增量复跑不替代下表同一 Rust 源码的 50 项完整跨卷验证。工作流结构解析与路径初始化脚本 `bash -n` 通过；随后由实际远端运行验证初始化，不以静态解析替代。
+
+提交 `7d350a9` 的[运行 34684344275](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34684344275)已结束，整轮结果为 failure。实际执行证据如下：
+
+- 路径初始化、固定工具链、fmt/Clippy、双卷准备均成功；debug/release 各 50 passed、0 failed、0 ignored，真实跨卷用例均执行。
+- 两个 workspace 的依赖政策与漏洞审计成功；全量变异实际运行 244 项，193 caught、51 unviable，无 missed/timeout，步骤退出 0。
+- fuzz 实际执行 823,176 次输入、61 秒，新增 728 个 corpus 单元，peak RSS 735 MiB，步骤退出 0，无 crash/hang。
+- 唯一失败是最后普通 `hdiutil detach` 返回 `Resource busy`/exit 16。作业已结束，日志没有成功卸载证据，不能把测试成功写成整轮 CI 或环境清理成功。
+
+清理补丁只对由 `RUNNER_TEMP` 推导且精确匹配的实验挂载点执行普通卸载；只有 exit 16 才有界重试，不使用强制卸载、不终止占用进程、不扩大清理范围，其他错误或重试耗尽仍失败。次数与间隔以工作流为唯一实现来源，不在本文维护第二份常量。没有证据说明远端由哪个进程占用，也不将其归因为 Spotlight 或断言必为瞬时故障。
+
+主 Agent 独立取得真实 RED/GREEN：自行创建 128 MiB APFS 镜像，Volume UUID 为 `C60FC000-A589-42FA-9E18-93614316F155`；在 `/private/tmp/thinws-p0-detach.K6BVfy/mounted` 用短时子进程持有 cwd，原单次 detach 返回 16。随后普通卸载、将同一镜像重挂到该临时父目录的 `thinws-p0-cross-volume`，再次短时占用，从 YAML 直接读取实际清理 block 并通过 `/bin/bash -eu -c` 执行：首次真实 busy，重试后退出 0、`disk9` ejected。没有强制卸载或杀进程；`hdiutil info` 对本镜像的已挂载关联数为 0 后，已删除本任务合成镜像与空临时父目录。未删除用户数据，可重新生成相同测试环境。
+
+编码 Agent 的控制流 RED 为“busy 后成功”场景在原单次脚本中实际退出 16。新 block 的模拟验证覆盖立即成功、busy 后成功、持续 busy 和其他错误；主 Agent 独立重跑通过。临时测试 harness 已改为每次创建新证据目录，不在复跑时递归覆盖旧结果；当前证据在 `target/ci-detach-retry-test.pXv7Y4/`。GPT-6 Astra / `xhigh` 另独立验证六个分支（包括 busy 后非 busy 和错误目标）、语法与 diff，清理补丁专项审核通过；这些控制流测试不替代上述真实卷验证。
+
+主 Agent 重跑根/fuzz fmt 和 Clippy，以及本次独立双卷上的 debug/release 测试，均通过，测试各 50 passed、0 ignored。Rust 源码未变，本轮不重复已成功的完整 mutation/fuzz；新的远端工作流仍须执行所有门禁及清理，并通过整轮 CI 后才可正式 Approve/合并。P0-02 尚未启动物化编码。
 
 ### 独立回归与增量结果
 

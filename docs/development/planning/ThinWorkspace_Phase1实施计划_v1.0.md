@@ -29,12 +29,24 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R3 | Backlog |
+| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | In Progress |
 | P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Backlog |
 | P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | Backlog |
 | P0-04 生命周期故障注入 | 证明创建/删除中断后状态可解释、可重放或安全停止 | P0-02、P0-03 | R4 | Backlog |
 
 P0-02 和 P0-03 可在 P0-01 输出稳定后并行；P0-04 必须等两者的证据格式和 ADR 结论可用。
+
+### 3.1 P0 小阶段与当前领取
+
+负责人为主 Agent；模型分工遵循《任务流程》§8.3。小阶段划分只用于收口，不改变上表依赖。
+
+| 小阶段 | 包含任务 | 可观察子目标和退出条件 | 适用门禁 |
+|---|---|---|---|
+| P0.a 路径能力证据 | P0-01 | 实际路径的卷身份、权限和缺失目标证据可复查；路径/符号链接替换被识别；预检不产生 CoW confirmed | Rust 通用门禁、真实 APFS 和跨卷身份测试、受影响 crate 全量变异、路径 fuzz、专项审核 |
+| P0.b 物化与 Git 可行性 | P0-02、P0-03 | APFS/Full Copy 和托管 Git 拓扑可重复执行；失败边界与候选 ADR 由证据支持 | 小阶段门禁、真实 clone/跨卷/回滚、真实 Git/index 与 Base 验证 |
+| P0.c 故障闭环 | P0-04 | 创建/删除中断可恢复或安全停止；P0 阶段退出控制点逐项有证据 | 完整阶段门禁和人工放行 |
+
+P0-01 从文档基线 `f7a400f` 开始，工作分支为 `task/p0-01-host-path-probe`。本次使用 FD 与卷属性 FFI，按最高影响将风险从 R3 调整为 R4。验收断言、实际命令、审核结论和未完成项统一记录在 [P0-01 实施记录](../implementation/P0-01_HostPathProbe实验.md)。P0.a 收口不代表整个 P0 放行。
 
 ---
 

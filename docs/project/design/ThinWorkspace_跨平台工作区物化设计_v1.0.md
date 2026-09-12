@@ -178,10 +178,12 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS d
 - 所有安全关键遍历使用 dirfd-relative/no-follow 方式；
 - 目录逐层创建，不通过 shell、glob 或未验证路径操作；
 - 使用 `fstatat(..., AT_SYMLINK_NOFOLLOW)` 区分普通文件、目录和符号链接；
-- 普通文件以已打开的 source parent dirfd 和 basename 表示，先用 `fstatat(..., AT_SYMLINK_NOFOLLOW)` 核对类型与 Base 证据，再调用 `fclonefileat(source_dirfd, source_name, target_dirfd, target_name, CLONE_NOFOLLOW_ANY)`；调用后重新核对源身份，并由最终 manifest 校验防止检查与克隆之间的替换；
+- 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与 Base 证据；持有源文件 FD，调用 `fclonefileat(source_fd, target_dirfd, target_name, CLONE_NOFOLLOW_ANY)`，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
 - symlink 使用 `readlinkat/symlinkat` 复制 link text，不跟随目标。link text 可以指向树外，但平台不得在物化和删除中解引用它。
 
 只有对每个应克隆普通文件的真实 `fclonefileat` 调用都成功，且最终树校验通过，Receipt 才能记录 `actual_mode=cow-clone` 和 `cow=confirmed`。
+
+API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/clonefile.2)：`fclonefileat` 的源是文件 FD；源目录 FD 加源名称的五参数形式属于 `clonefileat`。
 
 ### 7.2 错误分类与降级
 

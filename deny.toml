@@ -1,0 +1,28 @@
+[graph]
+all-features = true
+
+[licenses]
+include-dev = true
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "NCSA"]
+
+# Only repository-owned experiments use the project's noncommercial license.
+[[licenses.exceptions]]
+name = "thinws-p0-probe"
+version = "=0.0.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-p0-probe-fuzz"
+version = "=0.0.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

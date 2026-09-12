@@ -232,6 +232,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinws-p0-git-base"
+version = "0.0.0"
+
+[[package]]
 name = "thinws-p0-materialize"
 version = "0.0.0"
 dependencies = [

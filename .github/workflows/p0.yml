@@ -72,6 +72,8 @@ jobs:
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_probe_path_validation -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Materialization layout policy fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialize_layout_policy -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Git path output fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_git_path_output -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: |

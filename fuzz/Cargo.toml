@@ -26,5 +26,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "thinws_git_path_output"
+path = "fuzz_targets/git_path_output.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -1,5 +1,9 @@
 [workspace]
-members = ["experiments/p0/materialize", "experiments/p0/probe"]
+members = [
+    "experiments/p0/git-base",
+    "experiments/p0/materialize",
+    "experiments/p0/probe",
+]
 exclude = ["fuzz"]
 resolver = "3"
 

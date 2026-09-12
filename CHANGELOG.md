@@ -20,6 +20,7 @@
 - 采用 PolyForm Noncommercial License 1.0.0 源码可用许可，并建立独立商业授权边界。
 - 增加商业授权申请说明和公开联系渠道。
 - 增加只读 Host/Path Probe 技术实验及固定 Rust/质量工具链，验证 APFS 卷身份、路径重验和候选后端预检；仅为 Phase 0 实验，不是已发布的 `thinws` 产品能力。
+- 增加 APFS 物化技术实验、真实双卷与失败回滚测试，以及布局策略 fuzz：验证同卷 clone、跨卷拒绝、独立 Full Copy 和显式降级的证据边界；仍为 Phase 0 实验，不提供 Phase 1 CLI。
 
 ### Changed
 

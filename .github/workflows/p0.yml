@@ -38,9 +38,9 @@ jobs:
           hdiutil create -size 128m -fs APFS -volname thinws-p0-ci "$THINWS_P0_IMAGE"
           hdiutil attach -nobrowse -owners on -mountpoint "$THINWS_P0_CROSS_VOLUME_ROOT" "$THINWS_P0_IMAGE"
       - name: Tests on actual macOS filesystem
-        run: cargo test --locked --workspace --all-targets -- --include-ignored
+        run: cargo test --locked --workspace --all-targets -- --include-ignored --nocapture
       - name: Release tests
-        run: cargo test --locked --release --workspace --all-targets -- --include-ignored
+        run: cargo test --locked --release --workspace --all-targets -- --include-ignored --nocapture
       - name: Load pinned quality tools
         run: |
           python3 - <<'PY'
@@ -66,9 +66,12 @@ jobs:
           cargo audit --deny warnings --file Cargo.lock
           cargo audit --deny warnings --file fuzz/Cargo.lock
       - name: Full experiment mutation tests
-        run: cargo mutants --workspace --timeout 60 --jobs 2 --output target -- -- --include-ignored
+        # Preserve fixtures whose cleanup stopped; scratch teardown must not delete them.
+        run: cargo mutants --workspace --leak-dirs --timeout 60 --jobs 2 --output target -- -- --include-ignored --nocapture
       - name: Path fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_probe_path_validation -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Materialization layout policy fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialize_layout_policy -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: |

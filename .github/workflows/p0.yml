@@ -13,13 +13,15 @@ jobs:
   probe:
     runs-on: macos-15
     timeout-minutes: 45
-    env:
-      THINWS_P0_CROSS_VOLUME_ROOT: ${{ runner.temp }}/thinws-p0-cross-volume
-      THINWS_P0_IMAGE: ${{ runner.temp }}/thinws-p0-cross-volume.dmg
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - name: Initialize experiment paths
+        run: |
+          test -d "$RUNNER_TEMP"
+          printf 'THINWS_P0_CROSS_VOLUME_ROOT=%s/thinws-p0-cross-volume\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'THINWS_P0_IMAGE=%s/thinws-p0-cross-volume.dmg\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Format

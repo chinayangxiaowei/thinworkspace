@@ -29,7 +29,7 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | In Review |
+| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | In Progress |
 | P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Backlog |
 | P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | Backlog |
 | P0-04 生命周期故障注入 | 证明创建/删除中断后状态可解释、可重放或安全停止 | P0-02、P0-03 | R4 | Backlog |

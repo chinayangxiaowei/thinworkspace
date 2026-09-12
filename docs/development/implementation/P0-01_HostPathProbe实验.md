@@ -9,7 +9,7 @@
 | 项目 | 当前值 |
 |---|---|
 | 类型、阶段、小阶段、风险 | Spike；P0；P0.a；R4（包含 FFI） |
-| 状态 | In Review |
+| 状态 | In Progress |
 | 负责人 | 主 Agent |
 | 编码模型 | GPT-5.6 Sol / `gpt-5.6-sol` / `xhigh` |
 | 规定审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；已执行文档、FFI 与增量审核，最终审核待完成 |
@@ -63,9 +63,15 @@ P0-01 不实施文件克隆、产品初始化、SQLite、Workspace 生命周期�
 
 ### 待完成验证
 
-当前冻结源码已通过本地通用、release、真实跨卷、全 crate 变异、fuzz 与供应链门禁，变更集进入 In Review；源码增量审核无新增阻断，最终批准仍待本次完整证据复核。远端 PR/CI 尚未执行。P0-01/P0.a 尚未收口，未作 P0 阶段放行声明。
+当前冻结源码已通过本地通用、release、真实跨卷、全 crate 变异、fuzz 与供应链门禁；[PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1) 已创建。首次远端工作流校验失败，任务返回 In Progress 修正 CI，正式 Approve 暂停。P0-01/P0.a 尚未收口，未作 P0 阶段放行声明。
 
 本次临时 APFS 卷已按精确挂载路径卸载，`hdiutil detach` 退出 0；随后删除本任务的 128 MiB 合成镜像和空临时父目录。没有删除用户数据，镜像可按已验证命令重建；失败与最终变异日志均保留于当前工作区的忽略目录。工作区暂保留用于 PR/CI 复核，合并后再记录保留或清理决定。
+
+### 远端 CI
+
+首个提交 `a420176` 对应[运行 34684128712](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34684128712)：completed/failure，耗时 0 秒，jobs 为空，Rust 门禁未执行。普通 YAML 解析通过不能证明 GitHub 表达式合法；工作流在 job 级 `env` 使用了不允许的 `runner.temp` 上下文，依据 [GitHub 上下文可用性表](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)，已改为在运行步骤中从 `RUNNER_TEMP` 写入 `GITHUB_ENV`，后续步骤继续使用同一变量名。此修正不改 Rust 源码、测试范围或质量门槛，仍须以新的真实 CI 结果验证。
+
+CI 补丁已由 GPT-6 Astra / `xhigh` 专项复核通过。主 Agent 重跑两 workspace 的 fmt/Clippy 与通用 `cargo test --workspace --all-targets`：退出 0，普通测试 49 passed、1 ignored（专用镜像已清理）；这次增量复跑不替代下表同一 Rust 源码的 50 项完整跨卷验证。新工作流结构解析与路径初始化脚本 `bash -n` 通过，远端语义校验仍待新的 CI 执行。
 
 ### 独立回归与增量结果
 

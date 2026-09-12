@@ -19,6 +19,7 @@
 - 建立 Phase 0/Phase 1 项目文档基线和仓库目录骨架。
 - 采用 PolyForm Noncommercial License 1.0.0 源码可用许可，并建立独立商业授权边界。
 - 增加商业授权申请说明和公开联系渠道。
+- 增加只读 Host/Path Probe 技术实验及固定 Rust/质量工具链，验证 APFS 卷身份、路径重验和候选后端预检；仅为 Phase 0 实验，不是已发布的 `thinws` 产品能力。
 
 ### Changed
 

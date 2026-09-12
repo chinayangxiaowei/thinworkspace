@@ -29,8 +29,8 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | In Progress |
-| P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Backlog |
+| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | Done |
+| P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | In Progress |
 | P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | Backlog |
 | P0-04 生命周期故障注入 | 证明创建/删除中断后状态可解释、可重放或安全停止 | P0-02、P0-03 | R4 | Backlog |
 
@@ -48,7 +48,9 @@ P0-02 和 P0-03 可在 P0-01 输出稳定后并行；P0-04 必须等两者的证
 
 P0-01 从文档基线 `f7a400f` 开始，工作分支为 `task/p0-01-host-path-probe`。本次使用 FD 与卷属性 FFI，按最高影响将风险从 R3 调整为 R4。验收断言、实际命令、审核结论和未完成项统一记录在 [P0-01 实施记录](../implementation/P0-01_HostPathProbe实验.md)。P0.a 收口不代表整个 P0 放行。
 
-P0-02 的准备与验收断言记录在 [P0-02 实施记录](../implementation/P0-02_APFS物化实验.md)。当前仅完成只读准备与准入审查，仍为 Backlog；P0-01 完整 CI 和最终审核确认前不启动物化编码。
+P0.a 已完成任务级与小阶段验收，P0-01 已获规定模型正式 Approve 并合并；精确提交、CI、未执行边界及工作区保留原因只记录在上述实施记录。整个 P0 尚未放行。
+
+P0-02 的准备、验收断言和实际领取基线记录在 [P0-02 实施记录](../implementation/P0-02_APFS物化实验.md)。P0-01 依赖已满足，准入与基线检查后由主 Agent 领取，进入 RED/实现；不得把此前任务卡准备视为物化能力已完成。
 
 ---
 

@@ -9,13 +9,14 @@
 | 项目 | 当前值 |
 |---|---|
 | 类型、阶段、小阶段、风险 | Spike；P0；P0.b；R4（FFI、创建与回滚删除） |
-| 状态 | Backlog；任务卡准备中，尚未开始物化编码 |
+| 状态 | In Progress；依赖与准入已满足，进入 RED/实现，尚无物化通过结论 |
 | 负责人 | 主 Agent |
-| 编码模型 | 计划使用 GPT-5.6 Sol / `gpt-5.6-sol` / `xhigh` |
+| 编码模型 | GPT-5.6 Sol / `gpt-5.6-sol` / `xhigh` |
 | 审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；已完成只读准入审查，非实现批准 |
 | 准备日期、基线 | 2026-09-12；`7d350a91df5c1b3612cf9fc3bc3d545e8a53f690` |
+| 领取日期、集成基线 | 2026-09-12；已合入 `main` 的 `2e29f88a1aae2ee53ce52dbc38a7c0765b58cb15`；本分支集成提交 `7ee03f7ae051954abfefed9ac355ba4725efae4a` |
 | 工作区、分支 | `/Volumes/data/code/thinworkspace-p0-02`；`task/p0-02-apfs-materialization`；标准 Git linked worktree，不声明 CoW |
-| 前置依赖 | P0-01 输出稳定；当前等待其完整远端 CI 与正式审核，编码前重新核对 |
+| 前置依赖 | P0-01 已完成完整 CI、正式 Approve 与合并；证据见其实施记录“最终收口” |
 | 主要写入区域 | `experiments/p0/materialize/` 及直接配套的实验测试、构建和质量配置 |
 | 共享文件协调 | Cargo/lockfile、CI、质量工具配置与文档索引由主 Agent 统一协调；其他任务不得同时写入 |
 
@@ -70,5 +71,7 @@
 
 - 2026-09-12，GPT-5.6 Sol / `xhigh` 完成只读实验准备；主 Agent 核对相关权威章节与 Apple API。
 - 同日，GPT-6 Astra / `xhigh` 完成只读准入审查；主 Agent 采纳两条显式降级编排、Drop 停止边界、创建后登记失败和双侧 manifest 要求。此审查不代表实现通过或阶段放行。
-- 本任务卡、索引和计划链接已由同一 Reviewer 复核通过。新工作区基线 fmt、Clippy、普通测试通过（49 passed、1 个需专用双卷环境的测试 ignored），22 个相对链接检查通过；这些结果只验证文档与既有 P0-01 基线，不证明本任务物化能力。P0-01 远端质量步骤均通过但最终卷卸载失败，当前继续等待其清理修复与整轮 CI。
-- 尚未编写本任务代码，未执行真实 clone、Copy、回滚、变异或新增 fuzz；未创建本任务 APFS 镜像。待 P0-01 完整 CI/最终审核后核验基线并启动编码。
+- 本任务卡、索引和计划链接已由同一 Reviewer 复核通过。准备时新工作区基线 fmt、Clippy、普通测试通过（49 passed、1 个需专用双卷环境的测试 ignored），22 个相对链接检查通过；这些结果只验证文档与既有 P0-01 基线，不证明本任务物化能力。当时 P0-01 的卷卸载失败已在其后修复并完成整轮 CI、正式审核及合并。
+- 已合入实际 `main`，主 Agent 重跑领取基线 fmt、Clippy、普通测试通过（49 passed、1 个专用双卷用例 ignored），准入完成后领取本任务。双卷物化验证时必须执行专用用例，不能用本次普通基线检查代替。
+- 主 Agent 已创建本任务专用 128 MiB APFS 镜像 `/private/tmp/thinws-p0-materialize.OC4JPT/cross-volume.dmg`，挂载于该私有父目录的 `mounted`；Volume UUID 为 `E4C7D91A-EF7B-476B-9BEB-946B53FEE500`，与父根的 `382DF1EF-8A38-4E30-8445-613B5192C6DE` 不同。`diskutil` 和 Probe 对镜像 UUID 的观测一致，ownership enabled、写预检 allowed。环境由主 Agent 持有，实验结束后按精确挂载点普通卸载并核对镜像关联；目前仍为供测试使用的活动挂载，不声称已清理。
+- 尚无真实 clone、Copy、回滚、变异或新增 fuzz 的本任务通过证据。接下来先取得物化行为缺失的 RED，再实施已定义实验；上述环境准备不证明 CoW 成功。

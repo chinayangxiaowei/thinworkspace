@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+/target/
+**/*.rs.bk
+
+# Local runtime data and transient test output
+*.db
+*.db-shm
+*.db-wal
+*.tmp
+
+# Fuzz-generated crashes are minimized before selected corpus cases are committed
+/fuzz/artifacts/
+/fuzz/target/

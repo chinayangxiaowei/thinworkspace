@@ -19,5 +19,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "thinws_materialize_layout_policy"
+path = "fuzz_targets/materialize_layout_policy.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

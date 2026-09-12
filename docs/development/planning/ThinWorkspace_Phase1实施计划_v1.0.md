@@ -29,8 +29,8 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | In Progress |
-| P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Backlog |
+| P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | Done |
+| P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | In Review |
 | P0-03 Git 托管拓扑与 Base 实验 | 冻结 bare repository＋linked worktree、独立 index 和 Base 发布 ADR | P0-01 | R4 | Backlog |
 | P0-04 生命周期故障注入 | 证明创建/删除中断后状态可解释、可重放或安全停止 | P0-02、P0-03 | R4 | Backlog |
 
@@ -47,6 +47,10 @@ P0-02 和 P0-03 可在 P0-01 输出稳定后并行；P0-04 必须等两者的证
 | P0.c 故障闭环 | P0-04 | 创建/删除中断可恢复或安全停止；P0 阶段退出控制点逐项有证据 | 完整阶段门禁和人工放行 |
 
 P0-01 从文档基线 `f7a400f` 开始，工作分支为 `task/p0-01-host-path-probe`。本次使用 FD 与卷属性 FFI，按最高影响将风险从 R3 调整为 R4。验收断言、实际命令、审核结论和未完成项统一记录在 [P0-01 实施记录](../implementation/P0-01_HostPathProbe实验.md)。P0.a 收口不代表整个 P0 放行。
+
+P0.a 已完成任务级与小阶段验收，P0-01 已获规定模型正式 Approve 并合并；精确提交、CI、未执行边界及工作区保留原因只记录在上述实施记录。整个 P0 尚未放行。
+
+P0-02 的准备、验收断言、实际领取基线和候选验证记录在 [P0-02 实施记录](../implementation/P0-02_APFS物化实验.md)。本地候选门禁通过后进入正式评审，尚待远端 CI、Verification 和合并；具体证据与保留边界只在该记录维护，不代表 P0.b 或整个 P0 放行。
 
 ---
 

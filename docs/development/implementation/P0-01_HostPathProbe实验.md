@@ -9,10 +9,10 @@
 | 项目 | 当前值 |
 |---|---|
 | 类型、阶段、小阶段、风险 | Spike；P0；P0.a；R4（包含 FFI） |
-| 状态 | In Progress |
+| 状态 | Done；仅本任务与 P0.a 收口，非 P0 阶段放行 |
 | 负责人 | 主 Agent |
 | 编码模型 | GPT-5.6 Sol / `gpt-5.6-sol` / `xhigh` |
-| 规定审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；已执行文档、FFI 与增量审核，最终审核待完成 |
+| 规定审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；最终正式 Approve，见下方收口证据 |
 | 开始日期、基线 | 2026-09-12；`f7a400f81e08683b242aa4950e556bc9301f1fe5` |
 | 工作分支 | `task/p0-01-host-path-probe` |
 | 工作区 | `/Volumes/data/code/thinworkspace-p0-01`，标准 Git linked worktree；未声明 CoW |
@@ -61,11 +61,17 @@ P0-01 不实施文件克隆、产品初始化、SQLite、Workspace 生命周期�
 
 这些失败来自预期行为尚未实现，非构建或环境错误。
 
-### 待完成验证
+### 最终收口
 
-当前冻结源码已通过本地及远端通用、release、真实跨卷、全 crate 变异、fuzz 与供应链门禁；[PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1) 已创建。但远端整轮 CI 因最后的实验卷卸载失败而未通过，任务保持 In Progress 修正清理，正式 Approve 暂停。P0-01/P0.a 尚未收口，未作 P0 阶段放行声明。
+2026-09-12，冻结提交 `af13e97a538f5394442048c237f4f31a902ffce4` 的[完整 CI 34685410017](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34685410017) 成功。GPT-6 Astra / `xhigh` 独立核对最终源码、FFI、精确等价排除和真实日志后正式 Approve，无阻断发现；主 Agent 另行核验。审核与验收已写入 [PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1#issuecomment-5645043915)，该 PR 于 09:34:45 UTC 合并，merge commit 为 `2e29f88a1aae2ee53ce52dbc38a7c0765b58cb15`。
 
-本次临时 APFS 卷已按精确挂载路径卸载，`hdiutil detach` 退出 0；随后删除本任务的 128 MiB 合成镜像和空临时父目录。没有删除用户数据，镜像可按已验证命令重建；失败与最终变异日志均保留于当前工作区的忽略目录。工作区暂保留用于 PR/CI 复核，合并后再记录保留或清理决定。
+最终远端 debug/release 各 50 passed、0 ignored，真实跨卷身份用例实际执行；全量变异 244 项（193 caught、51 unviable、0 missed、0 timeout）；路径 fuzz 1,247,333 次输入/61 秒，新增 904 个 corpus 单元、peak RSS 749 MiB，无 crash/hang；根与 fuzz 的 fmt、Clippy、供应链门禁及最终普通卷卸载均成功。P0.a 的路径/卷/权限证据、路径替换识别和“Probe 不产生 confirmed”退出条件均通过本任务验收集验证。
+
+合并后的 `main` 在[运行 34686222893](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34686222893) 再次整轮成功；主 Agent 核对其 head 为上述 merge commit，树内容与已审核 head 相同。debug/release 和变异数量不变，fuzz 为 729,502 次输入/61 秒、无 crash/hang，最终普通卸载成功；这仍是同一 Probe 实验的验证，不扩展阶段批准范围。
+
+结论为 Go：允许后续实验依赖本 Probe 实验结果，不自动认定生产 Port 或真实 CoW 物化成立。不同 real/effective UID 的原生场景仍未执行，阶段长预算 fuzz 留在 P0 阶段门禁；P0-02～P0-04 和人工阶段放行尚未完成。下方早期失败与待验证描述是历史执行记录，不覆盖本节最终状态。
+
+本次临时 APFS 卷已按精确挂载路径卸载，`hdiutil detach` 退出 0；随后删除本任务的 128 MiB 合成镜像和空临时父目录。没有删除用户数据，镜像可按已验证命令重建，无待人工清理的本次挂载。合并后明确保留 `/Volumes/data/code/thinworkspace-p0-01` 工作区，用于保存失败与最终变异原始日志及后续 P0 阶段复核；不在本次任务中删除证据目录或分支。
 
 ### 远端 CI
 

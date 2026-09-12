@@ -52,6 +52,7 @@
 ### 实施与审核
 
 - [P0-01 Host/Path Probe 实施记录](development/implementation/P0-01_HostPathProbe实验.md)：任务验收断言、实验结果、审核结论与未完成项；不定义产品接口。
+- [P0-02 APFS clone 与跨卷实施记录](development/implementation/P0-02_APFS物化实验.md)：物化实验准入、失败补偿验收、执行证据与剩余边界。
 - `development/implementation/`：P0 实验报告、任务实施记录、故障注入结果和小阶段收口证据；
 - `development/review/`：审核记录、待处理问题和人工阶段放行材料。
 

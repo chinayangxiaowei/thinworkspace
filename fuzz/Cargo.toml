@@ -1,0 +1,23 @@
+[package]
+name = "thinws-p0-probe-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+thinws-p0-probe = { path = "../experiments/p0/probe" }
+
+[[bin]]
+name = "thinws_probe_path_validation"
+path = "fuzz_targets/probe_path_validation.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

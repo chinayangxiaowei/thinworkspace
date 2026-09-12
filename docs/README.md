@@ -51,6 +51,7 @@
 
 ### 实施与审核
 
+- [P0-01 Host/Path Probe 实施记录](development/implementation/P0-01_HostPathProbe实验.md)：任务验收断言、实验结果、审核结论与未完成项；不定义产品接口。
 - `development/implementation/`：P0 实验报告、任务实施记录、故障注入结果和小阶段收口证据；
 - `development/review/`：审核记录、待处理问题和人工阶段放行材料。
 

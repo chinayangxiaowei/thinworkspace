@@ -1,0 +1,72 @@
+name: P0 experiments
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      THINWS_P0_CROSS_VOLUME_ROOT: ${{ runner.temp }}/thinws-p0-cross-volume
+      THINWS_P0_IMAGE: ${{ runner.temp }}/thinws-p0-cross-volume.dmg
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Format
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+      - name: Lint
+        run: |
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Prepare distinct APFS volume
+        id: cross-volume
+        run: |
+          hdiutil create -size 128m -fs APFS -volname thinws-p0-ci "$THINWS_P0_IMAGE"
+          hdiutil attach -nobrowse -owners on -mountpoint "$THINWS_P0_CROSS_VOLUME_ROOT" "$THINWS_P0_IMAGE"
+      - name: Tests on actual macOS filesystem
+        run: cargo test --locked --workspace --all-targets -- --include-ignored
+      - name: Release tests
+        run: cargo test --locked --release --workspace --all-targets -- --include-ignored
+      - name: Load pinned quality tools
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          pins = tomllib.loads(Path('tools/quality-tools.toml').read_text())['tools']
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for key, value in pins.items():
+                  output.write(f'THINWS_{key.upper()}={value}\n')
+          PY
+      - name: Install quality tools
+        run: |
+          cargo install --locked cargo-mutants --version "$THINWS_CARGO_MUTANTS"
+          cargo install --locked cargo-fuzz --version "$THINWS_CARGO_FUZZ"
+          cargo install --locked cargo-deny --version "$THINWS_CARGO_DENY"
+          cargo install --locked cargo-audit --version "$THINWS_CARGO_AUDIT"
+          rustup toolchain install "$THINWS_FUZZ_NIGHTLY" --profile minimal --component rust-src
+      - name: Dependency policy and advisories for both workspaces
+        run: |
+          cargo deny --locked check
+          cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
+          cargo audit --deny warnings --file Cargo.lock
+          cargo audit --deny warnings --file fuzz/Cargo.lock
+      - name: Full experiment mutation tests
+        run: cargo mutants --workspace --timeout 60 --jobs 2 --output target -- -- --include-ignored
+      - name: Path fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_probe_path_validation -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Detach experiment volume
+        if: always() && steps.cross-volume.outcome == 'success'
+        run: hdiutil detach "$THINWS_P0_CROSS_VOLUME_ROOT"

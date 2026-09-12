@@ -9,10 +9,10 @@
 | 项目 | 当前值 |
 |---|---|
 | 类型、阶段、小阶段、风险 | Spike；P0；P0.b；R4（FFI、创建与回滚删除） |
-| 状态 | In Review；最终候选本地门禁通过，等待正式审核与远端 CI，任务尚未完成 |
+| 状态 | Done；正式候选 Approve、审核后真实 Verification、远端 CI 和 PR 合并均完成；仅表示本任务验收完成 |
 | 负责人 | 主 Agent |
 | 编码模型 | GPT-5.6 Sol / `gpt-5.6-sol` / `xhigh` |
-| 审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；已完成准入与限定实现复核，无全任务 Approve |
+| 审核模型 | GPT-6 Astra / `gpt-6-astra` / `xhigh`；正式候选 Approve 的精确提交与依据见下方当前收口结论 |
 | 准备日期、基线 | 2026-09-12；`7d350a91df5c1b3612cf9fc3bc3d545e8a53f690` |
 | 领取日期、集成基线 | 2026-09-12；已合入 `main` 的 `2e29f88a1aae2ee53ce52dbc38a7c0765b58cb15`；本分支集成提交 `7ee03f7ae051954abfefed9ac355ba4725efae4a` |
 | 工作区、分支 | `/Volumes/data/code/thinworkspace-p0-02`；`task/p0-02-apfs-materialization`；标准 Git linked worktree，不声明 CoW |
@@ -264,6 +264,12 @@ env THINWS_P0_CROSS_VOLUME_ROOT=/private/tmp/thinws-p0-materialize.OC4JPT/mounte
 
 - 本地技术证据支持上述预定义实验目标：真实同卷 clone 与写入隔离、真实跨卷 EXDEV 和独立字节 Copy、两条显式降级、partial/登记失败/回滚停止、路径与源变化，以及第二次 Copy 再失败均有真实平台或明确标注注入的回归。当前完整验收集为 111 项；本节不把实验结果推广为 P1 产品能力、完整元数据保真或恶意同 UID 安全隔离。
 - fmt、workspace Clippy、真实双卷 debug/release、受影响 crate 全量变异均通过；根/fuzz 供应链检查与两个固定 60 秒 fuzz smoke 的命令及结果见上方最近检查点，其对应输入文件与锁定依赖未变。当前相关入口、计划与记录的 50 个本地链接目标存在，`git diff --check` 通过。新增直接依赖 `blake3` 用于限定 manifest 的内容摘要，沿用技术栈选型；`rustix` 仅在测试侧提供独立身份观测/清理，不复用被变异的生产 FFI。
-- 规定 Reviewer 的可提交范围预审未发现新增阻断；实验 6 个文件和新 fuzz harness 必须完整纳入提交，自动生成 corpus 不整批提交。正式候选审核、远端 CI、审核后的 Verification 和合并仍待执行；此时不作最终任务 Go，也不标记 Done。P0.b 还依赖 P0-03，整个 P0 及 P1 目标未完成。
-- 主 Agent 负责保留当前任务 worktree、变异原始日志/scratch、自动 fuzz 语料和上文登记的失败现场，用于后续审核及 P0 阶段复核。不存在要求用户立即手工删除的清理任务；保留不等于已清理，不按路径名或观测值事后认领未知对象。专用镜像目前仍挂载供审核后真实 Verification 使用，完成后只按核验的镜像关联和精确挂载点普通卸载；镜像及内部现场可继续保留，不强制删除或卸载。
-- 未执行及限制：远端本候选 CI 尚未运行；P0 阶段长预算 fuzz、Git/Base、跨进程强杀恢复分别按原计划后续交付。内核 short-write/EINTR 的确定性触发、删除前瞬时竞态的原子安全证明、ACL/xattr 等未纳入本实验的元数据不冒称已验证；不通过新增机制或放宽契约掩盖这些边界。
+- 候选 `fdd732bf0d305e689928bf8cff269535cc7ee194` 已提交并推送至 [PR #2](https://github.com/chinayangxiaowei/thinworkspace/pull/2)，实验 6 个文件、新 fuzz harness 及其配置全部纳入，自动 corpus 未提交。GPT-6 Astra / `xhigh` 对该精确提交完成正式审核，逐条核对 11 条验收断言并给出 **Approve**，未发现阻断性实现、测试、配置或文档问题。审核与后续 Verification 证据已汇总到 [PR 进展](https://github.com/chinayangxiaowei/thinworkspace/pull/2#issuecomment-5645915953)；不是人工阶段签字。
+- 主 Agent 在候选未改变时，再次运行上方真实双卷 release 全 workspace 命令，终态退出 0，**111 passed、0 failed、0 ignored**。本次另保留 `target/p0-materialize-tests/` 下 `fixture-parent-same-volume-63461-19/case`（登记失败，观测 device `16777240`、inode `34531875`）、`fixture-parent-same-volume-63461-21/case`（替换对象）和 `fixture-parent-same-volume-63461-31/case`（未知项）。这些观测不产生删除授权。
+- 主 Agent 核对镜像与精确挂载点关联后，执行 `hdiutil detach /private/tmp/thinws-p0-materialize.OC4JPT/mounted`，退出 0；随后 `hdiutil info -plist` 不再列出本镜像，未使用 force。镜像文件仍为 `134217728` 字节，和当前 worktree、变异原始日志/scratch、自动 fuzz 语料及历史失败现场一并由主 Agent 明确保留，用于 P0 复核，不要求用户立即手工删除；保留不等于已清理，不按名称或观测值重新认领未知对象。
+- [远端 CI 34693867239](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34693867239) 对上述精确 head 终态为 success，UTC `2026-09-12T13:00:47Z` 完成。主 Agent 核对实际日志：真实双卷 debug/release 各 **111 passed、0 failed、0 ignored**（单元测试内部 fork 的 1 项输出不重复计入）；全 workspace **514 mutants = 418 caught + 96 unviable，0 missed、0 timeout**；path/layout 两项 fuzz 分别执行 **699338/2724351** 次、各 61 秒，无 crash/hang，测试卷普通卸载成功。不是把本机数量相加后推测远端结果。
+- 合并前再次核对 PR head、目标分支和门禁，目标仍为 `2e29f88a1aae2ee53ce52dbc38a7c0765b58cb15`，head 与正式审核一致。使用精确 head 保护合并 [PR #2](https://github.com/chinayangxiaowei/thinworkspace/pull/2)，远端确认 UTC `2026-09-12T13:04:37Z` 已合并，合并提交为 `df989a8730057f26622363399ea4b046245d5365`。本任务结论为 **Go，仅限上述预定义实验断言及已声明边界**；收口证据发布后按 Done 管理，保留的工作区与现场由主 Agent 持有，不要求人工立即清理。P0.b 还依赖 P0-03，整个 P0 及 P1 均未完成或放行。
+- 合并提交的 [main CI 34695413077](https://github.com/chinayangxiaowei/thinworkspace/actions/runs/34695413077) 已触发，当前仍执行中；它不是前述候选 CI，不冒称已通过。若发现集成回归，按任务流程回到 In Progress 处理。
+- 未执行及限制：P0 阶段长预算 fuzz、Git/Base、跨进程强杀恢复分别按原计划后续交付。内核 short-write/EINTR 的确定性触发、删除前瞬时竞态的原子安全证明、ACL/xattr 等未纳入本实验的元数据不冒称已验证；不通过新增机制或放宽契约掩盖这些边界。
+
+当前两文件状态联动由 GPT-6 Astra / `xhigh` 只读复核通过。主 Agent 再次执行《任务流程》原样通用命令（fmt、Clippy、普通 `cargo test --workspace --all-targets`），全部退出 0，普通测试 **109 passed、0 failed、2 ignored**；本机专用卷已卸载，两个默认忽略的跨卷用例在这次纯文档检查中未执行，不替代前述两次 profile 的完整 111 项证据。相关 50 个本地链接与 diff 检查通过。此普通命令未加 `--nocapture`，成功测试的保留分类诊断未直接输出；运行后只读枚举观察到测试父目录下 UTC `12:39:08` 的 `fixture-parent-same-volume-13779-15`、`fixture-parent-same-volume-13779-16` 和 `fixture-parent-same-volume-13779-29`，均保留，不根据名称或时间推断删除归属。

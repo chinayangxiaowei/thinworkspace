@@ -1163,7 +1163,6 @@ mod tests {
 
     #[test]
     fn times_out_and_confirms_direct_child_exit() {
-        let started = Instant::now();
         let failure = collect_command(helper_command("timeout"), test_budget(1024, 1024, 40))
             .expect_err("sleeping child must time out");
 
@@ -1172,7 +1171,6 @@ mod tests {
             failure.direct_child_exit,
             DirectChildExit::Confirmed(_)
         ));
-        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

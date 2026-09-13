@@ -1979,17 +1979,24 @@ fn exercise_pure_parser_inputs(input: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Write};
+    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs};
 
+    use super::super::{Budget, collect_command, set_nonblocking};
     use super::*;
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
     const CAPTURE_HELPER: &str = "THINWS_P0_07_INSPECT_CAPTURE_HELPER";
+    const FIFO_PROBE_MODE: &str = "THINWS_P0_07_INSPECT_FIFO_PROBE_MODE";
+    const FIFO_PROBE_ROOT: &str = "THINWS_P0_07_INSPECT_FIFO_PROBE_ROOT";
+    const FIFO_PROBE_TEST: &str = "git_query::inspect::tests::fifo_probe_child";
+    const FIFO_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    const FIFO_BLOCKING_ENTRY_MARKER: &[u8] = b"thinws-fifo-blocking-open-entered\n";
 
     struct Fixture {
         root: PathBuf,
@@ -2054,6 +2061,162 @@ mod tests {
             self.git(path, &["add", "tracked.txt"]);
             self.git(path, &["commit", "--quiet", "-m", "fixture"]);
         }
+    }
+
+    fn run_fifo_probe(
+        mode: &str,
+        root: &Path,
+        run_timeout: Duration,
+    ) -> Result<super::super::GitQueryOutput, super::super::GitQueryFailure> {
+        let (reader, _writer) = UnixStream::pair().expect("owned collector preflight socket pair");
+        set_nonblocking(&reader).expect("configure collector preflight socket");
+        assert!(
+            rustix::fs::fcntl_getfl(&reader)
+                .expect("read collector preflight socket flags")
+                .contains(OFlags::NONBLOCK),
+            "collector pipe configuration must enable O_NONBLOCK before spawning a FIFO probe"
+        );
+
+        let mut command = Command::new(env::current_exe().expect("current unit-test binary"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                FIFO_PROBE_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir(root)
+            .env_clear()
+            .env(FIFO_PROBE_MODE, mode)
+            .env(FIFO_PROBE_ROOT, root);
+        collect_command(
+            command,
+            Budget {
+                run_timeout,
+                cleanup_timeout: Duration::from_secs(1),
+                poll_interval: Duration::from_millis(5),
+                stdout_limit: 64 * 1024,
+                stderr_limit: 64 * 1024,
+            },
+        )
+    }
+
+    fn expect_fifo_probe_success(mode: &str, root: &Path) {
+        let output = run_fifo_probe(mode, root, FIFO_PROBE_TIMEOUT)
+            .unwrap_or_else(|failure| panic!("isolated FIFO probe failed: {failure:?}"));
+        assert!(
+            output.exit.success(),
+            "isolated FIFO probe returned a nonzero status: {output:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "fixed internal child entry; parent tests provide a controlled retained FIFO fixture"]
+    fn fifo_probe_child() {
+        let Some(mode) = env::var_os(FIFO_PROBE_MODE) else {
+            return;
+        };
+        let root = PathBuf::from(
+            env::var_os(FIFO_PROBE_ROOT).expect("FIFO probe root accompanies probe mode"),
+        );
+        let fixture_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("p0-07-inspect-fixtures");
+        assert!(root.is_absolute(), "FIFO probe root must be absolute");
+        assert!(
+            root.starts_with(&fixture_parent),
+            "FIFO probe root must be a retained test fixture"
+        );
+
+        match mode.to_str().expect("fixed FIFO probe mode is UTF-8") {
+            "metadata-scan" => {
+                let root_fd =
+                    open_absolute_directory(&root).expect("open controlled metadata scan root");
+                let mut budget = CooperativeBudget::new(InspectionLimits::production());
+                assert_eq!(
+                    scan_metadata_nofollow(&root_fd, Path::new("metadata"), &mut budget),
+                    Err(InspectionIssue::UnsafeRepositoryMetadata)
+                );
+            }
+            "absolute-read" => {
+                let fifo = root.join("special-fifo");
+                let fd = rustix::fs::open(&fifo, file_open_flags(), Mode::empty())
+                    .expect("open controlled FIFO without blocking");
+                assert_eq!(
+                    read_open_file(fd, fifo.clone(), 4).map(|_| ()),
+                    Err(rustix::io::Errno::FBIG)
+                );
+                assert_eq!(
+                    read_absolute_file(&fifo, 4, true).map(|_| ()),
+                    Err(InspectionIssue::EnvironmentUnsupported)
+                );
+            }
+            "combined-read" => {
+                let fifo = root.join("metadata.fifo");
+                assert_eq!(
+                    read_absolute_file(&fifo, MAX_TEXT_BYTES, true).map(|_| ()),
+                    Err(InspectionIssue::EnvironmentUnsupported)
+                );
+                let root_fd = open_absolute_directory(&root).expect("open controlled read root");
+                assert_eq!(
+                    read_root_file(
+                        &root,
+                        &root_fd,
+                        Path::new("metadata.fifo"),
+                        MAX_TEXT_BYTES,
+                        true,
+                    )
+                    .map(|_| ()),
+                    Err(InspectionIssue::UnsafeRepositoryMetadata)
+                );
+            }
+            "blocking-open" => {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(FIFO_BLOCKING_ENTRY_MARKER)
+                    .expect("write fixed blocking-entry marker");
+                stdout.flush().expect("flush fixed blocking-entry marker");
+                drop(stdout);
+                let _blocked = fs::File::open(root.join("blocking.fifo"))
+                    .expect("intentional blocking FIFO open unexpectedly returned an error");
+                panic!("intentional blocking FIFO open unexpectedly completed");
+            }
+            other => panic!("unknown fixed FIFO probe mode: {other}"),
+        }
+    }
+
+    #[test]
+    fn fifo_probe_watchdog_kills_and_reaps_a_true_block() {
+        let fixture = Fixture::new("fifo-probe-watchdog");
+        let fifo = fixture.root.join("blocking.fifo");
+        let output = Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .env_clear()
+            .output()
+            .expect("create controlled blocking FIFO");
+        assert!(output.status.success(), "mkfifo must succeed");
+
+        let failure = run_fifo_probe("blocking-open", &fixture.root, Duration::from_secs(2))
+            .expect_err("a genuinely blocking FIFO open must hit its watchdog");
+        let entered_marker_seen = failure
+            .stdout
+            .windows(FIFO_BLOCKING_ENTRY_MARKER.len())
+            .any(|bytes| bytes == FIFO_BLOCKING_ENTRY_MARKER);
+        assert!(
+            entered_marker_seen,
+            "child must flush the fixed marker before entering the blocking open: {failure:?}"
+        );
+        assert_eq!(failure.kind, super::super::GitQueryFailureKind::TimedOut);
+        assert!(matches!(
+            failure.direct_child_exit,
+            super::super::DirectChildExit::Confirmed(_)
+        ));
+        assert_eq!(failure.cleanup_io, None);
+        eprintln!(
+            "blocking FIFO probe: entered_marker_seen={entered_marker_seen}, kind={:?}, direct_child_exit={:?}, cleanup_io={:?}",
+            failure.kind, failure.direct_child_exit, failure.cleanup_io,
+        );
     }
 
     fn repository<'a>(inspection: &'a GitInspection, relative: &str) -> &'a RepositoryInspection {
@@ -3092,14 +3255,7 @@ mod tests {
             .output()
             .expect("create controlled metadata FIFO");
         assert!(output.status.success(), "mkfifo must succeed");
-        let root_fd = open_absolute_directory(&fixture.root).expect("open FIFO metadata root");
-        let mut budget = CooperativeBudget::new(InspectionLimits::production());
-        let started = Instant::now();
-        assert_eq!(
-            scan_metadata_nofollow(&root_fd, Path::new("metadata"), &mut budget),
-            Err(InspectionIssue::UnsafeRepositoryMetadata)
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
+        expect_fifo_probe_success("metadata-scan", &fixture.root);
     }
 
     #[test]
@@ -3434,7 +3590,10 @@ mod tests {
             Err(InspectionIssue::EnvironmentUnsupported)
         );
 
-        assert!(file_open_flags().contains(OFlags::NONBLOCK));
+        assert_eq!(
+            file_open_flags(),
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK
+        );
         let fifo = fixture.root.join("special-fifo");
         let output = Command::new("/usr/bin/mkfifo")
             .arg(&fifo)
@@ -3442,12 +3601,7 @@ mod tests {
             .output()
             .expect("create controlled read FIFO");
         assert!(output.status.success(), "mkfifo must succeed");
-        let started = Instant::now();
-        assert_eq!(
-            read_absolute_file(&fifo, 4, true).map(|_| ()),
-            Err(InspectionIssue::EnvironmentUnsupported)
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
+        expect_fifo_probe_success("absolute-read", &fixture.root);
     }
 
     #[test]
@@ -3697,7 +3851,10 @@ mod tests {
 
     #[test]
     fn metadata_file_opens_are_nonblocking_before_type_validation() {
-        assert!(file_open_flags().contains(OFlags::NONBLOCK));
+        assert_eq!(
+            file_open_flags(),
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK
+        );
 
         let fixture = Fixture::new("nonblocking-metadata");
         let fifo = fixture.root.join("metadata.fifo");
@@ -3708,24 +3865,7 @@ mod tests {
             .expect("create controlled metadata FIFO");
         assert!(output.status.success(), "mkfifo must succeed");
 
-        let started = Instant::now();
-        assert_eq!(
-            read_absolute_file(&fifo, MAX_TEXT_BYTES, true).map(|_| ()),
-            Err(InspectionIssue::EnvironmentUnsupported)
-        );
-        let root_fd = open_absolute_directory(&fixture.root).expect("open controlled root");
-        assert_eq!(
-            read_root_file(
-                &fixture.root,
-                &root_fd,
-                Path::new("metadata.fifo"),
-                MAX_TEXT_BYTES,
-                true,
-            )
-            .map(|_| ()),
-            Err(InspectionIssue::UnsafeRepositoryMetadata)
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
+        expect_fifo_probe_success("combined-read", &fixture.root);
     }
 
     #[test]

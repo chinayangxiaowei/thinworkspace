@@ -1,9 +1,13 @@
-//! Pure parsing and removal-policy experiments for P0-07.
+//! Parsing, removal-policy, and bounded internal Git-query experiments for P0-07.
 //!
-//! This crate performs no Git, filesystem, process, logging, or deletion I/O.
-//! It is not a Phase 1 Port or service implementation.
+//! Parsing and policy evaluation are pure. The [`git_query`] module is the only
+//! process-I/O boundary and permits four fixed, read-only `/usr/bin/git` query
+//! shapes. This crate performs no logging or deletion I/O and is not a Phase 1
+//! Port or service implementation.
 
 #![forbid(unsafe_code)]
+
+pub mod git_query;
 
 use std::collections::BTreeSet;
 use std::fmt;

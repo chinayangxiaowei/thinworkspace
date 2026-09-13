@@ -10,3 +10,4 @@ publish = false
 name = "thinws_p0_cleanup"
 
 [dependencies]
+rustix = { version = "1", features = ["fs"] }

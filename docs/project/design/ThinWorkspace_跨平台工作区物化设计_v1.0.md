@@ -50,7 +50,7 @@ trait PlatformProbe {
 - 对特定后端的 `supported | unsupported | unknown` 事实；
 - 无法得出结论的结构化原因。
 
-`inspect_materialization_paths` 接收实际 Base source、target root（不存在时为最近已存在 parent）、staging、trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
+`inspect_materialization_paths` 接收实际原始 source 目录、target root（不存在时为最近已存在 parent）、staging、trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
 
 Probe 不返回 `use_full_copy=true` 之类产品决策。
 
@@ -72,9 +72,19 @@ trait WorkspaceMaterializer {
 }
 ```
 
-Materializer 只处理从不可变 Base 到 Workspace 源码项的物化和回收，不管 Git administrative state、构建目录、SQLite 状态或产品降级决策。目标 Workspace root 可以由 GitBackend 预先创建，并且只允许存在经计划声明的 `.git` 平台控制项；Base 构建阶段必须拒绝会与该保留项冲突的来源。Materializer 不覆盖、克隆或删除该控制项。
+Materializer 从原始目录物化计划指定的文件项；它不调用 Git、不按 `.gitignore` 或 Git 跟踪状态过滤、不识别开发语言，也不制定构建目录或缓存策略。目标必须不存在或是本操作已验证的空目录；没有预建 `.git` 控制项。来源 `.git` 与其他名称同样处理，不保留 Git 特判。
 
-`materialize` 的失败可携带 partial receipt。`destroy_materialization` 必须以 dirfd-relative/no-follow 方式幂等清理它管理的源码项，保留已声明的平台控制项，并返回本次删除、原本不存在和仍未清理的对象；不能只返回 `()` 而丢失恢复证据。
+`materialize` 的失败可携带 partial receipt。`destroy_materialization` 在 Application 授权后，以 dirfd-relative/no-follow 方式幂等清理已验证副本内的全部内容，包括 `.git`、未跟踪文件和后来生成的文件；不跟随链接清理外部目标。平台状态和日志在副本 root 外，不属于该范围。返回本次删除、原本不存在和仍未清理的对象，不能丢失恢复证据。
+
+### 3.3 输入内容与保证范围
+
+源是本次观察到的磁盘目录，不是 Git 提交，也不具有天然不可变性。支持目录、普通文件和符号链接；特殊文件、子挂载或无法表示的名称明确失败，不静默跳过。硬链接的每个普通文件目录项分别创建独立副本，不保留硬链接拓扑，不使用硬链接共享可写源。
+
+首版验收的共同保真范围为相对名称、类型、普通文件字节/长度/权限、目录权限、符号链接文本，以及普通文件和目录的 mtime（按源/目标实际精度比较）。目录权限和 mtime 在子项完成后设置；无法满足这些保证则失败。源的 atime 可能因读取更新，不把整个源元数据完全不变作为承诺。
+
+ctime、出生时间、所有者、ACL、xattr、file flags 和稀疏分配布局不属于首版完整保真保证；各后端额外保留的属性不能泛化为所有后端共有。Receipt 标明保真范围和不保证项，用户手册必须提示，不用保留 mtime 推导缓存命中。已有 P0-02 未验证的 mtime/完整目录范围必须在新实验补证，不能直接继承为已通过。
+
+调用者在创建窗口暂停源写入；执行前后清单、身份与内容核对只用于发现变化，不构成活跃多文件事务的原子快照。发现变化停止；用户下次新建须重新 Probe/Plan，不自动循环重试追赶源。symlink 和 Git 指针均不重定位、不展开外部内容，不承诺副本完全自足。
 
 ---
 
@@ -120,7 +130,7 @@ AllowFullCopyOnCowUnsupported
 
 每次物化都必须针对实际使用的以下位置检测：
 
-- Base source root；
+- 原始 source root；
 - target root；尚不存在时检测最近已存在的 parent；
 - staging root；
 - trash root；
@@ -140,7 +150,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 
 - 路径组件没有被符号链接替换；
 - 目录身份、Volume ID 和挂载属性未变；
-- 目标仍符合计划状态：尚不存在，或只含计划声明的受控项（例如 GitBackend 创建的 `.git` 控制项）；
+- 源与 data root 不相等且互不包含；目标仍不存在或是本操作已验证的空目录；
 - 写入性和剩余空间未出现已知阻断条件。
 
 重验失败必须以结构化的 plan-stale/路径变化事实返回 Application，由 Application 回到 Probe/Plan；不能带着过期 Plan 执行。Adapter 在逐项遍历和发布等关键边界仍须使用 no-follow 身份检查，不能把入口重验当成整个执行期间的永久保证。
@@ -167,7 +177,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 Core 再依当前产品阶段和用户显式政策决定是否执行
 ```
 
-Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS data root，全部受控子树必须位于初始化时记录的同一 Volume；`--allow-copy` 只允许在该布局内把 CoW 不支持降级为 Full Copy，不是跨卷开关。
+Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS data root，全部受控子树及本次外部 source 必须位于初始化时记录的同一 Volume；`--allow-copy` 只允许在该布局内把 CoW 不支持降级为 Full Copy，不是跨卷开关。外部 source 可以与 data root 同卷但不得互相包含。
 
 ---
 
@@ -178,10 +188,10 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS d
 - 所有安全关键遍历使用 dirfd-relative/no-follow 方式；
 - 目录逐层创建，不通过 shell、glob 或未验证路径操作；
 - 使用 `fstatat(..., AT_SYMLINK_NOFOLLOW)` 区分普通文件、目录和符号链接；
-- 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与 Base 证据；持有源文件 FD，调用 `fclonefileat(source_fd, target_dirfd, target_name, CLONE_NOFOLLOW_ANY)`，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
+- 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与源清单证据；持有源文件 FD，调用 `fclonefileat(source_fd, target_dirfd, target_name, CLONE_NOFOLLOW_ANY)`，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
 - symlink 使用 `readlinkat/symlinkat` 复制 link text，不跟随目标。link text 可以指向树外，但平台不得在物化和删除中解引用它。
 
-只有对每个应克隆普通文件的真实 `fclonefileat` 调用都成功，且最终树校验通过，Receipt 才能记录 `actual_mode=cow-clone` 和 `cow=confirmed`。
+只有至少一个普通文件实际执行克隆、每个应克隆普通文件的真实 `fclonefileat` 调用都成功且最终树校验通过，Receipt 才能记录 `cow=confirmed`。空树或仅含目录/链接的树可以创建成功，但 CoW 记为 `not-used`，不能以空集合证明块共享。
 
 API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/clonefile.2)：`fclonefileat` 的源是文件 FD；源目录 FD 加源名称的五参数形式属于 `clonefileat`。
 
@@ -225,3 +235,6 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 - Receipt 与结构化错误契约测试；
 - 路径和符号链接的模糊测试；
 - 降级、删除和安全判断的变异测试。
+- 非 Git 目录、原样 `.git`、未跟踪/ignored 路径均被物化；不存在 Git 预建控制项或内容过滤；
+- 本节保真范围、源活跃修改拒绝、源与 data root 包含关系、源消失后的副本使用、单侧写入隔离；
+- 获准清理包含副本内部 Git 数据但不触达外部指针/符号链接目标。

@@ -1,58 +1,42 @@
 # ThinWorkspace Phase 1 单机 CLI 详细设计
 
-**版本：v1.0｜文档性质：详细设计｜适用阶段：Phase 1**
+**版本：v1.0（首发前修订）｜文档性质：详细设计｜适用阶段：Phase 1**
 
 ## 一、文档职责
 
-本文档是 Phase 1 内部设计的唯一详细来源，管理：
+本文是单机组件、实例身份、Workspace 生命周期、只读 Git 检查和恢复的唯一详细设计来源。
 
-- 单机 CLI 组件与 Port 边界；
-- bootstrap config、data root 身份与受控目录布局；
-- Repository、Base、Workspace、Operation 和 Execution 的内部语义；
-- Git 托管拓扑、Base 身份、分支与删除保护；
-- Workspace 状态机、中断恢复、GC 和进程登记。
+非职责：物化与元数据保真由《跨平台工作区物化设计》管理；公开命令、输出和错误码由用户手册管理；系统 API 由《技术栈》管理；日志字段由《开发规范》管理；commit 交付由《任务流程》管理。
 
-跨平台物化契约由《跨平台工作区物化设计》管理；用户可见命令、输出和错误码由 Phase 1 用户操作手册管理；依赖与系统 API 选择由《技术栈》管理。
-
----
+本次简化依据 [ADR-0002](../architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)。不再维护 Repository、Base、托管分支或 Git 导入生命周期。
 
 ## 二、部署与分层
 
-Phase 1 只有一个按需启动的 `thinws` 进程，没有 daemon、HTTP/gRPC、消息队列或远程控制面。
+Phase 1 是同步、按需运行的本机 CLI，没有 daemon、网络服务或 LLM 调用。
 
 ```text
-CLI
-  ↓
-Application Use Cases
-  ↓
-Core + Ports
-  ↑
-Git / macOS / SQLite Adapters
+CLI → Application → Core / Ports ← macOS / Git CLI / SQLite Adapters
 ```
 
-依赖只能指向 Core/Ports。Core/Application 不识别 APFS、SQLite、Git CLI 或具体系统调用。
+Core/Application 不直接调用 OS、Git CLI 或 SQLite。Phase 1 只有以下七个 Port：
 
-Phase 1 只有七个 Port：
+| Port | 唯一职责 |
+|---|---|
+| BootstrapStore | 读取、校验和发布实例配置与 data root 标记 |
+| PlatformProbe | 报告实际路径与候选后端能力 |
+| WorkspaceMaterializer | 目录物化、空间测量及获准的范围内清理 |
+| GitInspector | 发现工作区内仓库并只读报告已跟踪变更；不写 refs/index/config、不提交、不联网 |
+| ProcessProbe | 尽力报告当前用户可见的外部进程占用，不托管或终止进程 |
+| MetadataStore | Workspace、operation、Receipt 和删除结果的持久化 |
+| LifecycleLock | bootstrap 与 data root 生命周期的有界互斥 |
 
-```text
-BootstrapStore
-PlatformProbe
-WorkspaceMaterializer
-GitBackend
-ProcessSupervisor
-MetadataStore
-LifecycleLock
-```
-
-ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCodec、ExecutionBackend 均不在 Phase 1 代码中出现。
-
----
+不保留旧 GitBackend 的 attach/detach/fetch/commit 等方法，不新增 AuditService 或交付编排 Port。普通持久日志使用既有日志设施。
 
 ## 三、实例与 data root
 
-### 3.1 Bootstrap 身份
+### 3.1 实例身份
 
-macOS 生产环境使用：
+macOS 固定 bootstrap 位置：
 
 ```text
 ~/Library/Application Support/ThinWorkspace/
@@ -60,242 +44,147 @@ macOS 生产环境使用：
 └── init.lock
 ```
 
-`config.toml` 是定位 data root 的唯一 bootstrap 指针，至少保存 schema version、InstanceId、规范绝对 data root 和 Volume ID。生产 CLI 不提供环境变量或隐藏参数切换配置位置；测试只能通过显式依赖注入替换。
+配置保存 schema version、InstanceId、规范绝对 data root 和 Volume ID。生产 CLI 不提供隐藏环境变量切换位置；测试通过依赖注入替换。
 
-data root 中的 `.thinws-root.toml` 保存同一 InstanceId、规范路径、Volume ID 和 `initializing|ready` 状态。两侧必须互相校验；任何一侧缺失或冲突时，恢复不得猜测覆盖另一侧。
+data root 的 `.thinws-root.toml` 保存匹配的实例、路径、卷和 `initializing|ready` 状态。两侧缺失或冲突时不能猜测覆盖。
 
-### 3.2 初始化协议
+### 3.2 初始化
 
-```text
-获取 bootstrap lock
-  → 规范化路径并验证最近已存在父目录
-  → 创建/验证 0700 data root
-  → 写 initializing 根标记
-  → 创建受控子树和 SQLite
-  → 原子发布 ready 根标记
-  → 最后原子发布 bootstrap config
-```
+取得 bootstrap lock → 验证最近存在父目录 → 创建/验证私有 data root → 写 initializing 标记 → 建立受控目录和 SQLite → 原子发布 ready 标记 → 最后发布 bootstrap config。
 
-全新或空目录可以初始化。非空目录只有在存在本平台上一次中断初始化的可验证标记，且 owner、Volume ID 和目录布局全部匹配时才能续跑。Phase 1 不提供 data root reset/migrate。
+只接管新目录、空目录或能证明属于同一次中断初始化的目录。没有 reset/migrate。细化的幂等及错误行为由手册管理。
 
-### 3.3 受控布局
+### 3.3 布局与源目录
 
 ```text
 thinws-data/
 ├── .thinws-root.toml
 ├── metadata/state.db
-├── repositories/<repository-id>/repo.git/
-├── bases/<base-id>/tree/
+├── logs/operations.jsonl
 ├── workspaces/<workspace-id>/.state/incomplete
 ├── workspaces/<workspace-id>/root/
 ├── staging/
-├── builds/<workspace-id>/
 └── trash/
 ```
 
-全部路径由已解析的类型 ID 推导，不接受任意 Workspace 绝对路径。全部受控子树必须在初始化时记录的同一 APFS Volume，不接受子挂载或符号链接重定向。`.state` 位于 Git root `root/` 之外。
+受控目标由 WorkspaceId 推导，全部受控子树位于登记的同一 APFS Volume。源目录是用户提供的只读输入，不需要位于 data root 内，但首版要求与 data root 同卷；拒绝源与 data root 相等或互相包含，防止把平台目录递归复制进自身。根和路径组件不接受未验证链接，遍历边界以物化设计为准。
 
----
+`.state` 与日志均在副本 `root/` 外；`.git` 不是平台保留项，它仅是被复制的目录内容。用户不能手工移动或改写平台管理目录。
 
-## 四、内部身份与持久化
+## 四、身份与持久化
 
-InstanceId、RepositoryId、WorkspaceId、ExecutionId 和 OperationId 都是不以物理路径为身份的强类型 ID。Repository/Workspace/Execution/Operation ID 的公开序列化格式由 Phase 1 用户操作手册管理；InstanceId 不属于常规 CLI 契约。BaseId 是由 BaseKey 规范字节派生的内部内容/策略身份；具体哈希与编码由技术栈/实现 ADR 冻结。
+InstanceId、WorkspaceId、OperationId 是强类型 ID。源路径不是新领域对象，不创建 SourceId/RepositoryId/BaseId。Workspace 记录源的规范位置、创建时路径/卷证据、创建策略、受控目标、状态和物化 Receipt；这些是本次复制的来源证据，不是 Git 基线或持续同步关系。
 
-SQLite 至少维护：
+SQLite 维护版本、活跃 Workspace、operation、Plan/Receipt、不可变删除意图及最小删除 tombstone：
 
-- schema version；
-- Repository、Base 和活跃 Workspace；
-- Workspace 状态、Plan/Receipt 和不可变删除意图；
-- repo add/fetch、Base build、Workspace create/remove 和 GC 的 operation；
-- 活跃 Execution 登记；
-- 删除完成的 Workspace tombstone。
+- 活跃名称、受控目标唯一；ID、状态、关系由数据库约束；
+- operation 与 payload 版本化；未知关键版本拒绝自动恢复；
+- 删除活跃记录与写 tombstone 在同一事务完成；
+- 不在数据库事务中等待文件物化、Git 检查或子进程。
 
-数据库级不变量：
+源目录后续消失不影响已创建副本的普通使用或清理；恢复未完成创建时仍须重新验证源。没有 Git、文件系统和 SQLite 的跨系统事务。
 
-- Repository name 唯一，`(source_kind, source_key)` 唯一；
-- 活跃 Workspace name、受控 path 和 managed branch 分别唯一；
-- 类型 ID 、状态值和活跃关系用 CHECK/PK/FK 约束；
-- Deleting 记录必须带开始时的 flags 和 branch OID；
-- 删除活跃 Workspace 与写 tombstone 在同一 SQLite 事务内完成；
-- Plan、Receipt、operation payload 全部带版本，未知关键版本拒绝读取或复用。
+## 五、并发与源一致性
 
-SQLite 不在事务中等待 Git、文件物化或子进程。Git、文件系统和 SQLite 不组成分布式事务；所有外部写入依靠“先 operation/过渡状态，后 Receipt，再完成状态”恢复。
+bootstrap lock 仅保护初始化；data-root lifecycle lock 串行创建、删除、repair 和 GC，均有界等待。它不能阻止用户工具读写源或副本，SQLite busy timeout 不能替代 OS 锁。
 
----
+创建期间由调用者暂停源目录写入；物化器检测到变化则停止并保留失败证据。首次没有原子目录快照、后台冻结、锁扫描重写或缓存一致性修复。创建成功后副本不跟随源更新。具体文件范围、时间属性和证据在物化设计中定义。
 
-## 五、锁和并发
+## 六、只读 Git 检查
 
-LifecycleLock 有两个 scope：
+### 6.1 发现范围与外部引用
 
-- bootstrap lock：仅保护首次 `init`，位于用户配置目录；
-- data-root lifecycle lock：串行 repo add/fetch、Workspace create/remove、repair 和 GC。
+创建不调用 Git，不以 Git 特性拒绝目录。查询或清理时，GitInspector 在已验证副本范围内按需发现根仓库和嵌套仓库，包括 submodule；不跟随目录符号链接，不进入 `.git` 管理目录枚举“子项目”，也不因父仓库忽略某目录而漏掉其中真实存在的子仓库。
 
-两者都有界等待。长时间 `workspace exec` 不持有 lifecycle lock，只在启动和结束登记时短暂持有。SQLite busy timeout 不替代 OS 锁。具体时限是 CLI 公开契约，以用户手册为准。
+只对具有本地 Git 标记的目录进行检查，不能通过 Git 向上搜索把平台父目录的仓库认成副本仓库。解析 Git 元数据引用时核验实际 gitdir、commondir、worktree 是否仍在此副本内；外部、损坏、不可读或无法安全解释的引用返回检查不完整，不自动修复、初始化或改写原仓库。
 
----
+普通自包含 `.git/`、副本内可解析的 submodule 元数据可检查；原样复制的外部 gitfile/commondir/绝对 worktree 引用不自动隔离。外部符号链接也只保留文本。创建交付的是文件副本，不承诺用户任意 Git 命令或外部访问均与来源隔离。
 
-## 六、Repository 与 Git 拓扑
+### 6.2 已跟踪内容与检查报告
 
-### 6.1 托管拓扑
+逐仓库检查 HEAD 与 index、index 与工作树的差异。包括暂存新增、修改、删除、重命名、模式变化、冲突和 gitlink 引用变化；“跟踪过”指当前 HEAD/index 管理的内容，不扫描全部历史中已移除的路径。
 
-Phase 1 使用“平台托管 bare repository＋linked worktree”：
+未跟踪、ignored 文件不计数、不提示、不作为 dirty。子仓库内的 tracked 修改独立报告；仅有子仓库未跟踪文件不能使父仓库被误报 dirty。缺失且未初始化的 submodule 不自动下载；已检测到的 gitlink 变化仍需报告。
 
-- 本机路径或远程 locator 只是导入来源；
-- 平台不使用 alternates，托管 objects 不依赖来源目录继续存活；
-- 来源工作树的未提交/未跟踪内容不导入；
-- 来源 heads/tags 与平台可写分支使用不同 ref namespace；
-- 平台更新来源所用的内部 remote/ref namespace 与用户直接 push 使用的 `origin` 分离，用户修改 `origin` 不改变 `repo fetch` 的来源；
-- Workspace linked-worktree administrative state 全部属于平台 bare repository，不修改来源仓库的 worktree 登记。
+报告分开表达仓库发现完整性与各仓库 `clean|dirty|unknown` 事实。没有仓库且发现完整为 `not-applicable`，不是 Git clean。缺少 Git、扫描失败、超时、配置/转换无法安全查询等返回 unknown，不冒充无修改。具体只读命令与程序执行限制由技术栈管理。
 
-Repository source identity 是内部幂等键：本机来源使用 Git common directory 的绝对 realpath，使同一 repository 的不同 linked worktree 命中同一来源，独立 clone 保持不同；远程来源使用通过公开语法校验的原始 UTF-8 locator，不猜测不同写法等价。默认名称、公开 locator 语法和冲突错误由用户手册管理。
+### 6.3 分支与交付非职责
 
-`repo add/fetch` 的来源语法、可见更新范围和错误行为以用户手册为准。Git common directory 的解析、具体 refspec、命令环境和配置以《技术栈》为准。
+平台不新建分支、不 commit/push/PR、不计算提交是否已发布或由其他引用保护。镜像复制当时已有的文件和 Git 元数据；直接使用 Git 的行为由用户环境决定。副本内的 Git 数据也会随清理删除，不承诺保留分支、stash 或仅存在于副本的提交。
 
-### 6.2 Base 解析与身份
-
-`ResolvedBase` 同时保存 commit OID 和 tree OID。Workspace 分支从 commit OID 创建；Base 内容按 tree 和 checkout 语义复用。
-
-```text
-BaseKeyV1 {
-  repository_id,
-  tree_oid_algorithm,
-  tree_oid,
-  checkout_policy_digest,
-  filesystem_semantics_digest
-}
-```
-
-checkout policy digest 覆盖冻结的 Git checkout 行为、相关 attributes 和实现兼容版本；filesystem semantics digest 覆盖大小写、Unicode 归一化和符号链接支持。BaseKey 必须有版本化、跨平台确定的规范编码和 golden vectors，不使用调试输出、分隔符拼接、本机结构体布局或序列化库默认格式生成身份。哈希与字节编码技术由《技术栈》选择，并在实现 ADR 中冻结；不在架构、规范和手册中复制。
-
-Base 在同卷 staging 中生成，完成路径/模式/内容 manifest 校验和 Receipt 后原子发布。复用前必须验证 Receipt、归属和 manifest；损坏 Base 隔离后重建。
-
-### 6.3 Workspace 分支
-
-每个 Workspace 使用由完整 WorkspaceId 推导的唯一托管分支：
-
-```text
-refs/heads/thinws/<workspace-id>
-```
-
-显示名称不进入 ref。Phase 1 不支持 detached Workspace，也不允许两个 Workspace 绑定同一可写分支。
-
----
+任务如何在非原分支交付并向主管 Agent 提供有效 commit，只有《任务流程》负责；不变成删除前不可绕过的验收模型。
 
 ## 七、Workspace 状态机
 
-可见活跃状态只有：
+活跃状态仅 `Creating / Ready / Deleting / Error`：
 
 ```text
-Creating
-Ready
-Deleting
-Error
-```
-
-允许的迁移只有：
-
-```text
-∅ → Creating
-Creating → Ready | Error
+∅ → Creating → Ready | Error
 Ready → Deleting | Error
 Deleting → ∅ | Error
-Error → Ready       仅 doctor --repair 完整重验成功
-Error → Deleting    仅显式 remove 且删除保护可证明
+Error → Ready       仅显式 repair 完整重验成功
+Error → Deleting    仅显式 remove 且范围/意图可证明
 ```
 
-目录存在不等于 Ready。只有 Git 验证、Base/Git/Materialization Receipts 和 SQLite 状态全部一致时，才能对外返回 Workspace 路径或执行命令。
+Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git clean，也不要求任何提交或分支。
 
 ### 7.1 创建
 
-```text
-写 operation 与 Creating
-  → 解析并固定 commit/tree
-  → 生成或复用 Base
-  → 建立 .state/incomplete
-  → 注册 no-checkout linked worktree 和唯一分支
-  → 依《跨平台工作区物化设计》在保留 .git 控制项的前提下填充源码
-  → 初始化独立 index 并验证 clean
-  → 写完整 Receipts
-  → 移除 incomplete
-  → 写 Ready 并完成 operation
-```
+写 operation/Creating → 建立 incomplete → Probe/Plan → 对空目标物化原始目录 → 验证 Receipt 和来源观察结果 → 移除 incomplete → 写 Ready/完成 operation。
 
-任何一步中断都保留过渡状态和已知事实。普通查询不续跑，只有显式 repair 可以协调。
+同名重复请求的公开规则由手册管理；不会隐式刷新已有副本。失败保留已知创建对象和 partial receipt；无法确认回滚时不继续第二后端。repair 不把原样目录存在当作成功。
 
-### 7.2 删除
+### 7.2 清理
 
-```text
-运行 Volume/归属/dirty/进程 removal guards
-  → 如请求删分支，验证提交保护
-  → 写 Deleting 和不可变删除意图
-  → 每个破坏性步骤前重验适用保护
-  → 由 Materializer 以 no-follow 方式幂等清理源码项，并清理构建目录
-  → 在工作树只剩已验证平台控制项后，由 GitBackend 精确解除 linked-worktree 登记并移除 root
-  → 如请求删分支，使用带预期 OID 的 ref transaction
-  → 同一 SQLite 事务删活跃记录并写 tombstone
-  → 完成 operation
-```
+用户停止相关工具后，按以下顺序执行：
 
-默认保留分支。`--force` 只放开 dirty 内容保护；`--delete-branch` 是独立意图，不能绕过未保护提交。重试 remove 必须与持久化 flags 完全一致；repair 只按已持久化意图续跑。
+1. 验证实例、WorkspaceId、卷和目标归属；运行只读 Git 与进程检查。
+2. Application 按手册决定普通拒绝或接受显式强制意图；拒绝发生在破坏性写入之前。
+3. 清理前写持久日志，并持久化 operation、原始检查摘要、force 标记和 Deleting 意图。
+4. 每个破坏性步骤前重验范围、卷和适用的占用保护；Materializer 以 no-follow 清理整个副本，包括其中 `.git` 和后来生成的内容。
+5. 写 Destroy Receipt；在同一事务删除活跃记录并保留最小 tombstone；记录完成结果。
 
-tombstone 至少保存 WorkspaceId、RepositoryId、名称、删除 OperationId、时间和结果。它不参与活跃名称解析，不是 Base/目录正引用，也不能单独授权删除归属不明的残留。
+强制操作不要求说明理由、commit 证明、主管批准或在线服务；只保留日志。日志字段与敏感信息边界见《开发规范》§13。清理前无法持久化日志时停止且报告 I/O 错误；已开始后失败/中断保留 operation 和剩余范围，不能写成成功。
 
----
+普通清理只保护已跟踪变更，不保护未跟踪文件，也不检查未推送提交。强制可绕过 dirty 或 Git 检查不完整，不能绕过路径/卷归属或已确认进程占用。非 Git 目录也可正常清理。
+
+### 7.3 删除重试与日志
+
+尚未写 Deleting 的普通拒绝不固定后续 flags；用户可重新执行显式强制清理。一旦持久化删除意图，重试 flags 必须一致，repair 只续跑原意图，不自行加 force。
+
+删除已经部分执行时不能把“删除本身造成的 tracked 删除”当作新的准入失败；恢复依据原检查结果和删除意图续跑，并重验对象归属及当前占用。发现新写入、替换对象或无法解释的范围变化则停止，不把它自动纳入旧意图。
+
+日志位于 data root 的 `logs/`，不随 Workspace 清理或 GC 删除。它是普通本机日志，不宣称防篡改或构成成果证明。中断可能只有开始事件；operation 和显式 repair 解释未完成结果，不引入第二套日志恢复状态机。
 
 ## 八、查询与恢复
 
-- `workspace list/status` 可以展示全部活跃状态；
-- `workspace path/diff/exec` 只允许 Ready；
-- 普通查询只读检查一致性，不写 SQLite、不修改 Git、不清理目录；
-- `doctor --repair` 获取 lifecycle lock 后，只续跑能从 operation、Receipt、归属和当前系统事实证明安全的步骤；
-- 无法证明时保留 Error/未完成 operation 并报告，不按目录外观猜测。
+list/status 展示全部活跃状态；path 仅 Ready。查询不写 SQLite/Git，不自动清理或恢复。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
 
-repo add/fetch、Base build 和 GC 也使用相同的 operation/Receipt 协议，但不为此新增用户可见中间状态。
+doctor 默认只读；显式 repair 在 lifecycle lock 内，依据 operation、Receipt 和当前身份继续或停止。创建输入变化时不自动重新镜像最新源覆盖旧操作；无法证明原创建结果完整则保持 Error，由调用者清理失败副本后新建。
 
----
+## 九、外部进程占用
 
-## 九、Execution 与外部进程
+ProcessProbe 通过 macOS Adapter 报告当前用户可见的 cwd/open-vnode 占用。进程身份不能只靠 PID；结果包含探测时间和完整性：
 
-`workspace exec` 是受信任宿主的前台执行，不是 Sandbox。ProcessSupervisor 使用独立托管进程组，并以结构化 TerminationReport 报告正常退出、signal、超时、中断和清理保证。macOS 只能对托管进程组提供 best effort，不宣称等价 cgroup。
+- `confirmed-in-use`：阻止删除，包括强制清理；
+- `no-evidence`：没有取得占用证据，不等于绝对无人使用；
+- `scan-incomplete`：警告并记录，不能伪装成无占用。
 
-启动协议：
+平台不停止用户工具，不阻止其他程序在检查后进入目录；用户负责清理窗口内不再写入。内部 Git 子进程的有界退出和输出处理属于 GitInspector 实现，不扩展为执行包装。
 
-```text
-短锁写 Starting execution
-  → spawn 独立进程组
-  → 写 PID/PGID/进程启动身份和 Running
-  → 释放锁并等待前台进程
-  → 结束时短锁写终止结果并移除活跃登记
-```
+## 十、GC 与空间统计
 
-进程身份不能只用 PID，必须结合启动身份防止 PID 复用。原 CLI 消失但进程组仍活着时，repair 只报告，不代用户终止。
+GC 仅处理已完成操作留下、归属可证明且明确标为可回收的 staging/trash 残留。不删除活跃 Workspace（包括 Error）、未完成 operation、日志、用户源目录或外部路径；不运行 Git GC/prune，不管理 Git refs。活跃 Error 必须先按 remove/repair 的意图处理，不能让 GC 绕过强提示。
 
-外部进程占用探测返回：
+计划在一致的只读元数据视图中形成，执行在 lifecycle lock 内重验。空间统计区分逻辑大小、可取得的物理估算及未知值；不承诺逐副本精确可回收共享块数量。
 
-```text
-confirmed-in-use
-no-evidence
-scan-incomplete
-```
+## 十一、实现验收重点
 
-只有 confirmed-in-use 是确证据并阻止删除；no-evidence 不代表绝对无占用；scan-incomplete 必须警告并记录。`--force` 不改变该判定。
+- 无 Git 也能创建普通目录副本；Git dirty 不影响 Ready。
+- 主/子仓库 tracked 与 untracked 组合、暂存新增/删除、gitlink 与外部元数据分别有真实用例。
+- Git 检查不能写源或副本元数据，不执行未批准的外部程序；unknown 可强制清理且记日志。
+- 普通拒绝不删文件；显式强制只删正确目标，日志在目标删除后仍可读取。
+- 创建、日志写入、部分删除、元数据提交前后中断可解释；重试不依赖已删除 Git 数据。
+- 用户工具可以直接操作路径；没有 Git 托管拓扑、自动交付或新审计服务。
 
----
-
-## 十、GC 语义
-
-GC 的正引用根是全部状态的活跃 Workspace、未完成 operation 和显式保留记录。tombstone 只是负向审计证据。
-
-GC 只处理无正引用 Base、到期 trash、明确可回收缓存和失败残留；不删活跃 Workspace、未完成 operation、Git refs/reflog/objects 或托管 Repository。计划在同一 SQLite 只读快照中生成，移动对象前在 lifecycle lock 内重验。
-
----
-
-## 十一、Phase 1 硬边界
-
-- 仅支持已通过真实机门禁的 macOS/APFS/Git 组合；
-- 仅支持 Git SHA-1 object format；
-- 拒绝 submodule、Git LFS、sparse checkout、自定义 filter、`working-tree-encoding`、`ident` 和目标卷无法表示的路径冲突；
-- 不提供 `repo remove`、Git object GC、自动 maintenance、无范围 worktree prune、detached Workspace 或删除未保护提交的绕过开关；
-- 不引入后续阶段对象或空抽象。
-
-具体 Git 命令、checkout policy、BaseKey 编码、SQLite pragma 和 macOS API 细节属于实现 ADR/《技术栈》，不再向架构方案、开发规范、任务流程或用户手册复制。
+发布资格、错误码和可见状态矩阵只由用户手册维护；本节不是已经完成的验证记录。

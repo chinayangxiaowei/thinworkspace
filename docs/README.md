@@ -24,6 +24,8 @@
 ### 架构
 
 - [产品与架构演进方案 v2.1](project/architecture/ThinWorkspace_产品与架构演进方案_v2.1.md)
+- [ADR-0001：Phase 1 普通目录与无执行包装](project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)
+- [ADR-0002：Phase 1 原始目录镜像与流程交付](project/architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)
 - `project/architecture/adr/`：已接受的架构决策记录；草案和审核过程不放在这里。
 
 ### 设计
@@ -35,6 +37,7 @@
 
 - [技术栈](project/reference/技术栈.md)
 - [Phase 1 用户操作手册](project/reference/ThinWorkspace_Phase1用户操作手册_v1.0.md)
+- [文件克隆与锁语义调研](project/reference/ThinWorkspace_文件克隆与锁语义调研.md)：跨平台锁、CoW、时间戳与缓存一致性的证据参考；不定义产品接口或实验完成状态。
 
 ## 开发过程
 
@@ -53,6 +56,7 @@
 
 - [P0-01 Host/Path Probe 实施记录](development/implementation/P0-01_HostPathProbe实验.md)：任务验收断言、实验结果、审核结论与未完成项；不定义产品接口。
 - [P0-02 APFS clone 与跨卷实施记录](development/implementation/P0-02_APFS物化实验.md)：物化实验准入、失败补偿验收、执行证据与剩余边界。
+- [P0-03 Git 与 Base 历史档案](development/implementation/P0-03_Git与Base实验.md)：已取消路线的实验与失败证据，原位归档；不作为当前设计或继续执行的依据。
 - `development/implementation/`：P0 实验报告、任务实施记录、故障注入结果和小阶段收口证据；
 - `development/review/`：审核记录、待处理问题和人工阶段放行材料。
 

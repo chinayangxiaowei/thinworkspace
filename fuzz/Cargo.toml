@@ -10,6 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+serde_json = "1"
+thinws-p0-cleanup = { path = "../experiments/p0/cleanup" }
 thinws-p0-probe = { path = "../experiments/p0/probe" }
 
 [[bin]]
@@ -26,5 +28,15 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "thinws_git_status"
+path = "fuzz_targets/git_status.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

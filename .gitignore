@@ -1,6 +1,7 @@
 .DS_Store
 .idea/
 /target/
+/experiments/p0/cleanup/target/
 **/*.rs.bk
 
 # Local runtime data and transient test output

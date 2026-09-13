@@ -58,6 +58,7 @@
 - [P0-02 APFS clone 与跨卷实施记录](development/implementation/P0-02_APFS物化实验.md)：物化实验准入、失败补偿验收、执行证据与剩余边界。
 - [P0-03 Git 与 Base 历史档案](development/implementation/P0-03_Git与Base实验.md)：已取消路线的实验与失败证据，原位归档；不作为当前设计或继续执行的依据。
 - [P0-06 原始目录镜像实验](development/implementation/P0-06_原始目录镜像实验.md)：新路线准入、原始内容与 mtime 保真、回滚实验和验收证据。
+- [P0-07 已跟踪检查与清理提示实验](development/implementation/P0-07_已跟踪检查与清理提示实验.md)：只读 Git、清理决策与持久日志的准入、实验及验收证据。
 - `development/implementation/`：P0 实验报告、任务实施记录、故障注入结果和小阶段收口证据；
 - `development/review/`：审核记录、待处理问题和人工阶段放行材料。
 

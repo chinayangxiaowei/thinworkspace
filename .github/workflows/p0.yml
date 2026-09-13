@@ -5,6 +5,19 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mutation_scope:
+        description: Explicit mutation range (workspace is for phase closeout only)
+        required: true
+        type: choice
+        options:
+          - modules
+          - crates
+          - workspace
+      mutation_targets:
+        description: Comma-separated source files or package names; empty for workspace
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -12,7 +25,9 @@ permissions:
 jobs:
   probe:
     runs-on: macos-15
-    timeout-minutes: 45
+    # P0-07 run 34760370580 hit the 60-minute job limit during 712 mutations.
+    # Allow the expanded suite to finish without reducing any gate or test budget.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -30,7 +45,10 @@ jobs:
           cargo fmt --all -- --check
           cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - name: Test CI helpers
-        run: python3 -B -m unittest tools/test_ci_detach_image.py
+        run: >-
+          python3 -B -m unittest
+          tools/test_ci_detach_image.py
+          tools/test_ci_mutation.py
       - name: Lint
         run: |
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -58,7 +76,6 @@ jobs:
           PY
       - name: Install quality tools
         run: |
-          cargo install --locked cargo-mutants --version "$THINWS_CARGO_MUTANTS"
           cargo install --locked cargo-fuzz --version "$THINWS_CARGO_FUZZ"
           cargo install --locked cargo-deny --version "$THINWS_CARGO_DENY"
           cargo install --locked cargo-audit --version "$THINWS_CARGO_AUDIT"
@@ -69,13 +86,30 @@ jobs:
           cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
           cargo audit --deny warnings --file Cargo.lock
           cargo audit --deny warnings --file fuzz/Cargo.lock
-      - name: Full experiment mutation tests
+      - name: Mutation evidence reminder
+        if: github.event_name != 'workflow_dispatch'
+        run: >-
+          printf '%s\n'
+          '::notice title=Mutation testing not run::Provide the designated local owner mutation evidence in the PR or task record.'
+      - name: Install cargo-mutants for explicit mutation scope
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo install --locked cargo-mutants --version "$THINWS_CARGO_MUTANTS"
+      - name: Explicitly scoped mutation tests
+        if: github.event_name == 'workflow_dispatch'
         # Preserve fixtures whose cleanup stopped; scratch teardown must not delete them.
-        run: cargo mutants --workspace --leak-dirs --timeout 60 --jobs 2 --output target -- -- --include-ignored --nocapture
+        env:
+          MUTATION_SCOPE: ${{ inputs.mutation_scope }}
+          MUTATION_TARGETS: ${{ inputs.mutation_targets }}
+        run: >-
+          python3 -B tools/ci_mutation.py
+          --scope "$MUTATION_SCOPE"
+          --targets "$MUTATION_TARGETS"
       - name: Path fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_probe_path_validation -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Materialization layout policy fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialize_layout_policy -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Git status and cleanup policy fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_git_status -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: >-

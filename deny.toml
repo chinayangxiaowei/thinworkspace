@@ -7,6 +7,11 @@ allow = ["MIT", "Apache-2.0", "Unicode-3.0", "NCSA"]
 
 # Only repository-owned experiments use the project's noncommercial license.
 [[licenses.exceptions]]
+name = "thinws-p0-cleanup"
+version = "=0.0.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
 name = "thinws-p0-materialize"
 version = "=0.0.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]

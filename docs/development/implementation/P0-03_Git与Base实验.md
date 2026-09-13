@@ -1091,3 +1091,17 @@ Astra / `gpt-6-astra` / `xhigh` 同意一个限定诊断控制：在新建 `targ
 两个实验进程均终止后，主 Agent 执行原样通用门禁，session `28347` 终态退出 0：fmt、全 workspace Clippy、普通测试 **245 passed、0 failed、2 ignored**。再次枚举全部测试二进制确认共 247 项，孤立 FD-zero 子进程的单项输出不重复计数；两项额外 APFS 卷测试未配置第二卷，仍未执行。本文 6 个本地链接目标、20 个围栏标记配对和 `git diff --check` 通过，未校验锚点。本轮没有源码或公开契约变更，不重新运行未改变的 fuzz/Release；普通门禁通过不替代上述失败的变异验证、远端 CI 或阶段放行。
 
 Astra / `gpt-6-astra` / `xhigh` 对本节进度文档给出限定 **Approve**，独立核验最终正文 SHA-256 `22435aa0bfa11e20bb3287c698623ba2f541a3c78f70576a24484afd7759a780`、原始 baseline 与冻结 scratch，认可只提交本记录；本句为审核后的事实登记。该批准不覆盖源码、CI、完整 479 项门禁或阶段放行。
+
+### 完整串行基线容量实测（2026-09-13 UTC）
+
+上一节诊断记录已提交并推送为 `0423033`，仅含文档。主 Agent 与 Astra / `gpt-6-astra` / `xhigh` 核对：180 秒属于当前变异执行配置，并非产品行为要求；预算历史见本文“完整 Git 测试参数下的预算对照”。本轮只准入一次未变异的完整 Git 包容量测量，不调整产品超时、测试断言、CI 或变异配置，不自动恢复 479 项。
+
+主 Agent 在原任务工作树执行 `/opt/homebrew/bin/gtimeout --signal=INT --kill-after=10s 600s /usr/bin/time -l cargo test --verbose --package=thinws-p0-git-base@0.0.0 --locked -- --include-ignored --nocapture --test-threads=1`。GNU coreutils 9.1 的 600 秒仅是这次普通诊断的外层停止点，不是新的变异验收预算。原始日志与复制的 34 项输入清单位于 `target/p0-03-serial-baseline.cp5Z5S/`；测量期间无另一批本任务 Git/变异测试并行运行，fixture 保留。
+
+session `57487` 终态退出 **0**，未触发外层截止：105 unit / 115.89 秒、6 attributes IT / 20.32 秒、25 topology IT / 183.26 秒，合计 **136 passed、0 failed、0 ignored、0 filtered**，另有 0 项 doctest。Cargo 报告构建检查 0.07 秒；`time` 的整命令 wall time 为 **320.46 秒**，不把它全部计为编译或某个测试的耗时。运行前后全部 34 项输入匹配；`run.log` SHA-256 为 `5d8a6a1ab5e03d121a40585ffd0a15836e3f382a05f92f94dfaeb7e7f96bcb2f`，终态后未发现该诊断的测试进程残留。
+
+本次补足了一个完整串行耗时样本，支持“本次环境下 180 秒不足”的判断。它在普通工作树而非 cargo-mutants scratch 中执行，不证明两者编译环境完全相同，不证明非目标失败的唯一根因、串行变异稳定性或远端 CI 容量。完整变异门禁仍未通过；源码、公开契约及两项待维护者决定的属性/sparse 兼容边界均未改变，P0-03 保持 In Progress。
+
+测量结束后重新执行原样通用门禁：fmt、Clippy 均退出 0；普通 workspace 测试 session `67061` 终态退出 0，**245 passed、0 failed、2 ignored**，完整输出保存在同目录 `general-test.log`，不重复计入 FD-zero 子进程的单项输出。两项额外 APFS 卷测试未配置第二卷，仍未执行；本轮未重跑未改变的 fuzz/Release、未执行新的变异批次或远端 CI。本文 6 个本地链接目标、20 个围栏标记配对和 `git diff --check` 通过，未校验链接锚点。
+
+Astra / `gpt-6-astra` / `xhigh` 独立核验上述原始测量、冻结输入和普通测试日志，对受审正文 `05cb375a…37ed1299` 给出限定 **Approve**，允许仅文档提交；本句为审核后的事实登记。批准不覆盖源码、CI、完整变异门禁或阶段放行。

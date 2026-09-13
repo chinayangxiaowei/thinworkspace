@@ -71,8 +71,6 @@ pub struct MaterializeRequest<'a> {
     pub target: &'a Path,
     pub staging: &'a Path,
     pub trash: &'a Path,
-    /// Identity of the caller-declared `.git` control entry, when present.
-    pub protected_git: Option<FileIdentity>,
 }
 
 /// One lossless relative pathname used in evidence.
@@ -218,8 +216,6 @@ pub enum MaterializationError {
     UnknownTargetEntry { path: EncodedRelativePath },
     #[error("source entry {path:?} has unsupported type {kind}")]
     UnsupportedSourceEntry { path: PathBuf, kind: String },
-    #[error("source contains the reserved .git control entry")]
-    ReservedSourceEntry,
     #[error("source entry changed while materialization was running: {path:?}")]
     SourceChanged { path: PathBuf },
     #[error("target entry changed while materialization was running: {path:?}")]
@@ -352,7 +348,6 @@ pub struct PreparedAttempt {
     backend: Backend,
     report: MaterializationPathReport,
     source: TreeSnapshot,
-    protected_git: Option<ffi::NodeMetadata>,
 }
 
 impl PreparedAttempt {
@@ -399,15 +394,14 @@ pub fn prepare_attempt(
     let target_fd = open_verified_directory(&request.target, &report.target_root)?;
     let _staging_fd = open_verified_directory(&request.staging, &report.staging)?;
     let _trash_fd = open_verified_directory(&request.trash, &report.trash)?;
-    let source = snapshot_tree(&source_fd, &request.source, false)?;
-    let protected_git = target_baseline(&target_fd, &request.target, request.protected_git)?;
+    let source = snapshot_tree(&source_fd, &request.source)?;
+    verify_target_empty(&target_fd, &request.target)?;
 
     Ok(PreparedAttempt {
         request,
         backend,
         report,
         source,
-        protected_git,
     })
 }
 
@@ -438,7 +432,7 @@ pub fn execute_prepared(
                 faults.rollback,
                 fault_problems,
             );
-            let target_manifest = match snapshot_tree(&target, &prepared.request.target, true) {
+            let target_manifest = match snapshot_tree(&target, &prepared.request.target) {
                 Ok(snapshot) => Some(snapshot.manifest),
                 Err(snapshot_error) => {
                     rollback.status = RollbackStatus::Incomplete;
@@ -683,11 +677,6 @@ fn prepare_fresh_copy_after_clone(
             path: previous.request.source.clone(),
         });
     }
-    if previous.protected_git != fresh.protected_git {
-        return Err(MaterializationError::TargetChanged {
-            path: previous.request.target.join(".git"),
-        });
-    }
     if !clone_layout_preconditions_satisfied(&fresh.report) {
         return Err(MaterializationError::PreflightUnsupported {
             reason: "fresh fallback probe did not confirm the original same-volume APFS layout and Full Copy permissions"
@@ -725,7 +714,7 @@ fn execute_prepared_inner(
         trash,
     } = opened;
 
-    let source_now = match snapshot_tree(&source, &prepared.request.source, false) {
+    let source_now = match snapshot_tree(&source, &prepared.request.source) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Err(Box::new((
@@ -744,9 +733,7 @@ fn execute_prepared_inner(
             target,
         )));
     }
-    if let Err(error) =
-        verify_target_baseline(&target, &prepared.request.target, prepared.protected_git)
-    {
+    if let Err(error) = verify_target_empty(&target, &prepared.request.target) {
         return Err(Box::new((
             error,
             ExecutionContext::new(prepared.backend),
@@ -767,7 +754,7 @@ fn execute_prepared_inner(
         return Err(Box::new((error, context, target)));
     }
 
-    let source_after = match snapshot_tree(&source, &prepared.request.source, false) {
+    let source_after = match snapshot_tree(&source, &prepared.request.source) {
         Ok(snapshot) => snapshot,
         Err(error) => return Err(Box::new((error, context, target))),
     };
@@ -780,12 +767,7 @@ fn execute_prepared_inner(
             target,
         )));
     }
-    if let Err(error) =
-        verify_protected_git(&target, &prepared.request.target, prepared.protected_git)
-    {
-        return Err(Box::new((error, context, target)));
-    }
-    let target_snapshot = match snapshot_tree(&target, &prepared.request.target, true) {
+    let target_snapshot = match snapshot_tree(&target, &prepared.request.target) {
         Ok(snapshot) => snapshot,
         Err(error) => return Err(Box::new((error, context, target))),
     };
@@ -809,9 +791,8 @@ fn execute_prepared_inner(
         .count();
     let cow = match prepared.backend {
         Backend::FullCopy => CowEvidence::NotUsed,
-        Backend::ApfsFileClone
-            if regular_count > 0 && context.clone_calls_succeeded == regular_count =>
-        {
+        Backend::ApfsFileClone if regular_count == 0 => CowEvidence::NotUsed,
+        Backend::ApfsFileClone if context.clone_calls_succeeded == regular_count => {
             CowEvidence::Confirmed
         }
         Backend::ApfsFileClone => CowEvidence::Unknown,
@@ -1240,18 +1221,14 @@ fn register_created(
     Ok(registered)
 }
 
-fn snapshot_tree(
-    root: &OwnedFd,
-    root_path: &Path,
-    exclude_git: bool,
-) -> Result<TreeSnapshot, MaterializationError> {
+fn snapshot_tree(root: &OwnedFd, root_path: &Path) -> Result<TreeSnapshot, MaterializationError> {
     let mut snapshot = TreeSnapshot {
         manifest: TreeManifest {
             entries: Vec::new(),
         },
         identities: BTreeMap::new(),
     };
-    snapshot_directory(root, &[], root_path, exclude_git, &mut snapshot)?;
+    snapshot_directory(root, &[], root_path, &mut snapshot)?;
     Ok(snapshot)
 }
 
@@ -1259,18 +1236,11 @@ fn snapshot_directory(
     directory: &OwnedFd,
     relative: &[OsString],
     root_path: &Path,
-    exclude_git: bool,
     snapshot: &mut TreeSnapshot,
 ) -> Result<(), MaterializationError> {
     let mut names = read_names(directory, &join_relative(root_path, relative))?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     for name in names {
-        if relative.is_empty() && name.as_bytes() == b".git" {
-            if exclude_git {
-                continue;
-            }
-            return Err(MaterializationError::ReservedSourceEntry);
-        }
         let component = ComponentName::new(&name)?;
         let mut child = relative.to_vec();
         child.push(name);
@@ -1300,7 +1270,7 @@ fn snapshot_directory(
                 {
                     return Err(MaterializationError::SourceChanged { path });
                 }
-                snapshot_directory(&child_fd, &child, root_path, exclude_git, snapshot)?;
+                snapshot_directory(&child_fd, &child, root_path, snapshot)?;
             }
             ffi::NodeKind::RegularFile => {
                 let file = ffi::open_file_read_at(directory, component.as_c_str())
@@ -1381,83 +1351,13 @@ fn digest_file(file: OwnedFd, path: &Path) -> Result<(u64, String), Materializat
     Ok((length, hasher.finalize().to_hex().to_string()))
 }
 
-fn target_baseline(
-    target: &OwnedFd,
-    target_path: &Path,
-    declared_git: Option<FileIdentity>,
-) -> Result<Option<ffi::NodeMetadata>, MaterializationError> {
-    let mut protected_git = None;
-    for name in read_names(target, target_path)? {
-        if name.as_bytes() != b".git" {
-            return Err(MaterializationError::UnknownTargetEntry {
-                path: encode_relative(&[name]),
-            });
-        }
-        let component = ComponentName::new(&name)?;
-        let metadata = ffi::metadata_at(target, component.as_c_str())
-            .map_err(|error| syscall_error("fstatat .git sentinel", target_path, error, false))?;
-        match declared_git {
-            Some(declared) if identity(metadata) == declared => protected_git = Some(metadata),
-            Some(_) => {
-                return Err(MaterializationError::TargetChanged {
-                    path: target_path.join(".git"),
-                });
-            }
-            None => {
-                return Err(MaterializationError::UnknownTargetEntry {
-                    path: encode_relative(&[name]),
-                });
-            }
-        }
-    }
-    if declared_git.is_some() && protected_git.is_none() {
-        return Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
+fn verify_target_empty(target: &OwnedFd, target_path: &Path) -> Result<(), MaterializationError> {
+    if let Some(name) = read_names(target, target_path)?.into_iter().next() {
+        return Err(MaterializationError::UnknownTargetEntry {
+            path: encode_relative(&[name]),
         });
     }
-    Ok(protected_git)
-}
-
-fn verify_target_baseline(
-    target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
-) -> Result<(), MaterializationError> {
-    let current = target_baseline(target, target_path, protected_git.map(identity))?;
-    if current == protected_git {
-        Ok(())
-    } else {
-        Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
-        })
-    }
-}
-
-fn verify_protected_git(
-    target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
-) -> Result<(), MaterializationError> {
-    let component = ComponentName::new(OsStr::new(".git"))?;
-    let current = match ffi::metadata_at(target, component.as_c_str()) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => None,
-        Err(error) => {
-            return Err(syscall_error(
-                "fstatat .git sentinel",
-                &target_path.join(".git"),
-                error,
-                false,
-            ));
-        }
-    };
-    if current == protected_git {
-        Ok(())
-    } else {
-        Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
-        })
-    }
+    Ok(())
 }
 
 fn apply_rollback_fault(
@@ -1469,12 +1369,7 @@ fn apply_rollback_fault(
     if let Err(problem) = validate_rollback_boundary(prepared, target) {
         return vec![*problem];
     }
-    if let Err(problem) = validate_rollback_set(
-        target,
-        &prepared.request.target,
-        prepared.protected_git,
-        &context.created,
-    ) {
+    if let Err(problem) = validate_rollback_set(target, &context.created) {
         return vec![*problem];
     }
     let mut problems = Vec::new();
@@ -1604,12 +1499,7 @@ fn rollback_created(
             problems.push(*problem);
             break;
         }
-        if let Err(problem) = validate_rollback_set(
-            target,
-            &prepared.request.target,
-            prepared.protected_git,
-            &created[..active_count],
-        ) {
+        if let Err(problem) = validate_rollback_set(target, &created[..active_count]) {
             problems.push(*problem);
             break;
         }
@@ -1694,12 +1584,7 @@ fn rollback_created(
     if problems.is_empty() {
         if let Err(problem) = validate_rollback_boundary(prepared, target) {
             problems.push(*problem);
-        } else if let Err(problem) = validate_rollback_set(
-            target,
-            &prepared.request.target,
-            prepared.protected_git,
-            &created[..active_count],
-        ) {
+        } else if let Err(problem) = validate_rollback_set(target, &created[..active_count]) {
             problems.push(*problem);
         }
     }
@@ -1717,20 +1602,8 @@ fn rollback_created(
 
 fn validate_rollback_set(
     target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
     created: &[TrackedCreated],
 ) -> Result<(), Box<RollbackProblem>> {
-    verify_protected_git(target, target_path, protected_git).map_err(|error| {
-        Box::new(RollbackProblem {
-            operation: "revalidate .git sentinel".to_owned(),
-            path: Some(encode_relative(&[OsString::from(".git")])),
-            errno: materialization_errno(&error),
-            expected_identity: protected_git.map(identity),
-            observed_identity: None,
-            detail: error.to_string(),
-        })
-    })?;
     if created.iter().any(|entry| entry.identity.is_none()) {
         return Err(Box::new(RollbackProblem {
             operation: "revalidate created identity".to_owned(),
@@ -1884,9 +1757,6 @@ fn observe_target_entries(
     let mut names = read_names(directory, Path::new("rollback-target"))?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     for name in names {
-        if relative.is_empty() && name.as_bytes() == b".git" {
-            continue;
-        }
         let component = ComponentName::new(&name)?;
         let mut child = relative.to_vec();
         child.push(name);
@@ -2139,7 +2009,6 @@ struct OwnedRequest {
     target: PathBuf,
     staging: PathBuf,
     trash: PathBuf,
-    protected_git: Option<FileIdentity>,
 }
 
 struct OpenedRoots {
@@ -2156,7 +2025,6 @@ impl From<&MaterializeRequest<'_>> for OwnedRequest {
             target: request.target.to_path_buf(),
             staging: request.staging.to_path_buf(),
             trash: request.trash.to_path_buf(),
-            protected_git: request.protected_git,
         }
     }
 }
@@ -2291,7 +2159,7 @@ mod tests {
         fallback_path_evidence_matches, materialization_errno, mutate_source_same_inode,
         open_verified_directory, prepare_attempt, register_created, revalidate_and_open,
         revalidate_held_roots, rollback_created, run_cow_policy_experiment, same_identity_and_kind,
-        validate_rollback_parent, verify_protected_git,
+        validate_rollback_parent, verify_target_empty,
     };
     use crate::test_support::ControlledTree;
 
@@ -2404,7 +2272,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let mut prepared =
             prepare_attempt(&request, Backend::ApfsFileClone).expect("prepare clone candidates");
@@ -2433,7 +2300,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let options = PolicyExperimentOptions {
             requested_mode: RequestedMode::CowClone,
@@ -2672,7 +2538,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy).expect("prepare empty attempt");
         let opened = revalidate_and_open(&prepared).expect("open all verified roots");
@@ -2695,9 +2560,9 @@ mod tests {
     }
 
     #[test]
-    fn protected_git_revalidation_distinguishes_missing_changed_and_syscall_error() {
+    fn target_empty_revalidation_rejects_git_and_surfaces_syscall_error() {
         let (mut fixture, _source, target_path, _staging, _trash) =
-            controlled_materialization_roots("git-revalidation-unit");
+            controlled_materialization_roots("target-empty-unit");
         let target = rustix::fs::openat(
             fixture.root_fd(),
             "target",
@@ -2705,24 +2570,15 @@ mod tests {
             Mode::empty(),
         )
         .expect("open controlled target");
-        verify_protected_git(&target, &target_path, None).expect("absent undeclared .git is valid");
+        verify_target_empty(&target, &target_path).expect("empty target is valid");
 
         fixture
-            .create_file(Path::new("target/.git"), b"control", 0o600)
-            .expect("create caller-owned control entry");
-        let expected = crate::ffi::metadata_at(&target, c".git").expect("observe control identity");
-        verify_protected_git(&target, &target_path, Some(expected))
-            .expect("unchanged declared .git is valid");
-        fixture
-            .rename_tracked_exclusive(Path::new("target/.git"), Path::new("target/original-git"))
-            .expect("move exact controlled .git without replacement");
+            .create_file(Path::new("target/.git"), b"ordinary target content", 0o600)
+            .expect("create existing target entry");
         assert!(matches!(
-            verify_protected_git(&target, &target_path, Some(expected)),
-            Err(MaterializationError::TargetChanged { .. })
+            verify_target_empty(&target, &target_path),
+            Err(MaterializationError::UnknownTargetEntry { ref path }) if path.display == ".git"
         ));
-        fixture
-            .rename_tracked_exclusive(Path::new("target/original-git"), Path::new("target/.git"))
-            .expect("restore exact controlled .git");
 
         fixture
             .create_file(Path::new("not-a-directory"), b"file", 0o600)
@@ -2735,7 +2591,7 @@ mod tests {
         )
         .expect("open regular file as deliberately invalid parent");
         assert!(matches!(
-            verify_protected_git(&regular, &target_path, None),
+            verify_target_empty(&regular, &target_path),
             Err(MaterializationError::SystemCall {
                 errno: Some(libc::ENOTDIR),
                 ..
@@ -3336,7 +3192,6 @@ mod tests {
             target: &target_path,
             staging: &staging_path,
             trash: &trash_path,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy)
             .expect("prepare an empty controlled attempt");
@@ -3420,7 +3275,6 @@ mod tests {
             target: &target_path,
             staging: &staging_path,
             trash: &trash_path,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy)
             .expect("prepare an empty controlled attempt");

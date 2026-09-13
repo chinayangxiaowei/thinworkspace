@@ -1,7 +1,8 @@
-# Exact equivalents reviewed for P0-01/P0-02; no function/file-wide exclusions.
+# Exact equivalents reviewed for P0-01/P0-02/P0-06; no function/file-wide exclusions.
 # Proofs, ownership, and invalidation conditions are in:
 # docs/development/implementation/P0-01_HostPathProbe实验.md
 # docs/development/implementation/P0-02_APFS物化实验.md
+# docs/development/implementation/P0-06_原始目录镜像实验.md
 exclude_re = [
     '^experiments/p0/probe/src/lib\.rs:1408:57: replace \| with \^ in decode_hex$',
     '^experiments/p0/probe/src/ffi\.rs:61:(32|52): replace \| with \^ in open_root_directory$',
@@ -15,4 +16,5 @@ exclude_re = [
     '^experiments/p0/materialize/src/ffi\.rs:49:(32|51|70): replace \| with \^ in open_file_read_at$',
     '^experiments/p0/materialize/src/ffi\.rs:59:(32|51|70): replace \| with \^ in open_file_write_at$',
     '^experiments/p0/materialize/src/ffi\.rs:69:(32|48|63|82): replace \| with \^ in create_file_at$',
+    '^experiments/p0/materialize/src/lib\.rs:795:35: replace match guard context\.clone_calls_succeeded == regular_count with true in execute_prepared_inner$',
 ]

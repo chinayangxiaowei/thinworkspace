@@ -481,7 +481,7 @@ mod tests {
             );
         }
         validate_component(c"valid").expect("normal component must be accepted");
-        validate_component(c".git").expect("reserved but structurally normal name is valid here");
+        validate_component(c".git").expect("ordinary structurally valid name is accepted");
     }
 
     #[test]

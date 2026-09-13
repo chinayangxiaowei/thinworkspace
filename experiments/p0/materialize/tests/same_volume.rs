@@ -93,27 +93,15 @@ impl Fixture {
         fixture
             .tree
             .create_file("outside-sentinel", b"outside stays unchanged\n", 0o600)?;
-        fixture
-            .tree
-            .create_file("target/.git", b"protected control sentinel\n", 0o600)?;
         Ok(fixture)
     }
 
     fn request(&self) -> MaterializeRequest<'_> {
-        let target_relative = self
-            .target
-            .strip_prefix(&self.root)
-            .expect("fixture target remains within its private root");
-        let protected_git = self.tree.tracked().get(&target_relative.join(".git"));
         MaterializeRequest {
             source: &self.source,
             target: &self.target,
             staging: &self.staging,
             trash: &self.trash,
-            protected_git: protected_git.map(|identity| FileIdentity {
-                device: identity.device,
-                inode: identity.inode,
-            }),
         }
     }
 
@@ -252,11 +240,7 @@ fn assert_fixed_manifest(receipt: &thinws_p0_materialize::AttemptEvidence) {
     );
 }
 
-fn assert_control_and_outside_sentinels_unchanged(fixture: &Fixture) {
-    assert_eq!(
-        fs::read(fixture.target.join(".git")).unwrap(),
-        b"protected control sentinel\n"
-    );
+fn assert_outside_sentinel_unchanged(fixture: &Fixture) {
     assert_eq!(
         fs::read(fixture.root.join("outside-sentinel")).unwrap(),
         b"outside stays unchanged\n"
@@ -269,7 +253,6 @@ fn actual_same_volume_clone_materializes_fixed_tree_with_complete_manifests() {
     let result = materialize_once(&fixture.request(), Backend::ApfsFileClone);
     let target_payload = fs::read(fixture.target.join("nested/payload.bin"));
     let target_link = fs::read_link(fixture.target.join("link-to-sentinel"));
-    let control = fs::read(fixture.target.join(".git"));
     let outside = fs::read(fixture.root.join("outside-sentinel"));
 
     let receipt = result.expect("real same-volume APFS fixed-tree clone should succeed");
@@ -295,10 +278,6 @@ fn actual_same_volume_clone_materializes_fixed_tree_with_complete_manifests() {
             .as_os_str()
             .as_bytes(),
         b"../outside-sentinel"
-    );
-    assert_eq!(
-        control.expect("read .git sentinel"),
-        b"protected control sentinel\n"
     );
     assert_eq!(
         outside.expect("read outside sentinel"),
@@ -379,7 +358,7 @@ fn non_ascii_utf8_relative_name_and_content_digest_are_preserved_by_full_copy() 
         fs::read(fixture.root.join(&target_relative)).unwrap(),
         contents
     );
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified raw-name fixture");
 }
 
@@ -394,7 +373,7 @@ fn empty_source_clone_succeeds_without_claiming_cow_confirmation() {
     assert_eq!(receipt.ordinary_files_materialized, 0);
     assert!(receipt.created.is_empty());
     assert!(receipt.ordinary_files.is_empty());
-    assert_eq!(receipt.cow_evidence, CowEvidence::Unknown);
+    assert_eq!(receipt.cow_evidence, CowEvidence::NotUsed);
     assert!(
         receipt
             .source_manifest
@@ -402,8 +381,8 @@ fn empty_source_clone_succeeds_without_claiming_cow_confirmation() {
             .is_some_and(|manifest| manifest.entries.is_empty())
     );
     assert_eq!(receipt.source_manifest, receipt.target_manifest);
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified empty fixture");
 }
 
@@ -458,17 +437,7 @@ fn partial_clone_failure_rolls_back_exact_created_identity_set_in_reverse() {
     );
     assert!(failure.evidence.rollback.remaining.is_empty());
     assert!(failure.evidence.rollback.problems.is_empty());
-    assert_eq!(
-        fs::read_dir(&fixture.target)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect::<Vec<_>>(),
-        vec![".git"]
-    );
-    assert_eq!(
-        fs::read(fixture.target.join(".git")).unwrap(),
-        b"protected control sentinel\n"
-    );
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
     assert_eq!(
         fs::read(fixture.root.join("outside-sentinel")).unwrap(),
         b"outside stays unchanged\n"
@@ -505,7 +474,6 @@ fn prepare_rejects_equal_roots_and_source_nested_under_target_without_writing() 
         .expect("record controlled fixture before equal-root prepare");
     let mut equal_request = equal.request();
     equal_request.target = &equal.source;
-    equal_request.protected_git = None;
     assert!(matches!(
         prepare_attempt(&equal_request, Backend::ApfsFileClone),
         Err(MaterializationError::OverlappingRoots { .. })
@@ -517,7 +485,7 @@ fn prepare_rejects_equal_roots_and_source_nested_under_target_without_writing() 
             .expect("equal-root prepare must not mutate the fixture"),
         baseline
     );
-    assert_control_and_outside_sentinels_unchanged(&equal);
+    assert_outside_sentinel_unchanged(&equal);
     equal.cleanup().expect("remove verified fixed fixture");
 
     let mut nested = Fixture::create_fixed_tree().expect("create controlled fixed fixture");
@@ -541,7 +509,7 @@ fn prepare_rejects_equal_roots_and_source_nested_under_target_without_writing() 
             .expect("nested-source prepare must not mutate the fixture"),
         baseline
     );
-    assert_control_and_outside_sentinels_unchanged(&nested);
+    assert_outside_sentinel_unchanged(&nested);
     nested.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -578,33 +546,36 @@ fn fixture_cleanup_preflight_rejects_moved_parent_before_any_deletion() {
 }
 
 #[test]
-fn prepare_requires_explicit_matching_git_control_identity() {
-    let fixture = Fixture::create_fixed_tree().expect("create controlled fixed fixture");
-    let mut undeclared = fixture.request();
-    undeclared.protected_git = None;
-    assert!(matches!(
-        prepare_attempt(&undeclared, Backend::ApfsFileClone),
-        Err(MaterializationError::UnknownTargetEntry { ref path })
-            if path.display == ".git"
-    ));
+fn prepare_rejects_git_and_ordinary_entries_in_a_nonempty_target() {
+    for name in [".git", "ordinary"] {
+        let mut fixture = Fixture::create_fixed_tree().expect("create controlled fixed fixture");
+        let relative = PathBuf::from("target").join(name);
+        fixture
+            .tree
+            .create_file(&relative, b"existing target content\n", 0o600)
+            .expect("create fixture-owned existing target entry");
+        let expected = fixture
+            .metadata_relative(&relative)
+            .expect("record existing target identity");
 
-    let mut wrong_identity = fixture.request();
-    let declared = wrong_identity
-        .protected_git
-        .as_mut()
-        .expect("fixture declares .git");
-    declared.inode = declared.inode.wrapping_add(1);
-    assert!(matches!(
-        prepare_attempt(&wrong_identity, Backend::ApfsFileClone),
-        Err(MaterializationError::TargetChanged { ref path })
-            if path == &fixture.target.join(".git")
-    ));
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
-    assert_eq!(
-        fs::read(fixture.target.join(".git")).unwrap(),
-        b"protected control sentinel\n"
-    );
-    fixture.cleanup().expect("remove verified fixed fixture");
+        assert!(matches!(
+            prepare_attempt(&fixture.request(), Backend::ApfsFileClone),
+            Err(MaterializationError::UnknownTargetEntry { ref path })
+                if path.display == name
+        ));
+        assert_eq!(
+            fixture
+                .metadata_relative(&relative)
+                .expect("existing target entry remains"),
+            expected
+        );
+        assert_eq!(
+            fs::read(fixture.target.join(name)).unwrap(),
+            b"existing target content\n"
+        );
+        assert_outside_sentinel_unchanged(&fixture);
+        fixture.cleanup().expect("remove verified fixed fixture");
+    }
 }
 
 #[test]
@@ -624,7 +595,7 @@ fn prepare_rejects_unknown_target_and_special_source_without_writing() {
         fs::read(unknown.target.join("unplanned")).unwrap(),
         b"do not overwrite\n"
     );
-    assert_control_and_outside_sentinels_unchanged(&unknown);
+    assert_outside_sentinel_unchanged(&unknown);
     unknown.cleanup().expect("remove verified fixed fixture");
 
     let mut special = Fixture::create_fixed_tree_in(Path::new("/private/tmp"), "special-source")
@@ -641,8 +612,8 @@ fn prepare_rejects_unknown_target_and_special_source_without_writing() {
         Err(MaterializationError::UnsupportedSourceEntry { ref path, ref kind })
             if path == &socket_path && kind == "special"
     ));
-    assert_eq!(fs::read_dir(&special.target).unwrap().count(), 1);
-    assert_control_and_outside_sentinels_unchanged(&special);
+    assert_eq!(fs::read_dir(&special.target).unwrap().count(), 0);
+    assert_outside_sentinel_unchanged(&special);
     drop(listener);
     special.cleanup().expect("remove verified fixed fixture");
 }
@@ -697,7 +668,7 @@ fn rollback_fault_does_not_add_another_object_after_preexisting_unknown_target()
         !fixture.target.join("p0-02-injected-unknown").exists(),
         "rollback fault injection must not mutate an already-unknown target"
     );
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -751,7 +722,7 @@ fn partial_full_copy_write_failure_registers_partial_file_then_rolls_back_revers
         failure.evidence.rollback.status,
         RollbackStatus::ConfirmedBaseline
     );
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -840,7 +811,7 @@ fn preflight_unsupported_policy_starts_copy_only_when_explicitly_allowed() {
         MaterializationError::PreflightUnsupported { .. }
     ));
     assert!(failure.attempts.is_empty());
-    assert_eq!(fs::read_dir(&denied.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&denied.target).unwrap().count(), 0);
     denied.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -1000,7 +971,7 @@ fn runtime_clone_enotsup_then_full_copy_enospc_retains_both_attempts_and_rollbac
     assert!(copy.rollback.problems.is_empty());
     assert_eq!(copy.rollback.status, RollbackStatus::ConfirmedBaseline);
 
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
     assert_eq!(fs::read(fixture.source.join("empty")).unwrap(), b"");
     assert_eq!(
         fs::read(fixture.source.join("executable.sh")).unwrap(),
@@ -1014,7 +985,7 @@ fn runtime_clone_enotsup_then_full_copy_enospc_retains_both_attempts_and_rollbac
         fs::read_link(fixture.source.join("link-to-sentinel")).unwrap(),
         PathBuf::from("../outside-sentinel")
     );
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -1056,7 +1027,7 @@ fn runtime_non_enotsup_never_starts_a_second_backend() {
             failure.attempts[0].rollback.status,
             RollbackStatus::ConfirmedBaseline
         );
-        assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
         fixture.cleanup().expect("remove verified fixed fixture");
     }
 }
@@ -1091,7 +1062,7 @@ fn runtime_enotsup_with_deny_policy_never_starts_full_copy() {
         failure.attempts[0].rollback.status,
         RollbackStatus::ConfirmedBaseline
     );
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -1117,8 +1088,8 @@ fn same_inode_source_content_change_rejects_clone_and_full_copy_success() {
             failure.evidence.rollback.status,
             RollbackStatus::ConfirmedBaseline
         );
-        assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
-        assert_control_and_outside_sentinels_unchanged(&fixture);
+        assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
+        assert_outside_sentinel_unchanged(&fixture);
         assert_eq!(
             &fs::read(fixture.source.join("executable.sh")).unwrap()[..1],
             b"!"
@@ -1161,8 +1132,8 @@ fn fresh_copy_prepare_reports_latest_source_change_and_retains_first_enotsup_att
         failure.attempts[0].rollback.status,
         RollbackStatus::ConfirmedBaseline
     );
-    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 1);
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -1233,7 +1204,7 @@ fn incomplete_deletion_blocks_runtime_enotsup_fallback_and_retains_confirmed_obj
         fixture
             .adopt_remaining_created(attempt)
             .expect("remaining objects have independently matching receipt identities");
-        assert_control_and_outside_sentinels_unchanged(&fixture);
+        assert_outside_sentinel_unchanged(&fixture);
         fixture.cleanup().expect("remove verified fixed fixture");
     }
 }
@@ -1282,7 +1253,7 @@ fn unknown_entry_during_rollback_stops_without_fallback_and_is_preserved() {
         })
     );
     assert!(fixture.target.join("p0-02-injected-unknown").is_file());
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     eprintln!(
         "preserving unknown-entry rollback fixture at {}: injected entry has no independent fixture ownership identity",
         fixture.root.display()
@@ -1334,7 +1305,7 @@ fn replaced_created_entry_during_rollback_stops_without_fallback_and_is_preserve
         })
     );
     assert!(fixture.target.join("empty").is_file());
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     eprintln!(
         "preserving replacement rollback fixture at {}: target/empty replacement has no independent fixture ownership identity",
         fixture.root.display()
@@ -1393,7 +1364,7 @@ fn execution_rejects_each_replaced_root_before_writing_and_fixture_restores_exac
                 .expect("observe restored controlled fixture"),
             baseline
         );
-        assert_control_and_outside_sentinels_unchanged(&fixture);
+        assert_outside_sentinel_unchanged(&fixture);
         fixture.cleanup().expect("remove verified fixed fixture");
     }
 }
@@ -1432,7 +1403,7 @@ fn execution_rejects_moved_common_ancestor_before_writing() {
         .tree
         .restore_fixture_parent_exclusive(&moved_name)
         .expect("restore exact common ancestor after refusal assertion");
-    assert_control_and_outside_sentinels_unchanged(&fixture);
+    assert_outside_sentinel_unchanged(&fixture);
     fixture.cleanup().expect("remove verified fixed fixture");
 }
 
@@ -1478,7 +1449,6 @@ fn actual_cross_volume_clone_returns_exdev_without_target_then_explicit_copy_suc
         target: &remote.target,
         staging: &remote.staging,
         trash: &remote.trash,
-        protected_git: remote.request().protected_git,
     };
 
     let injected_policy = PolicyExperimentOptions {
@@ -1494,7 +1464,7 @@ fn actual_cross_volume_clone_returns_exdev_without_target_then_explicit_copy_suc
         MaterializationError::PreflightUnsupported { .. }
     ));
     assert!(preflight_failure.attempts.is_empty());
-    assert_eq!(fs::read_dir(&remote.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&remote.target).unwrap().count(), 0);
 
     let clone_failure = match materialize_once(&request, Backend::ApfsFileClone) {
         Err(failure) => failure,
@@ -1522,7 +1492,7 @@ fn actual_cross_volume_clone_returns_exdev_without_target_then_explicit_copy_suc
         clone_failure.evidence.rollback.status,
         RollbackStatus::ConfirmedBaseline
     );
-    assert_eq!(fs::read_dir(&remote.target).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&remote.target).unwrap().count(), 0);
 
     let copy = materialize_once(&request, Backend::FullCopy)
         .expect("explicit userspace Full Copy should work across volumes");

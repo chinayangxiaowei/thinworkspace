@@ -1006,3 +1006,42 @@ Sol / `gpt-5.6-sol` / `xhigh` 完成唯一 CI 文件修改：相对准入 workfl
 Astra / `gpt-6-astra` / `xhigh` 对冻结 workflow 的本次分区增量及本节进度记录给出限定 **Approve**：独立核验动态分区、四项真实 caught 的 baseline/终态/目标日志和四份 fuzz 证据，未发现非目标失败；允许进度文档单独提交。批准不覆盖未执行的主分区、CI 总容量或全候选。CI 修改依赖尚未提交的实验候选，本轮与这些源码一同保留在原工作区，不夹带进文档提交。
 
 P0-03 保持 In Progress。仍须维护者确定无实际转换属性声明及 sparse 来源的产品边界，随后完成对应兼容矩阵、正式 ADR、完整候选门禁、全候选规定审核、源码提交和远端候选 CI；旧 439 项中断、75 项 runner 和五项 Base 专项不能拼成 479 项通过。
+
+### 修复后完整 Git crate 变异门禁准入（2026-09-13 UTC）
+
+在 `20be786` 文档基线上继续当前 P0-03/P0.b/R4 验证，不实现尚未确认的兼容政策。主 Agent 重验当前候选、工具 27.1.0 与可用空间；没有上一轮遗留的实验/变异进程。34 个实验源码、测试、依赖和工具配置输入的完整 SHA-256 保存于本工作区 `target/p0-03-git-full-479.Je3V2M/input-sha256.json`，lib 仍为 `3e800f36…`、workflow 为 `541d109a…`。本批运行期间冻结这些输入，不增加排除项或修改超时；fixture 与 scratch 保留。
+
+执行实际 workflow 预检后，再用工具对 Git 包分别枚举完整集及三个分区，session `97356` 退出 0，确认 **479＝475＋3＋1**，无重复或遗漏。完整名称集合排序并以 LF 连接后的 SHA-256 为 `37015f03b2e346cad62b473519f7e984035a60e8904db33567455e14e60e40f9`。本批重新执行三个分区，不复用上一节四项的成绩拼接本批结果。
+
+三个命令统一为 `cargo mutants -p thinws-p0-git-base --leak-dirs --timeout 180 --jobs 2 -C=--locked`，使用正常 baseline 和各自独立输出目录：`main/` 的 475 项仅排除预检精确选出的四项，测试为完整所属包 `-- -- --include-ignored --nocapture`；`flags/` 与 `pipes/` 使用上节已验收的精确选择和 `-C=--lib` 测试入口。结果根为上述本批目录。Git 包无 ignored 或额外跨卷依赖，本批不重新挂载第二卷；它不替代整个 workspace/阶段门禁或远端 CI。
+
+主 Agent 负责执行、核验终态与日志；三个分区的顺序执行器为 session `73140`，已实际进入 main 分区，观察等待超时不作终止或重启依据。Astra / `gpt-6-astra` / `xhigh` 同时只读审核当前托管拓扑和 Base 发布/复用的已声明实验边界，不修改冻结候选，也不代维护者决定兼容政策。准入不是通过声明，运行状态与最终结果另行记录。
+
+本批 main 正常 baseline Build **10.18 秒**、Test **63.71 秒**成功。随后 Astra 根据本文原验收发现一项必要测试缺口：现有拓扑测试没有 `ManagedTopologyStage::Worktree` 的真实失败断言，尚未锁定分支冲突以及“分支已创建、worktree 登记失败”的部分完成状态。主 Agent 独立核对 `create_workspace` 与全部相关测试后确认，决定先补验收集，不继续对不完整候选消耗全量门禁。对精确输出目录所属的 `cargo-mutants` PID `45477`（父 `45448`）重验 argv 后发 SIGINT；session `73140` 终态退出 1（interrupted），不是测试自然失败或观察等待超时。
+
+停止时 main **10/475** 项已分类：7 caught、3 unviable、0 missed、0 timeout，end_time 仍为 null；其他项目和 flags/pipes 未完成，不能称 479 项通过。34 个输入停止前后全部相同，后续进程核对已无本批父进程及两份 scratch 测试进程；现场原样保留。当前失败用例缺口不是已证实的生产缺陷；Reviewer 对本次托管拓扑/Base 生产部分及必要直接测试未发现第二项有证据的缺口，不要求扩建恢复机制。
+
+接续只准入同一 `managed_topology.rs` 测试模块中的两个真实边界用例：复用既有最小 bare fixture 和私有阶段 helper，分别预置同名分支、预置含 sentinel 的非空目标目录，核对精确错误阶段/命令顺序、完整 refs/登记状态及未知目录不变；登记失败后的新分支必须如实保留。两例不重新证明来源导入，也不得用后续中性文件/内容不匹配冒充预期失败。编码由 Sol / `gpt-5.6-sol` / `xhigh`，审核由 Astra / `gpt-6-astra` / `xhigh`；生产前缀 SHA-256 `ec6215c7cc85b12459bc20273f48b44046fd3e6636b78a2554c7d7d966996a9d` 必须保持，不新增 fault hook、公开接口、依赖或清理框架。既有行为补测允许首次直接 GREEN；若暴露实现缺陷则先报告，不能擅自改生产使测试通过。新候选完整门禁须在补测及审核后重新准入。
+
+主 Agent 复核本批已分类日志时另发现一项旧测试过强：`lib.rs:214:9` 的 Display 变异已有直接诊断断言检出，但 `bounded_timeout_preserves_killed_child_status_and_output` 额外拒绝 `KilledAndReapedWithIncompleteOutput`（真实 signal 9、两流为空），构成非目标失败。Astra 独立核对原日志与 `terminate_child` 后确认：该分支仅在已取得直接子状态、无读取错误且收尾期限到达时产生，属于既有合法证据；具体 EOF 未确认的原因仍未证明。主 Agent 只追加授权该旧测试同时接纳完整/未完整输出的两种已回收分支，仍要求 Timeout、精确 operation、真实 signal 和空字节，拒绝状态未确认或读取错误；不改测试名称、10ms 参数、其他 EOF 用例、CI 或生产逻辑。这不是允许以 Timeout 充当变异检出；Display 和 pipes 两个精确变异须在修改后重验目标失败，不能用这次历史非目标失败作通过证据。
+
+Sol 已补拓扑两例，文件 SHA-256 为 `51a5d2957d10126425194d17a14a4886c34e49a91be7cdf1a400f9025971ca97`，相对原候选净增 374 行，均在测试模块。主 Agent 通读差异并独立执行两例各自的 debug/release 精确入口，session `43121` 终态退出 0，四次各 1 passed，实际测试约 0.93–1.01 秒；没有把这两例当作来源导入或完整任务验收。
+
+lib 补丁中出现一次落点错误：第一次因上下文不唯一，误将相同 OR 加入较早的大输出测试 panic 分支，形成 `3f579952…`；目标旧测试当时仍未修改，其 debug 通过、release 返回合法 `KillRequestedButReapTimedOutStateUnconfirmed` 而失败，不能记为授权修正的验证。第二次补丁才命中目标，形成同时含两处 OR 的 `3df83de0…`。作者起初误报“外部写入”，主 Agent 用 SHA 为原 `3e800f36…` 的保留 scratch 作完整差异核验后定位为补丁误匹配，作者复核并撤回该判断；无证据证明外部移除了修改。当时主 Agent 暂冻这两处差异，随后限定撤回误落位置，并评审旧测试 10ms 正向回收假设；不接受未知回收状态冒充成功，也不改生产预算或工具超时。两文件生产前缀始终保持原值。
+
+根据实际 Unknown 证据，Astra 与主 Agent 确认旧测试意图是验证正向终止证据，而非要求 OS 必须在任意 10ms 内回收；因此修订最初“保留 10ms”的测试准入，仅将该测试传入预算改为 1 秒，仍小于自有 sleep 的 5 秒。这不是生产或变异门禁预算变更：真实 signal/operation/空字节以及状态未确认、读取错误的拒绝保持，其他有界返回测试不变；若 1 秒仍不能取得预期证据则调查，不自动继续加时。pipes 的取消非阻塞变异仍须因正常退出的 signal=None 被检出。拓扑测试另只补 A 根在起点和终点的单层名称全集等于唯一 sentinel，排除额外未知子项；不增加递归快照或新模型。
+
+最终冻结 lib SHA-256 为 `1d5b945fbe06fbc8fe658561361ffc3851827282f4d770c777198023793714ec`，相对原 `3e800f36…` 只在目标测试增 7 行、删 1 行，误落位置已恢复；托管拓扑为 `6c611b36a9dd75489d88f13b5ee8e6ec3cc2bf9b8d9c79819f8df0a981717fcb`，相对原候选只改测试导入并增加两例，净增 395 行。主 Agent 与 Astra 均核验 lib 和拓扑的生产前缀分别保持 `2ff4fedfc01108367dfdb836948e44385f3bd8400a3b7fce26e9c164f255075a`、`ec6215c7cc85b12459bc20273f48b44046fd3e6636b78a2554c7d7d966996a9d`；没有生产行为或公开契约变化。
+
+主 Agent 在最终冻结代码上执行《任务流程》三项原样通用门禁及 `cargo test --locked --release -p thinws-p0-git-base --all-targets --quiet`，session `56068` 终态退出 0：格式、全 workspace Clippy 和普通测试通过，普通入口的两项额外跨卷用例仍 ignored；Git 完整 Release 为 **105 unit＋6 attributes IT＋25 topology IT＝136 passed、0 failed、0 ignored**。两个新失败路径用例及修正后的超时用例均包含在这些入口中。此结果不覆盖第二卷专项，也不替代变异复验、完整候选门禁或阶段放行。
+
+随后主 Agent 在新建 `target/p0-03-test-correction.iscH4i/` 下独立重验 Display 与 OutputPipes 两个精确变异：先分别通过固定名称、lib 文件过滤枚举恰好一项，再使用 27.1.0、正常 baseline、`--leak-dirs --timeout 180 --jobs 1 -C=--locked`，各自输出到 `display/`、`pipes/`。Display 保留完整所属 Git 包参数 `-- -- --include-ignored --nocapture`；pipes 增加 `-C=--lib` 并精确执行 `tests::bounded_timeout_preserves_killed_child_status_and_output --exact --include-ignored --nocapture`，不复用历史成绩。
+
+| 本轮独立复验 | 正常 baseline | 变异实际检出 | 终态 |
+|---|---|---|---|
+| Display；session `46405` | Build 20.65 秒、Test 107.05 秒通过 | Test 33.77 秒正常退出 101；105 unit 中仅原有三项诊断断言失败，修正的 timeout 用例明确通过。Cargo 因 unit 二进制失败未继续 IT，不称变异后的全部测试都运行过 | 工具退出 0；1 caught、0 missed/timeout/unviable；end_time `2026-09-13T05:46:47.389341Z` |
+| OutputPipes；session `81803` | Build 20.53 秒、Test 1.47 秒通过 | Test 5.88 秒正常退出 101，唯一精确测试在 `status.signal().is_some()` 断言失败，未靠工具超时检出 | 工具退出 0；1 caught、0 missed/timeout/unviable；end_time `2026-09-13T05:44:36.891036Z` |
+
+两个输出目录的 `mutants.out/outcomes.json`、逐项目标日志和 scratch 原样保留。主 Agent 对照旧全量批次的 34 项输入哈希确认只有上述两份授权测试文件变化；CI、生产实现、依赖与排除配置均未变化。本轮未重新运行四份短预算 fuzz（harness 与受测生产代码均未修改），也未重新启动完整 479 项、远端候选 CI 或第二卷专项；历史全量中断及局部结果均不能合计成当前候选全量通过。P0-03 保持 In Progress，剩余兼容政策、正式 ADR、完整验收与源码提交仍待完成。
+
+Astra / `gpt-6-astra` / `xhigh` 对最终两份测试修正和本节进度记录给出限定 **Approve**：独立核验两个变异的正常 baseline、终态、精确失败集合及恢复 scratch 哈希，未发现非目标失败；允许本进度文档单独提交。主 Agent 另以自动断言复核同一结果，并检查本文 6 个本地链接目标、围栏配对与 `git diff --check`，均通过；链接检查不包括锚点。审核不覆盖完整候选、479 项门禁、源码提交或阶段放行，实验源码和 CI 增量继续保留在原工作区。

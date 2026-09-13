@@ -29,6 +29,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+      - name: Test CI helpers
+        run: python3 -B -m unittest tools/test_ci_detach_image.py
       - name: Lint
         run: |
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -76,37 +78,7 @@ jobs:
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialize_layout_policy -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
-        run: |
-          set -u
-
-          expected_mountpoint="$RUNNER_TEMP/thinws-p0-submount-source/mounted"
-          if [ "$THINWS_P0_CROSS_VOLUME_ROOT" != "$expected_mountpoint" ]; then
-            printf 'refusing to detach unexpected path: %s\n' "$THINWS_P0_CROSS_VOLUME_ROOT" >&2
-            exit 64
-          fi
-
-          attempt=1
-          max_attempts=5
-          retry_delay=1
-          while :; do
-            if hdiutil detach "$THINWS_P0_CROSS_VOLUME_ROOT"; then
-              exit 0
-            else
-              status=$?
-            fi
-
-            if [ "$status" -ne 16 ]; then
-              printf 'hdiutil detach failed without a retryable busy error (exit %s)\n' "$status" >&2
-              exit "$status"
-            fi
-            if [ "$attempt" -ge "$max_attempts" ]; then
-              printf 'hdiutil detach remained busy after %s attempts\n' "$attempt" >&2
-              exit "$status"
-            fi
-
-            printf 'hdiutil detach was busy on attempt %s/%s; retrying in %s second(s)\n' \
-              "$attempt" "$max_attempts" "$retry_delay" >&2
-            sleep "$retry_delay"
-            attempt=$((attempt + 1))
-            retry_delay=$((retry_delay * 2))
-          done
+        run: >-
+          python3 -B tools/ci_detach_image.py
+          --image "$THINWS_P0_IMAGE"
+          --runner-temp "$RUNNER_TEMP"

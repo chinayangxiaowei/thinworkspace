@@ -1073,3 +1073,21 @@ Sol / `gpt-5.6-sol` / `xhigh` 的限定只读调查确认多个真实 fixture �
 单 worker 的完整新批次根为 `target/p0-03-git-full-serial.dxsAq4/`，34 项 `input-sha256.json` 与前批相同。主 Agent 重跑同一真实预检，session `72750` 终态退出 0，仍为 workspace 993＝989＋3＋1、Git 479＝475＋3＋1，Git 名称集合哈希不变；结果仍各自保存在 `github-output-workspace`、`github-output-git`。顺序执行器 session `13582` 已进入新 main：从冻结 workflow 提取各命令，仅变更本机包选择、独立输出目录和 `--jobs 2`→`--jobs 1`，每组前后重验输入；不改变 CI 文件或内层 libtest 设置。本段是重新准入和启动记录，尚无三个分区的完整终态，不把旧批的 10 项或三项对照计入本批。
 
 Astra / `gpt-6-astra` / `xhigh` 对本节新增进度记录给出限定 **Approve**，确认历史中断、对照结果、负载假说、新批启动与未执行项区分清楚，允许仅此文档提交。主 Agent 检查本文 6 个本地链接目标、围栏配对与 `git diff --check` 通过；链接检查不包括锚点。该批准不覆盖源码、CI、完整 479 项或阶段放行。
+
+### 单 worker 批次中断与内层并发对照（2026-09-13 UTC）
+
+`target/p0-03-git-full-serial.dxsAq4/` 的 main 正常 baseline 为 Build 10.34 秒、Test 71.55 秒，105＋6＋25 全部通过。Astra / `gpt-6-astra` / `xhigh` 分段核验前 122 项（95 caught＋27 unviable）的 diff、phase 与最终失败集合，未发现非目标失败；其中若干反转条件在健康前置阶段被检出，不能据此声称已执行到后续负例边界。这只是部分日志证据，不是批次通过。
+
+第 132 项 `base_materialization.rs:1142:12` 仅删除 clean 输出判断的 `!`，Build 成功、Test 44.22 秒正常退出 101，但最终 40 个失败中只有 7 个为目标 Validation，另有 33 个非目标失败：15 个 Base fixture Timeout、7 个到达该判断前的 Base Git Timeout、8 个不调用该判断的 managed topology Timeout，以及 3 个独立 runner 失败（完整双流 Timeout、retained-writer 前置 child 未及时退出、8 MiB 有限流实收 0 字节）。Astra 独立复核该项与相邻第 131 项；后者只有 24 个对应 Base 失败、无非目标 Timeout。保留工具对第 132 项的原始 caught 分类，但不能将受干扰的结果用作干净的变异验收证据。
+
+主 Agent 核验自有 `cargo-mutants` PID `17710`、父 `17671` 及精确输出 argv 后，仅向该 PID 发 SIGINT。session `13582` 终态退出 1（interrupted）；main 保留 **132/475＝105 caught＋27 unviable**，0 missed/工具 Timeout，end_time null，flags/pipes 未启动。全部 34 项输入未变，停止后未发现该 scratch/输出对应的遗留进程；所有日志、fixture 与 scratch 保留。不会因本次中断自动重启完整 479 项。
+
+故障后读取的 load averages 为 `4.83/32.05/49.91`，停止后为 `9.95/19.79/40.23`；数据卷/系统卷分别仍有约 269/353 GiB 可用，swap 使用约 4 GiB，`pmset` 未显示本批时段的 sleep/wake。上述是事后环境读数，不是故障期间的资源跟踪，不能据此证明或排除唯一根因；未终止用户程序或修改系统电源设置。
+
+Astra / `gpt-6-astra` / `xhigh` 同意一个限定诊断控制：在新建 `target/p0-03-libtest-one-control.Ck49FY/` 复制冻结哈希清单，实际枚举恰好第 132 项，再使用工具 27.1.0、正常 baseline、完整所属 Git 包测试、`--leak-dirs --timeout 180 --jobs 1 -C=--locked`，只在原 `-- -- --include-ignored --nocapture` 后增加 `--test-threads=1`。不增加 `--lib`、测试名过滤或 `--exact`；源码、CI、排除项和预算不变。测试集合未缩小，但并发交错条件改变，因此仅用于诊断。baseline 必须完成 136 passed，mutant 必须是正常目标断言 Failure 101 且无非目标失败；若 baseline/预算或非目标失败再出现，则停止报告，不提高预算、不恢复全量。
+
+对照 session `32963` 终态退出 **4**，end_time `2026-09-13T07:06:14.892026Z`：正常 baseline Build 10.44 秒成功，Test 在 **180.047 秒被工具判 Timeout**。105 unit 在 110.36 秒全部通过、6 attributes IT 在 19.36 秒全部通过，25 topology IT 尚未完成；不能记作 136 passed。唯一 mutant 未开始（total_mutants 0），计数中的 timeout 0 不代表 baseline 无超时。本次未得到单线程下的有效变异结果，也未证明并发干扰根因。全部 34 项输入未变；按准入约定停止该控制，不加预算、不继续完整 479。当前缺口是验证执行稳定性及串行容量尚未同时得到证实，P0-03 仍为 In Progress；不把历史部分结果相加为全量通过。
+
+两个实验进程均终止后，主 Agent 执行原样通用门禁，session `28347` 终态退出 0：fmt、全 workspace Clippy、普通测试 **245 passed、0 failed、2 ignored**。再次枚举全部测试二进制确认共 247 项，孤立 FD-zero 子进程的单项输出不重复计数；两项额外 APFS 卷测试未配置第二卷，仍未执行。本文 6 个本地链接目标、20 个围栏标记配对和 `git diff --check` 通过，未校验锚点。本轮没有源码或公开契约变更，不重新运行未改变的 fuzz/Release；普通门禁通过不替代上述失败的变异验证、远端 CI 或阶段放行。
+
+Astra / `gpt-6-astra` / `xhigh` 对本节进度文档给出限定 **Approve**，独立核验最终正文 SHA-256 `22435aa0bfa11e20bb3287c698623ba2f541a3c78f70576a24484afd7759a780`、原始 baseline 与冻结 scratch，认可只提交本记录；本句为审核后的事实登记。该批准不覆盖源码、CI、完整 479 项门禁或阶段放行。

@@ -235,7 +235,10 @@ dependencies = [
 name = "thinws-p0-cleanup"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,6 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use thinws_p0_cleanup::removal_log::{
+    EventOutcome, RemovalLogEvent, RepositoryEvidence, RepositoryRelativePath, SafeId,
+};
 use thinws_p0_cleanup::{
     DiscoveryCompleteness, GitState, PathValidation, ProcessUse, RemovalDecision, RemovalMode,
     RemovalPreflight, RepositoryState, VolumeValidation, aggregate_git_state, decide_removal,
@@ -12,6 +15,58 @@ const ORDINARY: &[u8] = b"1 .M N... 100644 100644 100644 01234567890123456789012
 fuzz_target!(|data: &[u8]| {
     // Raw bytes exercise malformed records without filesystem or Git access.
     let _ = parse_tracked_change_count(data);
+    #[cfg(fuzzing)]
+    thinws_p0_cleanup::git_query::exercise_pure_parsers(data);
+
+    // Exercise the event's bounded field types and JSON escaping in memory.
+    // No fuzz input is passed to File, Git, a filesystem path, or deletion.
+    if let Ok(text) = std::str::from_utf8(data) {
+        let expected = !text.is_empty()
+            && text.len() <= 128
+            && text.chars().all(
+                |character| matches!(character, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-'),
+            );
+        assert_eq!(SafeId::new(text).is_ok(), expected);
+    }
+    if let Ok(relative_path) = RepositoryRelativePath::new(data) {
+        let (process_use, expected_process_use) = match data.first().copied().unwrap_or(0) % 3 {
+            0 => (ProcessUse::NoEvidence, "no_evidence"),
+            1 => (ProcessUse::ScanIncomplete, "scan_incomplete"),
+            _ => (ProcessUse::ConfirmedInUse, "confirmed_in_use"),
+        };
+        let repositories = [RepositoryEvidence {
+            relative_path,
+            tracked_changes: None,
+        }];
+        let event = RemovalLogEvent {
+            utc_unix_ms: 0,
+            operation_id: SafeId::new("op_fuzz").expect("static valid experiment ID"),
+            workspace_id: SafeId::new("ws_fuzz").expect("static valid experiment ID"),
+            force: true,
+            check_completeness: DiscoveryCompleteness::Incomplete.into(),
+            process_use: process_use.into(),
+            repositories: &repositories,
+            outcome: EventOutcome::Started,
+        };
+        let encoded = serde_json::to_vec(&event).expect("typed event is serializable");
+        assert!(encoded.is_ascii());
+        assert!(!encoded.contains(&b'\n'));
+        assert!(!encoded.contains(&b'\r'));
+        let decoded: serde_json::Value = serde_json::from_slice(&encoded).expect("valid JSON");
+        let escaped = decoded["repositories"][0]["relative_path"]
+            .as_str()
+            .expect("path is an escaped string");
+        assert!(!escaped.bytes().any(|byte| byte.is_ascii_control()));
+        assert!(decoded["repositories"][0]["tracked_changes"].is_null());
+        assert_eq!(decoded["event"], "started");
+        assert_eq!(decoded["force"], true);
+        assert_eq!(decoded["process_use"], expected_process_use);
+    }
+    for forbidden_prefix in [b"/".as_slice(), b"../", b"\0"] {
+        let mut invalid = forbidden_prefix.to_vec();
+        invalid.extend_from_slice(data);
+        assert!(RepositoryRelativePath::new(&invalid).is_err());
+    }
 
     // A generated valid path makes the success-side invariants reachable without
     // requiring libFuzzer to discover every fixed porcelain field first.

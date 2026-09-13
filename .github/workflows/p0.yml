@@ -12,9 +12,9 @@ permissions:
 jobs:
   probe:
     runs-on: macos-15
-    # P0-06 already used about 42 minutes; P0-07 adds an experiment and fuzz target.
-    # Keep every existing gate and per-test budget while allowing the larger set.
-    timeout-minutes: 60
+    # P0-07 run 34760370580 hit the 60-minute job limit during 712 mutations.
+    # Allow the expanded suite to finish without reducing any gate or test budget.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

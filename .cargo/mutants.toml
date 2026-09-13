@@ -1,8 +1,9 @@
-# Exact equivalents reviewed for P0-01/P0-02/P0-06; no function/file-wide exclusions.
+# Exact reviewed exceptions for P0-01/P0-02/P0-06/P0-07; no function/file-wide skips.
 # Proofs, ownership, and invalidation conditions are in:
 # docs/development/implementation/P0-01_HostPathProbe实验.md
 # docs/development/implementation/P0-02_APFS物化实验.md
 # docs/development/implementation/P0-06_原始目录镜像实验.md
+# docs/development/implementation/P0-07_已跟踪检查与清理提示实验.md
 exclude_re = [
     '^experiments/p0/probe/src/lib\.rs:1408:57: replace \| with \^ in decode_hex$',
     '^experiments/p0/probe/src/ffi\.rs:61:(32|52): replace \| with \^ in open_root_directory$',
@@ -18,4 +19,14 @@ exclude_re = [
     '^experiments/p0/materialize/src/ffi\.rs:71:(32|48|63|82): replace \| with \^ in create_file_at$',
     '^experiments/p0/materialize/src/lib\.rs:859:35: replace match guard context\.clone_calls_succeeded == regular_count with true in execute_prepared_inner$',
     '^experiments/p0/materialize/src/lib\.rs:1000:9: replace \|\| with && in is_expected_target_writability_change$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1717:57: replace \| with \^ in directory_open_flags$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1717:38: replace \| with \^ in directory_open_flags$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1717:20: replace \| with \^ in directory_open_flags$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1721:57: replace \| with \^ in file_open_flags$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1721:38: replace \| with \^ in file_open_flags$',
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1721:20: replace \| with \^ in file_open_flags$',
+    # This bridge is absent from ordinary test builds; fuzz must still execute it.
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1929:5: replace exercise_pure_parsers with \(\)$',
+    # Test/fuzz oracle body, not a production mutation target; keep its parser targets.
+    '^experiments/p0/cleanup/src/git_query/inspect\.rs:1934:5: replace exercise_pure_parser_inputs with \(\)$',
 ]

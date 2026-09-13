@@ -205,6 +205,8 @@ name = "thinws-p0-cleanup"
 version = "0.0.0"
 dependencies = [
  "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -222,6 +224,7 @@ name = "thinws-p0-probe-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "serde_json",
  "thinws-p0-cleanup",
  "thinws-p0-probe",
 ]

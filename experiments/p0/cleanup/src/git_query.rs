@@ -1,15 +1,14 @@
-//! Bounded collection for the four internal Git query shapes used by P0-07.
+//! Bounded collection for the fixed internal Git query shapes used by P0-07.
 //!
 //! A successful [`run`] means only that the direct child exited and both output
 //! pipes closed within their bounds. Callers must inspect [`GitExit`] and must
 //! not interpret successful collection as a semantically successful or complete
-//! Git inspection. Repository/config/path safety validation belongs to the next
-//! P0-07 step. The repository-sensitive shapes pass an explicit `cwd/.git` to
-//! stop parent discovery, but that does not validate whether `.git` is a safe
-//! directory or reference. Callers must not use this helper on real user
-//! directories until the next step connects that validation.
+//! Git inspection. [`inspect`] is the sole entry that connects bounded no-follow
+//! discovery, source and repository preflight, index-flag checks, leaf-first
+//! status queries, evidence revalidation, and the existing aggregate model.
+//! Neither entry is a Phase 1 Port or a sandbox for user commands.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
@@ -20,7 +19,13 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rustix::fs::OFlags;
+use rustix::fs::{FileType, OFlags};
+
+mod inspect;
+
+#[cfg(fuzzing)]
+pub use inspect::exercise_pure_parsers;
+pub use inspect::{GitInspection, InspectionIssue, RepositoryInspection, inspect};
 
 const GIT_EXECUTABLE: &str = "/usr/bin/git";
 const RUN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +39,8 @@ const MAX_DRAIN_READS: usize = 16;
 pub enum GitQuery<'a> {
     /// Query the fixed system Git version.
     Version,
+    /// Query the fixed system Git's runtime executable directory.
+    ExecPath,
     /// Read exactly one caller-prevalidated config file without includes.
     Config { file: &'a Path },
     /// Read tracked status using the command frozen in the technical design.
@@ -101,6 +108,7 @@ pub enum IoOperation {
 pub enum InputField {
     Cwd,
     ConfigFile,
+    ConfigIsolationDevice,
 }
 
 /// Structured reason why output collection did not complete.
@@ -203,9 +211,55 @@ const PRODUCTION_BUDGET: Budget = Budget {
 
 /// Run one fixed Git query with a caller-supplied, explicit working directory.
 pub fn run(cwd: &Path, query: GitQuery<'_>) -> Result<GitQueryOutput, GitQueryFailure> {
+    run_bootstrap(cwd, query, RUN_TIMEOUT)
+}
+
+pub(super) fn run_bootstrap(
+    cwd: &Path,
+    query: GitQuery<'_>,
+    run_timeout: Duration,
+) -> Result<GitQueryOutput, GitQueryFailure> {
     validate_inputs(cwd, &query)?;
-    let command = git_command(cwd, query);
-    collect_command(command, PRODUCTION_BUDGET)
+    let command = git_command(cwd, query, QueryEnvironment::Isolated, None);
+    collect_command(
+        command,
+        Budget {
+            run_timeout,
+            ..PRODUCTION_BUDGET
+        },
+    )
+}
+
+pub(super) struct PreservedGitEnvironment<'a> {
+    pub home: Option<&'a OsStr>,
+    pub xdg_config_home: Option<&'a OsStr>,
+    pub git_config_nosystem: Option<&'a OsStr>,
+    pub git_config_system: Option<&'a OsStr>,
+    pub git_config_global: Option<&'a OsStr>,
+    pub git_attr_nosystem: Option<&'a OsStr>,
+}
+
+pub(super) fn run_prevalidated_repository(
+    cwd: &Path,
+    git_dir: &Path,
+    query: GitQuery<'_>,
+    environment: PreservedGitEnvironment<'_>,
+    run_timeout: Duration,
+) -> Result<GitQueryOutput, GitQueryFailure> {
+    validate_inputs(cwd, &query)?;
+    let command = git_command(
+        cwd,
+        query,
+        QueryEnvironment::Preserved(environment),
+        Some(git_dir),
+    );
+    collect_command(
+        command,
+        Budget {
+            run_timeout,
+            ..PRODUCTION_BUDGET
+        },
+    )
 }
 
 fn validate_inputs(cwd: &Path, query: &GitQuery<'_>) -> Result<(), GitQueryFailure> {
@@ -217,10 +271,31 @@ fn validate_inputs(cwd: &Path, query: &GitQuery<'_>) -> Result<(), GitQueryFailu
     {
         return Err(input_failure(InputField::ConfigFile));
     }
+    if matches!(query, GitQuery::Config { .. }) {
+        let null = rustix::fs::statat(
+            rustix::fs::CWD,
+            "/dev/null",
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(|_| input_failure(InputField::ConfigIsolationDevice))?;
+        if !FileType::from_raw_mode(null.st_mode).is_char_device() {
+            return Err(input_failure(InputField::ConfigIsolationDevice));
+        }
+    }
     Ok(())
 }
 
-fn git_command(cwd: &Path, query: GitQuery<'_>) -> Command {
+enum QueryEnvironment<'a> {
+    Isolated,
+    Preserved(PreservedGitEnvironment<'a>),
+}
+
+fn git_command(
+    cwd: &Path,
+    query: GitQuery<'_>,
+    environment: QueryEnvironment<'_>,
+    prevalidated_git_dir: Option<&Path>,
+) -> Command {
     let mut command = Command::new(GIT_EXECUTABLE);
     command
         .current_dir(cwd)
@@ -230,9 +305,6 @@ fn git_command(cwd: &Path, query: GitQuery<'_>) -> Command {
         .env_clear()
         .env("LC_ALL", "C")
         .env("LANG", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
@@ -254,18 +326,54 @@ fn git_command(cwd: &Path, query: GitQuery<'_>) -> Command {
         .env("GIT_CONFIG_KEY_3", "color.ui")
         .env("GIT_CONFIG_VALUE_3", "false");
 
+    match environment {
+        QueryEnvironment::Isolated => {
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_ATTR_NOSYSTEM", "1");
+        }
+        QueryEnvironment::Preserved(environment) => {
+            set_optional_env(&mut command, "HOME", environment.home);
+            set_optional_env(&mut command, "XDG_CONFIG_HOME", environment.xdg_config_home);
+            set_optional_env(
+                &mut command,
+                "GIT_CONFIG_NOSYSTEM",
+                environment.git_config_nosystem,
+            );
+            set_optional_env(
+                &mut command,
+                "GIT_CONFIG_SYSTEM",
+                environment.git_config_system,
+            );
+            set_optional_env(
+                &mut command,
+                "GIT_CONFIG_GLOBAL",
+                environment.git_config_global,
+            );
+            set_optional_env(
+                &mut command,
+                "GIT_ATTR_NOSYSTEM",
+                environment.git_attr_nosystem,
+            );
+        }
+    }
+
     match query {
         GitQuery::Version => {
             command.arg("--version");
         }
+        GitQuery::ExecPath => {
+            command.arg("--exec-path");
+        }
         GitQuery::Config { file } => {
-            command.arg(git_dir_argument(cwd));
+            command.arg("--git-dir=/dev/null");
             command.args(["config", "--file"]);
             command.arg(file);
             command.args(["--no-includes", "--null", "--list"]);
         }
         GitQuery::TrackedStatus => {
-            command.arg(git_dir_argument(cwd));
+            command.arg(git_dir_argument(cwd, prevalidated_git_dir));
             command.args([
                 "--no-optional-locks",
                 "status",
@@ -276,7 +384,7 @@ fn git_command(cwd: &Path, query: GitQuery<'_>) -> Command {
             ]);
         }
         GitQuery::IndexFlags => {
-            command.arg(git_dir_argument(cwd));
+            command.arg(git_dir_argument(cwd, prevalidated_git_dir));
             command.args(["--no-optional-locks", "ls-files", "-v", "-z"]);
         }
     }
@@ -284,9 +392,18 @@ fn git_command(cwd: &Path, query: GitQuery<'_>) -> Command {
     command
 }
 
-fn git_dir_argument(cwd: &Path) -> OsString {
+fn set_optional_env(command: &mut Command, key: &str, value: Option<&OsStr>) {
+    if let Some(value) = value {
+        command.env(key, value);
+    }
+}
+
+fn git_dir_argument(cwd: &Path, prevalidated_git_dir: Option<&Path>) -> OsString {
     let mut argument = OsString::from("--git-dir=");
-    argument.push(cwd.join(".git"));
+    match prevalidated_git_dir {
+        Some(git_dir) => argument.push(git_dir),
+        None => argument.push(cwd.join(".git")),
+    }
     argument
 }
 
@@ -639,18 +756,21 @@ fn git_exit(status: ExitStatus) -> GitExit {
 mod tests {
     use std::env;
     use std::ffi::OsStr;
+    use std::fs;
     use std::io::{self, Write};
     use std::net::Shutdown;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{self, Command};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::*;
 
     const HELPER_MODE: &str = "THINWS_P0_07_GIT_QUERY_HELPER";
+    static NEXT_TIMEOUT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn test_budget(stdout_limit: usize, stderr_limit: usize, run_ms: u64) -> Budget {
         Budget {
@@ -668,6 +788,27 @@ mod tests {
             .args(["--exact", "git_query::tests::command_helper", "--nocapture"])
             .env(HELPER_MODE, mode);
         command
+    }
+
+    fn retained_fifo() -> PathBuf {
+        let unique = NEXT_TIMEOUT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("p0-07-git-query-timeout-fixtures")
+            .join(format!("{}-{nanos}-{unique}", process::id()));
+        fs::create_dir_all(&directory).expect("create retained timeout fixture");
+        let fifo = directory.join("config.fifo");
+        let output = Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .env_clear()
+            .output()
+            .expect("create controlled FIFO");
+        assert!(output.status.success(), "mkfifo must succeed");
+        fifo
     }
 
     #[test]
@@ -688,6 +829,46 @@ mod tests {
         assert_eq!(PRODUCTION_BUDGET.poll_interval, Duration::from_millis(5));
         assert_eq!(PRODUCTION_BUDGET.stdout_limit, 8_388_608);
         assert_eq!(PRODUCTION_BUDGET.stderr_limit, 262_144);
+    }
+
+    #[test]
+    fn wrapper_queries_propagate_the_supplied_run_timeout() {
+        let (reader, _writer) = UnixStream::pair().expect("owned preflight socket pair");
+        set_nonblocking(&reader).expect("configure preflight socket");
+        assert!(
+            rustix::fs::fcntl_getfl(&reader)
+                .expect("read preflight socket flags")
+                .contains(OFlags::NONBLOCK)
+        );
+
+        let fifo = retained_fifo();
+        let cwd = fifo.parent().expect("fixture directory");
+        let timeout = Duration::from_millis(40);
+
+        let started = Instant::now();
+        let bootstrap = run_bootstrap(cwd, GitQuery::Config { file: &fifo }, timeout)
+            .expect_err("bootstrap config reader must honor the short timeout");
+        assert_eq!(bootstrap.kind, GitQueryFailureKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let started = Instant::now();
+        let prevalidated = run_prevalidated_repository(
+            cwd,
+            &cwd.join(".git"),
+            GitQuery::Config { file: &fifo },
+            PreservedGitEnvironment {
+                home: None,
+                xdg_config_home: None,
+                git_config_nosystem: None,
+                git_config_system: None,
+                git_config_global: None,
+                git_attr_nosystem: None,
+            },
+            timeout,
+        )
+        .expect_err("prevalidated config reader must honor the short timeout");
+        assert_eq!(prevalidated.kind, GitQueryFailureKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -827,10 +1008,11 @@ mod tests {
         let config = Path::new("/tmp/thinws-p0-07-query-config");
         let cases = [
             (GitQuery::Version, vec![OsStr::new("--version")]),
+            (GitQuery::ExecPath, vec![OsStr::new("--exec-path")]),
             (
                 GitQuery::Config { file: config },
                 vec![
-                    OsStr::new("--git-dir=/tmp/thinws-p0-07-query-cwd/.git"),
+                    OsStr::new("--git-dir=/dev/null"),
                     OsStr::new("config"),
                     OsStr::new("--file"),
                     config.as_os_str(),
@@ -864,7 +1046,7 @@ mod tests {
         ];
 
         for (query, expected) in cases {
-            let command = git_command(cwd, query);
+            let command = git_command(cwd, query, QueryEnvironment::Isolated, None);
             assert_eq!(command.get_program(), OsStr::new(GIT_EXECUTABLE));
             assert_eq!(command.get_current_dir(), Some(cwd));
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected);

@@ -110,7 +110,7 @@
 | init、bootstrap config 或 data root 身份 | Phase 1 详细设计的实例与 data root 章节；技术栈的实现选型章节 |
 | APFS、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的 macOS/APFS 选型章节 |
 | Git、Base、branch、worktree | Phase 1 详细设计的 Repository/Git 章节；技术栈和开发规范相关章节 |
-| exec、信号、超时、进程清理 | Phase 1 详细设计的 Execution 章节；用户手册的可见契约；技术栈和开发规范相关章节 |
+| 内部子进程、超时或外部进程占用检查 | Phase 1 详细设计的外部进程占用章节；用户手册的删除契约；技术栈和开发规范相关章节 |
 | 新依赖、工具链或 CI | 技术栈的选型、测试、供应链和发布章节 |
 | 许可证、商业使用、贡献权属、商业授权申请或对外授权称谓 | 完整读取 `LICENSE.md`、`LICENSING.md` 与 `COMMERCIAL-LICENSING.md`；涉及依赖时追加技术栈的供应链章节 |
 | 版本发布或显著变更记录 | `CHANGELOG.md`；追加任务流程的阶段收口与放行章节 |
@@ -137,6 +137,7 @@
 
 - 当前只实施 P0/P1；不得预建后续阶段的领域对象、Port、crate、daemon 或空占位实现。
 - P1 是单机 CLI，不引入常驻服务、HTTP/gRPC、消息队列、远程控制面或异步运行时。
+- P1 交付可直接使用的普通工作区路径，不包装用户命令，不接管语言工具链、构建目录重定向或缓存共享策略；职责收缩依据见 [ADR-0001](docs/project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)。
 - 依赖方向固定为 `cli → application → core/ports`，Adapter 实现 Port；Core/Application 不直接调用具体 OS、Git CLI 或 SQLite API。
 - Port 的完整名单和语义以 Phase 1 详细设计为准；未先更新该设计和相关 ADR，不得新增平行抽象。
 
@@ -146,7 +147,7 @@
 - 文件物化必须遵循《跨平台工作区物化设计》的 Probe/Plan/Revalidate/Execute/Receipt 契约；Adapter 只报告事实，降级政策由 Core/Application 决定。
 - 受控对象必须由类型 ID 和已验证根目录推导；禁止任意 Workspace 路径、路径逃逸、跟随未验证符号链接，或用 shell/glob/未验证环境变量选择删除目标。
 - Git、文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有过渡状态/operation、Receipt 和幂等协调路径。
-- Git 与子进程使用 argv 调用，不通过 shell 拼接；`workspace exec` 始终是 trusted-host，不得宣称为 Sandbox。
+- 平台内部 Git 与子进程使用 argv 调用，不通过 shell 拼接；工作区不是 Sandbox，不得宣称用户直接运行的命令受安全隔离。
 - 不记录密钥、完整环境、完整 argv、源码正文或未脱敏凭据 URL。
 
 ### 4.3 公开契约与质量

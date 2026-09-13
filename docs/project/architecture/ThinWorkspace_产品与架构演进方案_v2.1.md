@@ -85,10 +85,11 @@ Phase 1 不做：
 - 远程执行和任务队列；
 - 工作区迁移；
 - Agent 会话管理和任务编排；
+- 用户命令执行包装、语言识别、构建目录重定向和缓存共享策略；
 - 多租户、权限体系和高可用；
 - 自研安全 Sandbox。
 
-Phase 1 允许用户或现有 Agent Runtime 自行进入 Workspace 工作。平台只负责准备目录、运行受控的前台命令、展示状态和安全回收。
+Phase 1 向用户、编辑器和现有 Agent Runtime 提供可直接使用的普通绝对路径。平台只负责准备目录、展示状态和安全回收，不要求用户命令经过平台。实现语言不限制工作区的开发语言；本次职责收缩的依据与代价见 [ADR-0001](adr/ADR-0001_Phase1普通目录与无执行包装.md)。
 
 ---
 
@@ -106,7 +107,7 @@ Phase 1 只交付一条单机闭环：
   → 受保护地删除 Workspace 和回收空间
 ```
 
-CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例子只由 [Phase 1 用户操作手册](../reference/ThinWorkspace_Phase1用户操作手册_v1.0.md)管理。架构方案只冻结两个产品决策：本阶段没有后台队列/常驻服务；执行命令是 trusted-host 前台模式，不是 Sandbox。
+CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例子只由 [Phase 1 用户操作手册](../reference/ThinWorkspace_Phase1用户操作手册_v1.0.md)管理。本阶段没有后台队列、常驻服务或用户命令执行包装；普通工作区不构成安全 Sandbox。
 
 ---
 
@@ -124,7 +125,7 @@ CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例�
 ├─────────────────────────────────────────────┤
 │ Core/Ports：身份、状态、策略和窄接口       │
 ├──────────────────────────────────────────────┤
-│ Adapters：macOS/APFS、Git CLI、SQLite、进程   │
+│ Adapters：macOS/APFS、Git CLI、SQLite          │
 └──────────────────────────────────────────────┘
 ```
 
@@ -136,7 +137,7 @@ Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCode
 
 为了避免架构方案同时承担产品路线图和实现手册，细节按两个独立设计域管理：
 
-- [Phase 1 单机 CLI 详细设计](../design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)：单机组件、data root、Repository/Base/Workspace、Git 拓扑、状态机、恢复、Execution 和 GC。
+- [Phase 1 单机 CLI 详细设计](../design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)：单机组件、data root、Repository/Base/Workspace、Git 拓扑、状态机、恢复、外部占用检查和 GC。
 - [跨平台工作区物化设计](../design/ThinWorkspace_跨平台工作区物化设计_v1.0.md)：PlatformProbe、WorkspaceMaterializer、跨卷判定、CoW 证据、降级和平台 Adapter 契约。
 
 本文档只保留跨阶段架构决策和产品边界，不复制 trait 方法、SQLite 约束、系统调用序列、Git 命令参数或测试矩阵。
@@ -171,11 +172,11 @@ Linux Btrfs/XFS/OverlayFS 和 Windows ReFS 的历史起点、跨卷限制与接�
 
 ### 6.1 部署边界
 
-`thinws` 是按命令启动的本机进程。SQLite 是嵌入式实现细节，Git 语义通过系统 Git CLI 完成。多个终端可以并发调用 CLI，但写生命周期由本机有界锁协调；前台长运行命令不长期持锁。
+`thinws` 是按命令启动的本机进程。SQLite 是嵌入式实现细节，Git 语义通过系统 Git CLI 完成。多个终端可以并发调用 CLI，但写生命周期由本机有界锁协调；用户直接运行的工具不经过该锁，也不受平台调度。
 
 ### 6.2 内部对象
 
-用户仍只需理解 Repository 和 Workspace。实现内部使用 Repository、Base、Workspace、Operation、Execution 和删除 tombstone；这些内部对象不扩张为后台 Job、Agent 会话或远程调度模型。
+用户仍只需理解 Repository 和 Workspace。实现内部使用 Repository、Base、Workspace、Operation 和删除 tombstone；这些内部对象不扩张为用户执行记录、后台 Job、Agent 会话或远程调度模型。
 
 ### 6.3 生命周期决策
 
@@ -184,8 +185,8 @@ Phase 1 的核心不变量是：
 1. 配置、data root 所有权标记和卷身份互相校验；数据卷丢失或变更时安全失败。
 2. Workspace 的可用性由持久化状态和可验证 Receipt 决定，不由目录是否存在决定。
 3. 创建、删除、Repository 导入/更新、Base 发布和 GC 均可从中断中显式、幂等恢复。普通查询不隐式修复。
-4. Workspace 删除默认保留托管分支；dirty 内容、正在运行的托管进程和删除分支时的未保护提交各自使用独立保护。
-5. `workspace exec` 是 trusted-host 前台执行；不提供安全 Sandbox、后台队列或跨终端强制终止服务。
+4. Workspace 删除默认保留托管分支；dirty 内容、已确认的外部进程占用和删除分支时的未保护提交各自使用独立保护。占用探测是尽力能力，不承诺发现所有使用者。
+5. 用户直接在工作区运行工具，平台不托管或终止这些进程，也不自动配置其构建输出和缓存。
 6. GC 不删除任何活跃 Workspace、未完成 operation、托管 Repository 或 Git refs/objects。
 
 内部 ID、data root 布局、Git 拓扑、Base 身份、状态迁移、operation/Receipt、删除和 GC 细节全部由《Phase 1 单机 CLI 详细设计》管理。命令和可见行为由 Phase 1 用户操作手册管理。
@@ -417,7 +418,7 @@ Node Runtime 继续使用相同的 Platform Adapters。控制面只消费统一�
 | 阶段 | 产品形态与用户概念 | 本阶段必须交付的能力 | 明确边界：本阶段不得承诺或引入 | 进入条件 | 退出控制点 |
 |---|---|---|---|---|---|
 | Phase 0 技术验证 | 非产品原型；仅验证 Repository、Base、Workspace | 路径级能力检测；APFS clone；Full Copy；平台托管 bare repository＋linked worktree 组合；故障注入 | 不追求完整 CLI；不做 daemon、观察器、WorkspaceCheckpoint、SourceSnapshot、远程执行和 UI | 已确定 macOS/APFS 为首个目标环境；测试仓库和数据根目录就绪 | 同卷 APFS CoW 已由真实调用证实；预检/运行时不支持的显式降级均可解释；APFS 跨卷失败已结构化证明；Full Copy Adapter 可独立跨卷；Phase 1 Application 对跨卷布局保持拒绝；Git 状态干净；创建/删除中断可恢复；不完整 Workspace 不会成为 Ready |
-| Phase 1 单机 CLI | 一个二进制；用户只理解 Repository、Workspace | repo add/fetch/list 与 workspace CLI；Host/Path Probe；同卷 APFS/Full Copy WorkspaceMaterializer；Git 状态；前台 exec；SQLite 状态；删除保护；doctor、空间统计、gc dry-run 与受保护 GC | 无跨卷产品布局、repo remove 或 Git object GC；无常驻进程；无 HTTP/远程 API；无实时观察、写前预警、WorkspaceCheckpoint、SourceSnapshot、Job、Node、调度、Web 和 Sandbox 承诺 | Phase 0 全部退出控制点通过；平台托管 bare repository＋linked worktree ADR 和 MaterializationPlan/Receipt 定稿 | 10 个 Workspace 隔离；显式 repair 可恢复；降级不静默；dirty/未保护分支提交/使用中 Workspace 受保护；所有声明支持的 `--json` 和退出码稳定 |
+| Phase 1 单机 CLI | 一个二进制；用户只理解 Repository、Workspace | repo add/fetch/list 与 workspace CLI；Host/Path Probe；同卷 APFS/Full Copy WorkspaceMaterializer；普通路径交付与 Git 状态；SQLite 状态；删除保护；doctor、空间统计、gc dry-run 与受保护 GC | 无用户命令包装、语言工具链配置、构建重定向或缓存共享策略；无跨卷产品布局、repo remove 或 Git object GC；无常驻进程、HTTP/远程 API；无实时观察、写前预警、WorkspaceCheckpoint、SourceSnapshot、Job、Node、调度、Web 和 Sandbox 承诺 | Phase 0 全部退出控制点通过；平台托管 bare repository＋linked worktree ADR 和 MaterializationPlan/Receipt 定稿 | 10 个 Workspace 隔离；普通工具可直接操作路径；显式 repair 可恢复；降级不静默；dirty/未保护分支提交/已确认占用阻止删除，扫描不完整如实报告；所有声明支持的 `--json` 和退出码稳定 |
 | Phase 2 单机协同 | CLI＋本地 `thinwsd`；新增 WorkspaceCheckpoint、冲突预警 | Unix Socket RPC；Agent Adapter；ChangeObserver；重新扫描校准；prepare/apply；EditToken；文本冲突索引；WorkspaceCheckpoint；本机固定输入验证 | 不做 Remote Worker、网络控制面、Job 调度、Workspace 迁移和多节点所有权；不把非受管写入标成写前预警 | Phase 1 稳定运行；确有多个 Agent 同机协同需求；选定至少一种可控编辑接入 | 受管修改在写入前看到有效报告；竞态会要求重新 prepare；事件丢失可校准；非受管写入明确标为写后发现；WorkspaceCheckpoint 可恢复 Git 和源码状态 |
 | Phase 3 远程验证 | 本机开发＋远程 Worker；新增 SourceSnapshot、Job、Attempt、Worker | 可移植 SourceSnapshot；CAS/传输；Worker 注册与租约；远程执行；日志、结果和产物；环境/配方摘要；重试 attempt | 不做远程可写 Workspace、开发任务迁移、源码双向同步、跨机共享可变构建目录和多节点编辑 | Phase 2 的内容清单/寻址内部能力已稳定；SourceSnapshot schema 与泄漏边界 ADR 已批准；重型验证成为已测量瓶颈；外部 Sandbox/Worker 信任模型明确 | 结果严格绑定 SourceSnapshot 和环境摘要；不同 SourceSnapshot/配方摘要的结果互不污染；重试不覆盖旧 attempt；节点丢失、环境失败、测试失败可区分 |
 | Phase 4 多节点开发 | 控制面＋Node Runtime；新增 Task、Node、Placement、Generation | Workspace Registry；节点能力报告；放置；全局协调；写入 generation；停机恢复迁移；中央元数据 | 不做同一 Workspace 多节点同时写；不做进程热迁移；不承诺分区期间实时预警；旧节点本地写入不能被描述为物理上已停止 | Phase 3 稳定；存在开发 Workspace 必须远程放置的真实需求；RPO/RTO 已定义 | 旧 generation 无法正式发布；失联修改被隔离为 fork；事件重复/乱序可恢复；新节点内容与持久化 WorkspaceCheckpoint 一致 |
@@ -452,7 +453,7 @@ APFS Clone 主后端
 同一受控数据根内的 Full Copy 显式降级
 平台托管 bare repository＋Git linked worktree 元数据
 正确的 Git 状态
-前台命令执行
+普通路径直接交给用户、编辑器和 Agent
 删除保护和故障恢复
 ```
 

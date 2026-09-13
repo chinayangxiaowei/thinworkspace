@@ -8,7 +8,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
+use rustix::fs::{
+    AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_OMIT,
+};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -305,6 +307,44 @@ impl ControlledTree {
         observe_tree(&self.root)
     }
 
+    pub(crate) fn set_mode(&self, relative: &Path, mode: u32) -> io::Result<()> {
+        let object = self.open_tracked(relative)?;
+        rustix::fs::fchmod(&object, fixture_mode(mode)?).map_err(rustix_error)
+    }
+
+    pub(crate) fn set_modified_time(
+        &self,
+        relative: &Path,
+        seconds: i64,
+        nanoseconds: i64,
+    ) -> io::Result<()> {
+        let object = self.open_tracked(relative)?;
+        rustix::fs::futimens(
+            &object,
+            &Timestamps {
+                last_access: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: UTIME_OMIT,
+                },
+                last_modification: Timespec {
+                    tv_sec: seconds,
+                    tv_nsec: nanoseconds,
+                },
+            },
+        )
+        .map_err(rustix_error)
+    }
+
+    pub(crate) fn mode_and_modified_time_at(&self, relative: &Path) -> io::Result<(u32, i64, i64)> {
+        let object = self.open_tracked(relative)?;
+        let metadata = rustix::fs::fstat(&object).map_err(rustix_error)?;
+        Ok((
+            u32::from(metadata.st_mode & 0o7777),
+            metadata.st_mtime,
+            metadata.st_mtime_nsec,
+        ))
+    }
+
     pub(crate) fn verify_roots(&self) -> io::Result<()> {
         self.verify_parent()?;
         if tracked_identity(rustix::fs::fstat(&self.root)?)? != self.root_identity
@@ -527,6 +567,34 @@ impl ControlledTree {
             current = next;
         }
         Err(io::Error::from_raw_os_error(libc::EINVAL))
+    }
+
+    fn open_tracked(&self, relative: &Path) -> io::Result<OwnedFd> {
+        validate_relative(relative)?;
+        let expected = self
+            .tracked
+            .get(relative)
+            .copied()
+            .ok_or_else(|| io::Error::other("fixture metadata target is not tracked"))?;
+        let object = if relative.as_os_str().is_empty() {
+            self.root.try_clone()?
+        } else {
+            let (parent, name) = self.open_parent(relative)?;
+            let flags = match expected.kind {
+                TrackedKind::Directory => directory_flags(),
+                TrackedKind::RegularFile => {
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
+                }
+                TrackedKind::SymbolicLink | TrackedKind::Special => {
+                    return Err(io::Error::from_raw_os_error(libc::EINVAL));
+                }
+            };
+            rustix::fs::openat(&parent, &name, flags, Mode::empty()).map_err(rustix_error)?
+        };
+        if tracked_identity(rustix::fs::fstat(&object).map_err(rustix_error)?)? != expected {
+            return Err(io::Error::other("fixture metadata target identity changed"));
+        }
+        Ok(object)
     }
 }
 

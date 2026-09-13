@@ -23,9 +23,10 @@ use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 
 use thinws_p0_probe::{
-    Evidence, FileIdentity, MaterializationPathProbeRequest, MaterializationPathReport,
-    MaterializerCandidate, PathCapabilityReport, ProbeError, RevalidationStatus, SupportState,
-    inspect_materialization_paths, revalidate_path, validate_probe_path,
+    AccessPreflight, Evidence, FileIdentity, MaterializationPathProbeRequest,
+    MaterializationPathReport, MaterializerCandidate, PathCapabilityReport, ProbeError,
+    RevalidationChange, RevalidationStatus, SupportState, inspect_materialization_paths,
+    revalidate_path, validate_probe_path,
 };
 use thiserror::Error;
 
@@ -71,8 +72,6 @@ pub struct MaterializeRequest<'a> {
     pub target: &'a Path,
     pub staging: &'a Path,
     pub trash: &'a Path,
-    /// Identity of the caller-declared `.git` control entry, when present.
-    pub protected_git: Option<FileIdentity>,
 }
 
 /// One lossless relative pathname used in evidence.
@@ -90,12 +89,20 @@ pub enum ManifestEntryKind {
     SymbolicLink,
 }
 
-/// Manifest entry for the metadata explicitly covered by P0-02.
+/// One filesystem modification time represented at nanosecond precision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModifiedTime {
+    pub seconds: i64,
+    pub nanoseconds: i64,
+}
+
+/// Manifest entry for the metadata explicitly covered by this experiment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManifestEntry {
     pub path: EncodedRelativePath,
     pub kind: ManifestEntryKind,
     pub permissions: Option<u32>,
+    pub modified_time: Option<ModifiedTime>,
     pub length: u64,
     pub content_digest_hex: Option<String>,
 }
@@ -103,6 +110,8 @@ pub struct ManifestEntry {
 /// Sorted, limited manifest of one source or target tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeManifest {
+    pub root_permissions: u32,
+    pub root_modified_time: ModifiedTime,
     pub entries: Vec<ManifestEntry>,
 }
 
@@ -218,8 +227,6 @@ pub enum MaterializationError {
     UnknownTargetEntry { path: EncodedRelativePath },
     #[error("source entry {path:?} has unsupported type {kind}")]
     UnsupportedSourceEntry { path: PathBuf, kind: String },
-    #[error("source contains the reserved .git control entry")]
-    ReservedSourceEntry,
     #[error("source entry changed while materialization was running: {path:?}")]
     SourceChanged { path: PathBuf },
     #[error("target entry changed while materialization was running: {path:?}")]
@@ -246,6 +253,7 @@ pub struct AttemptEvidence {
     pub cow_evidence: CowEvidence,
     pub clone_calls_succeeded: usize,
     pub ordinary_files_materialized: usize,
+    pub target_root_metadata_started: bool,
     pub created: Vec<CreatedObjectEvidence>,
     pub ordinary_files: Vec<OrdinaryFileEvidence>,
     pub source_manifest: Option<TreeManifest>,
@@ -331,6 +339,7 @@ pub struct FaultInjection {
     pub copy_write: Option<CopyWriteFault>,
     pub identity_registration_at: Option<usize>,
     pub mutate_source_after_file: Option<usize>,
+    pub mtime_errno_at: Option<(usize, i32)>,
     pub rollback: RollbackFault,
 }
 
@@ -341,6 +350,7 @@ impl Default for FaultInjection {
             copy_write: None,
             identity_registration_at: None,
             mutate_source_after_file: None,
+            mtime_errno_at: None,
             rollback: RollbackFault::None,
         }
     }
@@ -352,7 +362,7 @@ pub struct PreparedAttempt {
     backend: Backend,
     report: MaterializationPathReport,
     source: TreeSnapshot,
-    protected_git: Option<ffi::NodeMetadata>,
+    target_baseline: ffi::NodeMetadata,
 }
 
 impl PreparedAttempt {
@@ -399,15 +409,17 @@ pub fn prepare_attempt(
     let target_fd = open_verified_directory(&request.target, &report.target_root)?;
     let _staging_fd = open_verified_directory(&request.staging, &report.staging)?;
     let _trash_fd = open_verified_directory(&request.trash, &report.trash)?;
-    let source = snapshot_tree(&source_fd, &request.source, false)?;
-    let protected_git = target_baseline(&target_fd, &request.target, request.protected_git)?;
+    let source = snapshot_tree(&source_fd, &request.source)?;
+    verify_target_empty(&target_fd, &request.target)?;
+    let target_baseline = ffi::metadata(&target_fd)
+        .map_err(|error| syscall_error("fstat target baseline", &request.target, error, false))?;
 
     Ok(PreparedAttempt {
         request,
         backend,
         report,
         source,
-        protected_git,
+        target_baseline,
     })
 }
 
@@ -430,15 +442,19 @@ pub fn execute_prepared(
         Ok(evidence) => Ok(evidence),
         Err(failure) => {
             let (error, mut context, target) = *failure;
-            let fault_problems = apply_rollback_fault(prepared, &target, &mut context, faults);
-            let mut rollback = rollback_created(
-                prepared,
-                &target,
-                &context.created,
-                faults.rollback,
-                fault_problems,
-            );
-            let target_manifest = match snapshot_tree(&target, &prepared.request.target, true) {
+            let mut rollback = if context.target_root_metadata_started {
+                preserve_after_root_metadata_failure(prepared, &target, &context)
+            } else {
+                let fault_problems = apply_rollback_fault(prepared, &target, &mut context, faults);
+                rollback_created(
+                    prepared,
+                    &target,
+                    &context.created,
+                    faults.rollback,
+                    fault_problems,
+                )
+            };
+            let target_manifest = match snapshot_tree(&target, &prepared.request.target) {
                 Ok(snapshot) => Some(snapshot.manifest),
                 Err(snapshot_error) => {
                     rollback.status = RollbackStatus::Incomplete;
@@ -453,7 +469,7 @@ pub fn execute_prepared(
                     None
                 }
             };
-            let outcome = if context.created.is_empty() {
+            let outcome = if context.created.is_empty() && !context.target_root_metadata_started {
                 AttemptOutcome::Failed
             } else {
                 AttemptOutcome::Partial
@@ -683,11 +699,6 @@ fn prepare_fresh_copy_after_clone(
             path: previous.request.source.clone(),
         });
     }
-    if previous.protected_git != fresh.protected_git {
-        return Err(MaterializationError::TargetChanged {
-            path: previous.request.target.join(".git"),
-        });
-    }
     if !clone_layout_preconditions_satisfied(&fresh.report) {
         return Err(MaterializationError::PreflightUnsupported {
             reason: "fresh fallback probe did not confirm the original same-volume APFS layout and Full Copy permissions"
@@ -725,7 +736,7 @@ fn execute_prepared_inner(
         trash,
     } = opened;
 
-    let source_now = match snapshot_tree(&source, &prepared.request.source, false) {
+    let source_now = match snapshot_tree(&source, &prepared.request.source) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return Err(Box::new((
@@ -744,11 +755,33 @@ fn execute_prepared_inner(
             target,
         )));
     }
-    if let Err(error) =
-        verify_target_baseline(&target, &prepared.request.target, prepared.protected_git)
-    {
+    if let Err(error) = verify_target_empty(&target, &prepared.request.target) {
         return Err(Box::new((
             error,
+            ExecutionContext::new(prepared.backend),
+            target,
+        )));
+    }
+    let target_now = match ffi::metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Err(Box::new((
+                syscall_error(
+                    "fstat target root before materialization",
+                    &prepared.request.target,
+                    error,
+                    false,
+                ),
+                ExecutionContext::new(prepared.backend),
+                target,
+            )));
+        }
+    };
+    if !same_preserved_root_metadata(target_now, prepared.target_baseline) {
+        return Err(Box::new((
+            MaterializationError::PlanStale {
+                path: prepared.request.target.clone(),
+            },
             ExecutionContext::new(prepared.backend),
             target,
         )));
@@ -759,15 +792,15 @@ fn execute_prepared_inner(
         &source,
         &target,
         &[],
-        &prepared.request.source,
-        &prepared.request.target,
+        source_now.root_metadata.device,
+        (&prepared.request.source, &prepared.request.target),
         faults,
         &mut context,
     ) {
         return Err(Box::new((error, context, target)));
     }
 
-    let source_after = match snapshot_tree(&source, &prepared.request.source, false) {
+    let source_after = match snapshot_tree(&source, &prepared.request.source) {
         Ok(snapshot) => snapshot,
         Err(error) => return Err(Box::new((error, context, target))),
     };
@@ -780,12 +813,21 @@ fn execute_prepared_inner(
             target,
         )));
     }
-    if let Err(error) =
-        verify_protected_git(&target, &prepared.request.target, prepared.protected_git)
-    {
+    if let Err(error) = revalidate_held_roots(prepared, [&source, &target, &staging, &trash]) {
         return Err(Box::new((error, context, target)));
     }
-    let target_snapshot = match snapshot_tree(&target, &prepared.request.target, true) {
+    if let Err(error) = set_preserved_metadata(
+        &target,
+        identity(prepared.target_baseline),
+        source_after.root_metadata,
+        &prepared.request.target,
+        faults,
+        &mut context,
+        true,
+    ) {
+        return Err(Box::new((error, context, target)));
+    }
+    let target_snapshot = match snapshot_tree(&target, &prepared.request.target) {
         Ok(snapshot) => snapshot,
         Err(error) => return Err(Box::new((error, context, target))),
     };
@@ -796,7 +838,11 @@ fn execute_prepared_inner(
             target,
         )));
     }
-    if let Err(error) = revalidate_held_roots(prepared, [&source, &target, &staging, &trash]) {
+    if let Err(error) = revalidate_held_roots_after_target_metadata(
+        prepared,
+        [&source, &target, &staging, &trash],
+        source_after.root_metadata,
+    ) {
         return Err(Box::new((error, context, target)));
     }
 
@@ -809,9 +855,8 @@ fn execute_prepared_inner(
         .count();
     let cow = match prepared.backend {
         Backend::FullCopy => CowEvidence::NotUsed,
-        Backend::ApfsFileClone
-            if regular_count > 0 && context.clone_calls_succeeded == regular_count =>
-        {
+        Backend::ApfsFileClone if regular_count == 0 => CowEvidence::NotUsed,
+        Backend::ApfsFileClone if context.clone_calls_succeeded == regular_count => {
             CowEvidence::Confirmed
         }
         Backend::ApfsFileClone => CowEvidence::Unknown,
@@ -881,15 +926,109 @@ fn revalidate_held_roots(
     Ok(())
 }
 
+fn revalidate_held_roots_after_target_metadata(
+    prepared: &PreparedAttempt,
+    held: [&OwnedFd; 4],
+    expected_target_metadata: ffi::NodeMetadata,
+) -> Result<(), MaterializationError> {
+    let paths_and_reports = [
+        (&prepared.request.source, &prepared.report.source),
+        (&prepared.request.target, &prepared.report.target_root),
+        (&prepared.request.staging, &prepared.report.staging),
+        (&prepared.request.trash, &prepared.report.trash),
+    ];
+    let mut fresh = Vec::with_capacity(paths_and_reports.len());
+    for (index, (path, report)) in paths_and_reports.into_iter().enumerate() {
+        let revalidation = revalidate_path(report)
+            .map_err(|source| probe_error("final path revalidation", source))?;
+        let only_expected_target_writability_changed = index == 1
+            && !revalidation.changes.is_empty()
+            && revalidation.changes.iter().all(|change| {
+                is_expected_target_writability_change(
+                    change,
+                    prepared.target_baseline.mode,
+                    expected_target_metadata.mode,
+                )
+            });
+        if revalidation.status != RevalidationStatus::Unchanged
+            && !only_expected_target_writability_changed
+        {
+            return Err(MaterializationError::PlanStale { path: path.clone() });
+        }
+        fresh.push(open_verified_directory(path, report)?);
+    }
+
+    let paths = [
+        &prepared.request.source,
+        &prepared.request.target,
+        &prepared.request.staging,
+        &prepared.request.trash,
+    ];
+    for (index, ((held, fresh), path)) in held.into_iter().zip(&fresh).zip(paths).enumerate() {
+        let held_metadata = ffi::metadata(held)
+            .map_err(|error| syscall_error("fstat held final root", path, error, false))?;
+        let fresh_metadata = ffi::metadata(fresh)
+            .map_err(|error| syscall_error("fstat revalidated final root", path, error, false))?;
+        if !same_identity_and_kind(fresh_metadata, identity(held_metadata), held_metadata.kind) {
+            return Err(MaterializationError::PlanStale { path: path.clone() });
+        }
+        if index == 1
+            && (!same_identity_and_kind(
+                held_metadata,
+                identity(prepared.target_baseline),
+                ffi::NodeKind::Directory,
+            ) || !has_preserved_metadata(held_metadata, expected_target_metadata))
+        {
+            return Err(MaterializationError::ManifestMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn is_expected_target_writability_change(
+    change: &RevalidationChange,
+    before_mode: u32,
+    after_mode: u32,
+) -> bool {
+    let RevalidationChange::WritabilityChanged { before, after } = change else {
+        return false;
+    };
+    let owner_write_removed = before_mode & 0o200 != 0 && after_mode & 0o200 == 0;
+    if !owner_write_removed
+        || before.mount_state != after.mount_state
+        || before.execution_guarantee != after.execution_guarantee
+        || before.write_attempt != after.write_attempt
+    {
+        return false;
+    }
+    matches!(
+        (
+            &before.effective_access_preflight,
+            &after.effective_access_preflight,
+        ),
+        (
+            AccessPreflight::Allowed {
+                source: before_source,
+            },
+            AccessPreflight::Denied {
+                errno: Some(libc::EACCES),
+                source: after_source,
+                ..
+            }
+        ) if before_source == after_source
+    )
+}
+
 fn materialize_directory(
     source: &OwnedFd,
     target: &OwnedFd,
     relative: &[OsString],
-    source_root: &Path,
-    target_root: &Path,
+    source_root_device: u64,
+    roots: (&Path, &Path),
     faults: &FaultInjection,
     context: &mut ExecutionContext,
 ) -> Result<(), MaterializationError> {
+    let (source_root, target_root) = roots;
     let mut names = read_names(source, &join_relative(source_root, relative))?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     for name in names {
@@ -900,6 +1039,12 @@ fn materialize_directory(
         let target_path = join_relative(target_root, &child_relative);
         let before = ffi::metadata_at(source, component.as_c_str())
             .map_err(|error| syscall_error("fstatat source entry", &source_path, error, false))?;
+        if before.device != source_root_device {
+            return Err(MaterializationError::UnsupportedSourceEntry {
+                path: source_path,
+                kind: "submount".to_owned(),
+            });
+        }
 
         match before.kind {
             ffi::NodeKind::Directory => {
@@ -939,14 +1084,20 @@ fn materialize_directory(
                     &source_child,
                     &target_child,
                     &child_relative,
-                    source_root,
-                    target_root,
+                    source_root_device,
+                    roots,
                     faults,
                     context,
                 )?;
-                ffi::set_mode(&target_child, before.mode).map_err(|error| {
-                    syscall_error("fchmod target directory", &target_path, error, false)
-                })?;
+                set_preserved_metadata(
+                    &target_child,
+                    registered,
+                    before,
+                    &target_path,
+                    faults,
+                    context,
+                    false,
+                )?;
             }
             ffi::NodeKind::RegularFile => {
                 let source_file =
@@ -960,7 +1111,7 @@ fn materialize_directory(
                     return Err(MaterializationError::SourceChanged { path: source_path });
                 }
                 let ordinary_index = context.ordinary_files_materialized;
-                let registered = match context.backend {
+                let (registered, target_file) = match context.backend {
                     Backend::ApfsFileClone => {
                         if faults
                             .clone_errno_at
@@ -984,7 +1135,7 @@ fn materialize_directory(
                             },
                         )?;
                         context.clone_calls_succeeded += 1;
-                        register_created(
+                        let registered = register_created(
                             target,
                             &component,
                             &child_relative,
@@ -992,7 +1143,17 @@ fn materialize_directory(
                             None,
                             faults,
                             context,
-                        )?
+                        )?;
+                        let target_file = ffi::open_file_read_at(target, component.as_c_str())
+                            .map_err(|error| {
+                                syscall_error(
+                                    "openat cloned target file",
+                                    &target_path,
+                                    error,
+                                    false,
+                                )
+                            })?;
+                        (registered, target_file)
                     }
                     Backend::FullCopy => {
                         let target_file = ffi::create_file_at(target, component.as_c_str(), 0o600)
@@ -1015,12 +1176,18 @@ fn materialize_directory(
                             &target_path,
                             faults.copy_write,
                         )?;
-                        ffi::set_mode(&target_file, before.mode).map_err(|error| {
-                            syscall_error("fchmod target file", &target_path, error, false)
-                        })?;
-                        registered
+                        (registered, target_file)
                     }
                 };
+                set_preserved_metadata(
+                    &target_file,
+                    registered,
+                    before,
+                    &target_path,
+                    faults,
+                    context,
+                    false,
+                )?;
 
                 let target_metadata =
                     ffi::metadata_at(target, component.as_c_str()).map_err(|error| {
@@ -1095,6 +1262,45 @@ fn materialize_directory(
         }
     }
     Ok(())
+}
+
+fn set_preserved_metadata(
+    target: &OwnedFd,
+    expected_identity: FileIdentity,
+    source: ffi::NodeMetadata,
+    target_path: &Path,
+    faults: &FaultInjection,
+    context: &mut ExecutionContext,
+    is_target_root: bool,
+) -> Result<(), MaterializationError> {
+    let held = ffi::metadata(target).map_err(|error| {
+        syscall_error("fstat target before metadata", target_path, error, false)
+    })?;
+    if !same_identity_and_kind(held, expected_identity, source.kind) {
+        return Err(MaterializationError::TargetChanged {
+            path: target_path.to_path_buf(),
+        });
+    }
+    if is_target_root {
+        context.target_root_metadata_started = true;
+    }
+    let metadata_index = context.metadata_updates_started;
+    context.metadata_updates_started += 1;
+    if faults
+        .mtime_errno_at
+        .is_some_and(|(index, _)| index == metadata_index)
+    {
+        let errno = faults.mtime_errno_at.expect("checked above").1;
+        return Err(injected_syscall_error(
+            "futimens target mtime",
+            target_path,
+            errno,
+        ));
+    }
+    ffi::set_modified_time(target, source.modified_seconds, source.modified_nanoseconds)
+        .map_err(|error| syscall_error("futimens target mtime", target_path, error, false))?;
+    ffi::set_mode(target, source.mode)
+        .map_err(|error| syscall_error("fchmod target mode", target_path, error, false))
 }
 
 fn copy_file_bytes(
@@ -1240,43 +1446,52 @@ fn register_created(
     Ok(registered)
 }
 
-fn snapshot_tree(
-    root: &OwnedFd,
-    root_path: &Path,
-    exclude_git: bool,
-) -> Result<TreeSnapshot, MaterializationError> {
+fn snapshot_tree(root: &OwnedFd, root_path: &Path) -> Result<TreeSnapshot, MaterializationError> {
+    let root_before = ffi::metadata(root)
+        .map_err(|error| syscall_error("fstat manifest root", root_path, error, false))?;
     let mut snapshot = TreeSnapshot {
         manifest: TreeManifest {
+            root_permissions: root_before.mode,
+            root_modified_time: modified_time(root_before),
             entries: Vec::new(),
         },
         identities: BTreeMap::new(),
+        root_metadata: root_before,
     };
-    snapshot_directory(root, &[], root_path, exclude_git, &mut snapshot)?;
+    snapshot_directory(root, &[], root_before.device, root_path, &mut snapshot)?;
+    let root_after = ffi::metadata(root).map_err(|error| {
+        syscall_error("fstat manifest root after scan", root_path, error, false)
+    })?;
+    if root_after != root_before {
+        return Err(MaterializationError::SourceChanged {
+            path: root_path.to_path_buf(),
+        });
+    }
     Ok(snapshot)
 }
 
 fn snapshot_directory(
     directory: &OwnedFd,
     relative: &[OsString],
+    root_device: u64,
     root_path: &Path,
-    exclude_git: bool,
     snapshot: &mut TreeSnapshot,
 ) -> Result<(), MaterializationError> {
     let mut names = read_names(directory, &join_relative(root_path, relative))?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     for name in names {
-        if relative.is_empty() && name.as_bytes() == b".git" {
-            if exclude_git {
-                continue;
-            }
-            return Err(MaterializationError::ReservedSourceEntry);
-        }
         let component = ComponentName::new(&name)?;
         let mut child = relative.to_vec();
         child.push(name);
         let path = join_relative(root_path, &child);
         let before = ffi::metadata_at(directory, component.as_c_str())
             .map_err(|error| syscall_error("fstatat manifest entry", &path, error, false))?;
+        if before.device != root_device {
+            return Err(MaterializationError::UnsupportedSourceEntry {
+                path,
+                kind: "submount".to_owned(),
+            });
+        }
         let encoded = encode_relative(&child);
         snapshot
             .identities
@@ -1287,6 +1502,7 @@ fn snapshot_directory(
                     path: encoded,
                     kind: ManifestEntryKind::Directory,
                     permissions: Some(before.mode),
+                    modified_time: Some(modified_time(before)),
                     length: 0,
                     content_digest_hex: None,
                 });
@@ -1300,7 +1516,7 @@ fn snapshot_directory(
                 {
                     return Err(MaterializationError::SourceChanged { path });
                 }
-                snapshot_directory(&child_fd, &child, root_path, exclude_git, snapshot)?;
+                snapshot_directory(&child_fd, &child, root_device, root_path, snapshot)?;
             }
             ffi::NodeKind::RegularFile => {
                 let file = ffi::open_file_read_at(directory, component.as_c_str())
@@ -1318,6 +1534,7 @@ fn snapshot_directory(
                     path: encoded,
                     kind: ManifestEntryKind::RegularFile,
                     permissions: Some(before.mode),
+                    modified_time: Some(modified_time(before)),
                     length,
                     content_digest_hex: Some(digest),
                 });
@@ -1337,6 +1554,7 @@ fn snapshot_directory(
                     path: encoded,
                     kind: ManifestEntryKind::SymbolicLink,
                     permissions: None,
+                    modified_time: None,
                     length: link_text.len() as u64,
                     content_digest_hex: Some(blake3::hash(&link_text).to_hex().to_string()),
                 });
@@ -1381,83 +1599,13 @@ fn digest_file(file: OwnedFd, path: &Path) -> Result<(u64, String), Materializat
     Ok((length, hasher.finalize().to_hex().to_string()))
 }
 
-fn target_baseline(
-    target: &OwnedFd,
-    target_path: &Path,
-    declared_git: Option<FileIdentity>,
-) -> Result<Option<ffi::NodeMetadata>, MaterializationError> {
-    let mut protected_git = None;
-    for name in read_names(target, target_path)? {
-        if name.as_bytes() != b".git" {
-            return Err(MaterializationError::UnknownTargetEntry {
-                path: encode_relative(&[name]),
-            });
-        }
-        let component = ComponentName::new(&name)?;
-        let metadata = ffi::metadata_at(target, component.as_c_str())
-            .map_err(|error| syscall_error("fstatat .git sentinel", target_path, error, false))?;
-        match declared_git {
-            Some(declared) if identity(metadata) == declared => protected_git = Some(metadata),
-            Some(_) => {
-                return Err(MaterializationError::TargetChanged {
-                    path: target_path.join(".git"),
-                });
-            }
-            None => {
-                return Err(MaterializationError::UnknownTargetEntry {
-                    path: encode_relative(&[name]),
-                });
-            }
-        }
-    }
-    if declared_git.is_some() && protected_git.is_none() {
-        return Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
+fn verify_target_empty(target: &OwnedFd, target_path: &Path) -> Result<(), MaterializationError> {
+    if let Some(name) = read_names(target, target_path)?.into_iter().next() {
+        return Err(MaterializationError::UnknownTargetEntry {
+            path: encode_relative(&[name]),
         });
     }
-    Ok(protected_git)
-}
-
-fn verify_target_baseline(
-    target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
-) -> Result<(), MaterializationError> {
-    let current = target_baseline(target, target_path, protected_git.map(identity))?;
-    if current == protected_git {
-        Ok(())
-    } else {
-        Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
-        })
-    }
-}
-
-fn verify_protected_git(
-    target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
-) -> Result<(), MaterializationError> {
-    let component = ComponentName::new(OsStr::new(".git"))?;
-    let current = match ffi::metadata_at(target, component.as_c_str()) {
-        Ok(metadata) => Some(metadata),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => None,
-        Err(error) => {
-            return Err(syscall_error(
-                "fstatat .git sentinel",
-                &target_path.join(".git"),
-                error,
-                false,
-            ));
-        }
-    };
-    if current == protected_git {
-        Ok(())
-    } else {
-        Err(MaterializationError::TargetChanged {
-            path: target_path.join(".git"),
-        })
-    }
+    Ok(())
 }
 
 fn apply_rollback_fault(
@@ -1469,12 +1617,7 @@ fn apply_rollback_fault(
     if let Err(problem) = validate_rollback_boundary(prepared, target) {
         return vec![*problem];
     }
-    if let Err(problem) = validate_rollback_set(
-        target,
-        &prepared.request.target,
-        prepared.protected_git,
-        &context.created,
-    ) {
+    if let Err(problem) = validate_rollback_set(target, &context.created) {
         return vec![*problem];
     }
     let mut problems = Vec::new();
@@ -1583,6 +1726,32 @@ fn apply_rollback_fault(
     problems
 }
 
+fn preserve_after_root_metadata_failure(
+    prepared: &PreparedAttempt,
+    target: &OwnedFd,
+    context: &ExecutionContext,
+) -> RollbackEvidence {
+    let observed_identity = ffi::metadata(target).ok().map(identity);
+    RollbackEvidence {
+        status: RollbackStatus::Incomplete,
+        removed: Vec::new(),
+        remaining: context
+            .created
+            .iter()
+            .map(|entry| encode_relative(&entry.relative))
+            .collect(),
+        problems: vec![RollbackProblem {
+            operation: "preserve target after root metadata stage failure".to_owned(),
+            path: None,
+            errno: None,
+            expected_identity: Some(identity(prepared.target_baseline)),
+            observed_identity,
+            detail: "target root metadata may already have changed; automatic rollback is intentionally stopped"
+                .to_owned(),
+        }],
+    }
+}
+
 fn rollback_created(
     prepared: &PreparedAttempt,
     target: &OwnedFd,
@@ -1604,12 +1773,7 @@ fn rollback_created(
             problems.push(*problem);
             break;
         }
-        if let Err(problem) = validate_rollback_set(
-            target,
-            &prepared.request.target,
-            prepared.protected_git,
-            &created[..active_count],
-        ) {
+        if let Err(problem) = validate_rollback_set(target, &created[..active_count]) {
             problems.push(*problem);
             break;
         }
@@ -1694,11 +1858,12 @@ fn rollback_created(
     if problems.is_empty() {
         if let Err(problem) = validate_rollback_boundary(prepared, target) {
             problems.push(*problem);
-        } else if let Err(problem) = validate_rollback_set(
+        } else if let Err(problem) = validate_rollback_set(target, &created[..active_count]) {
+            problems.push(*problem);
+        } else if let Err(problem) = restore_or_verify_target_root_after_rollback(
             target,
-            &prepared.request.target,
-            prepared.protected_git,
-            &created[..active_count],
+            prepared.target_baseline,
+            !created.is_empty(),
         ) {
             problems.push(*problem);
         }
@@ -1715,22 +1880,80 @@ fn rollback_created(
     }
 }
 
-fn validate_rollback_set(
+fn restore_or_verify_target_root_after_rollback(
     target: &OwnedFd,
-    target_path: &Path,
-    protected_git: Option<ffi::NodeMetadata>,
-    created: &[TrackedCreated],
+    baseline: ffi::NodeMetadata,
+    restore_mtime: bool,
 ) -> Result<(), Box<RollbackProblem>> {
-    verify_protected_git(target, target_path, protected_git).map_err(|error| {
+    let before = ffi::metadata(target).map_err(|error| {
         Box::new(RollbackProblem {
-            operation: "revalidate .git sentinel".to_owned(),
-            path: Some(encode_relative(&[OsString::from(".git")])),
-            errno: materialization_errno(&error),
-            expected_identity: protected_git.map(identity),
+            operation: "fstat target root after rollback".to_owned(),
+            path: None,
+            errno: error.raw_os_error(),
+            expected_identity: Some(identity(baseline)),
             observed_identity: None,
             detail: error.to_string(),
         })
     })?;
+    if !same_identity_and_kind(before, identity(baseline), ffi::NodeKind::Directory)
+        || before.mode != baseline.mode
+    {
+        return Err(Box::new(RollbackProblem {
+            operation: "compare target root before mtime restoration".to_owned(),
+            path: None,
+            errno: None,
+            expected_identity: Some(identity(baseline)),
+            observed_identity: Some(identity(before)),
+            detail: "target root identity, type, or permissions changed during the attempt"
+                .to_owned(),
+        }));
+    }
+    if restore_mtime {
+        ffi::set_modified_time(
+            target,
+            baseline.modified_seconds,
+            baseline.modified_nanoseconds,
+        )
+        .map_err(|error| {
+            Box::new(RollbackProblem {
+                operation: "restore target root mtime after rollback".to_owned(),
+                path: None,
+                errno: error.raw_os_error(),
+                expected_identity: Some(identity(baseline)),
+                observed_identity: Some(identity(before)),
+                detail: error.to_string(),
+            })
+        })?;
+    }
+    let after = ffi::metadata(target).map_err(|error| {
+        Box::new(RollbackProblem {
+            operation: "fstat restored target root".to_owned(),
+            path: None,
+            errno: error.raw_os_error(),
+            expected_identity: Some(identity(baseline)),
+            observed_identity: None,
+            detail: error.to_string(),
+        })
+    })?;
+    if same_preserved_root_metadata(after, baseline) {
+        Ok(())
+    } else {
+        Err(Box::new(RollbackProblem {
+            operation: "compare restored target root metadata".to_owned(),
+            path: None,
+            errno: None,
+            expected_identity: Some(identity(baseline)),
+            observed_identity: Some(identity(after)),
+            detail: "target root mtime or permissions do not match the prepared baseline"
+                .to_owned(),
+        }))
+    }
+}
+
+fn validate_rollback_set(
+    target: &OwnedFd,
+    created: &[TrackedCreated],
+) -> Result<(), Box<RollbackProblem>> {
     if created.iter().any(|entry| entry.identity.is_none()) {
         return Err(Box::new(RollbackProblem {
             operation: "revalidate created identity".to_owned(),
@@ -1745,7 +1968,19 @@ fn validate_rollback_set(
         }));
     }
 
-    let actual = observe_target_entries(target, &[]).map_err(|error| {
+    let target_device = ffi::metadata(target)
+        .map_err(|error| {
+            Box::new(RollbackProblem {
+                operation: "fstat rollback target root".to_owned(),
+                path: None,
+                errno: error.raw_os_error(),
+                expected_identity: None,
+                observed_identity: None,
+                detail: error.to_string(),
+            })
+        })?
+        .device;
+    let actual = observe_target_entries(target, &[], target_device).map_err(|error| {
         Box::new(RollbackProblem {
             operation: "enumerate rollback target".to_owned(),
             path: None,
@@ -1879,14 +2114,12 @@ fn validate_rollback_parent(
 fn observe_target_entries(
     directory: &OwnedFd,
     relative: &[OsString],
+    root_device: u64,
 ) -> Result<BTreeMap<EncodedRelativePath, (FileIdentity, ffi::NodeKind)>, MaterializationError> {
     let mut observed = BTreeMap::new();
     let mut names = read_names(directory, Path::new("rollback-target"))?;
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     for name in names {
-        if relative.is_empty() && name.as_bytes() == b".git" {
-            continue;
-        }
         let component = ComponentName::new(&name)?;
         let mut child = relative.to_vec();
         child.push(name);
@@ -1898,6 +2131,12 @@ fn observe_target_entries(
                 false,
             )
         })?;
+        if metadata.device != root_device {
+            return Err(MaterializationError::UnsupportedSourceEntry {
+                path: PathBuf::from_iter(&child),
+                kind: "submount".to_owned(),
+            });
+        }
         observed.insert(encode_relative(&child), (identity(metadata), metadata.kind));
         if metadata.kind == ffi::NodeKind::Directory {
             let child_fd =
@@ -1909,7 +2148,7 @@ fn observe_target_entries(
                         false,
                     )
                 })?;
-            observed.extend(observe_target_entries(&child_fd, &child)?);
+            observed.extend(observe_target_entries(&child_fd, &child, root_device)?);
         }
     }
     Ok(observed)
@@ -2003,6 +2242,25 @@ fn identity(metadata: ffi::NodeMetadata) -> FileIdentity {
         device: metadata.device,
         inode: metadata.inode,
     }
+}
+
+fn modified_time(metadata: ffi::NodeMetadata) -> ModifiedTime {
+    ModifiedTime {
+        seconds: metadata.modified_seconds,
+        nanoseconds: metadata.modified_nanoseconds,
+    }
+}
+
+fn same_preserved_root_metadata(observed: ffi::NodeMetadata, expected: ffi::NodeMetadata) -> bool {
+    same_identity_and_kind(observed, identity(expected), ffi::NodeKind::Directory)
+        && observed.mode == expected.mode
+        && modified_time(observed) == modified_time(expected)
+}
+
+fn has_preserved_metadata(observed: ffi::NodeMetadata, source: ffi::NodeMetadata) -> bool {
+    observed.kind == source.kind
+        && observed.mode == source.mode
+        && modified_time(observed) == modified_time(source)
 }
 
 fn same_identity_and_kind(
@@ -2119,6 +2377,7 @@ fn empty_failed_attempt(backend: Backend, error: MaterializationError) -> Attemp
         cow_evidence: CowEvidence::Unknown,
         clone_calls_succeeded: 0,
         ordinary_files_materialized: 0,
+        target_root_metadata_started: false,
         created: Vec::new(),
         ordinary_files: Vec::new(),
         source_manifest: None,
@@ -2139,7 +2398,6 @@ struct OwnedRequest {
     target: PathBuf,
     staging: PathBuf,
     trash: PathBuf,
-    protected_git: Option<FileIdentity>,
 }
 
 struct OpenedRoots {
@@ -2156,7 +2414,6 @@ impl From<&MaterializeRequest<'_>> for OwnedRequest {
             target: request.target.to_path_buf(),
             staging: request.staging.to_path_buf(),
             trash: request.trash.to_path_buf(),
-            protected_git: request.protected_git,
         }
     }
 }
@@ -2165,6 +2422,7 @@ impl From<&MaterializeRequest<'_>> for OwnedRequest {
 struct TreeSnapshot {
     manifest: TreeManifest,
     identities: BTreeMap<EncodedRelativePath, FileIdentity>,
+    root_metadata: ffi::NodeMetadata,
 }
 
 struct TrackedCreated {
@@ -2177,6 +2435,8 @@ struct ExecutionContext {
     backend: Backend,
     clone_calls_succeeded: usize,
     ordinary_files_materialized: usize,
+    metadata_updates_started: usize,
+    target_root_metadata_started: bool,
     created: Vec<TrackedCreated>,
     ordinary_files: Vec<OrdinaryFileEvidence>,
 }
@@ -2187,6 +2447,8 @@ impl ExecutionContext {
             backend,
             clone_calls_succeeded: 0,
             ordinary_files_materialized: 0,
+            metadata_updates_started: 0,
+            target_root_metadata_started: false,
             created: Vec::new(),
             ordinary_files: Vec::new(),
         }
@@ -2207,6 +2469,7 @@ impl ExecutionContext {
             cow_evidence,
             clone_calls_succeeded: self.clone_calls_succeeded,
             ordinary_files_materialized: self.ordinary_files_materialized,
+            target_root_metadata_started: self.target_root_metadata_started,
             created: self
                 .created
                 .into_iter()
@@ -2277,21 +2540,25 @@ mod tests {
 
     use rustix::fs::{Mode, OFlags};
     use thinws_p0_probe::{
-        Evidence, EvidenceStatement, FileIdentity, MaterializationPathProbeRequest,
-        MaterializationPathReport, MaterializerCandidate, ProbeError, SupportState,
+        AccessPreflight, Evidence, EvidenceSource, EvidenceStatement, FileIdentity,
+        MaterializationPathProbeRequest, MaterializationPathReport, MaterializerCandidate,
+        MountWriteState, ProbeError, RevalidationChange, SupportState,
         inspect_materialization_paths, inspect_path,
     };
 
     use super::{
         Backend, ClonePreflightOverride, ComponentName, CopyWriteFault, ExecutionContext,
         FallbackPolicy, FaultInjection, ManifestEntry, ManifestEntryKind, MaterializationError,
-        MaterializeRequest, PolicyExperimentOptions, RequestedMode, RollbackFault, RollbackStatus,
-        SystemOperation, TrackedCreated, TreeManifest, TreeSnapshot, apply_rollback_fault,
-        clone_layout_preconditions_satisfied, copy_file_bytes, digest_file, encode_relative,
-        fallback_path_evidence_matches, materialization_errno, mutate_source_same_inode,
-        open_verified_directory, prepare_attempt, register_created, revalidate_and_open,
-        revalidate_held_roots, rollback_created, run_cow_policy_experiment, same_identity_and_kind,
-        validate_rollback_parent, verify_protected_git,
+        MaterializeRequest, ModifiedTime, PolicyExperimentOptions, RequestedMode, RollbackFault,
+        RollbackStatus, SystemOperation, TrackedCreated, TreeManifest, TreeSnapshot,
+        apply_rollback_fault, clone_layout_preconditions_satisfied, copy_file_bytes, digest_file,
+        encode_relative, fallback_path_evidence_matches, has_preserved_metadata, identity,
+        is_expected_target_writability_change, materialization_errno, modified_time,
+        mutate_source_same_inode, open_verified_directory, prepare_attempt, register_created,
+        restore_or_verify_target_root_after_rollback, revalidate_and_open, revalidate_held_roots,
+        revalidate_held_roots_after_target_metadata, rollback_created, run_cow_policy_experiment,
+        same_identity_and_kind, same_preserved_root_metadata, set_preserved_metadata,
+        validate_rollback_parent, verify_target_empty,
     };
     use crate::test_support::ControlledTree;
 
@@ -2396,6 +2663,561 @@ mod tests {
     }
 
     #[test]
+    fn metadata_identity_mismatch_does_not_change_mode_or_mtime() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("experiment crate is below repository root");
+        let mut fixture = ControlledTree::create_in(
+            &repository_root.join("target"),
+            "metadata-held-identity-mismatch",
+        )
+        .expect("create controlled metadata fixture");
+        fixture
+            .create_file(Path::new("expected"), b"expected", 0o400)
+            .expect("create registered-identity file");
+        fixture
+            .create_file(Path::new("wrong-held"), b"wrong", 0o640)
+            .expect("create wrong held file");
+        fixture
+            .set_modified_time(Path::new("expected"), 1_650_000_001, 123_456_789)
+            .expect("set expected metadata");
+        fixture
+            .set_modified_time(Path::new("wrong-held"), 1_660_000_002, 234_567_890)
+            .expect("set wrong-held metadata");
+        let expected = rustix::fs::openat(
+            fixture.root_fd(),
+            "expected",
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open expected file");
+        let wrong_held = rustix::fs::openat(
+            fixture.root_fd(),
+            "wrong-held",
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open wrong held file");
+        let source_metadata = crate::ffi::metadata(&expected).expect("observe source metadata");
+        let expected_identity = identity(source_metadata);
+        let before = crate::ffi::metadata(&wrong_held).expect("observe wrong held before call");
+        let mut context = ExecutionContext::new(Backend::ApfsFileClone);
+
+        let result = set_preserved_metadata(
+            &wrong_held,
+            expected_identity,
+            source_metadata,
+            &fixture.root_path().join("wrong-held"),
+            &FaultInjection::default(),
+            &mut context,
+            false,
+        );
+        let after = crate::ffi::metadata(&wrong_held).expect("observe wrong held after call");
+
+        drop((wrong_held, expected));
+        fixture
+            .cleanup()
+            .expect("remove controlled metadata fixture");
+        assert!(matches!(
+            result,
+            Err(MaterializationError::TargetChanged { .. })
+        ));
+        assert_eq!(after.mode, before.mode);
+        assert_eq!(modified_time(after), modified_time(before));
+        assert_eq!(context.metadata_updates_started, 0);
+    }
+
+    #[test]
+    fn final_target_writability_exception_rejects_unknown_and_unexplained_mode_changes() {
+        let (fixture, source, target, staging, trash) =
+            controlled_materialization_roots("final-writability-exception");
+        let prepared = prepare_attempt(
+            &MaterializeRequest {
+                source: &source,
+                target: &target,
+                staging: &staging,
+                trash: &trash,
+            },
+            Backend::FullCopy,
+        )
+        .expect("prepare target writability evidence");
+        let before = prepared.report.target_root.writability.clone();
+        let source = match &before.effective_access_preflight {
+            AccessPreflight::Allowed { source } => source.clone(),
+            other => panic!("controlled target must initially be writable: {other:?}"),
+        };
+        let mut denied = before.clone();
+        denied.effective_access_preflight = AccessPreflight::Denied {
+            errno: Some(libc::EACCES),
+            reason: "synthetic chmod result".to_owned(),
+            source: source.clone(),
+        };
+        let denied_change = RevalidationChange::WritabilityChanged {
+            before: before.clone(),
+            after: denied,
+        };
+        let mut unknown = before.clone();
+        unknown.effective_access_preflight = AccessPreflight::Unknown {
+            errno: Some(libc::EIO),
+            reason: "synthetic uncertainty".to_owned(),
+            source,
+        };
+        let unknown_change = RevalidationChange::WritabilityChanged {
+            before,
+            after: unknown,
+        };
+
+        let expected = is_expected_target_writability_change(&denied_change, 0o700, 0o555);
+        let mode_unchanged = is_expected_target_writability_change(&denied_change, 0o700, 0o700);
+        let write_bits_unchanged =
+            is_expected_target_writability_change(&denied_change, 0o700, 0o710);
+        let only_group_write_removed =
+            is_expected_target_writability_change(&denied_change, 0o770, 0o750);
+        let owner_write_was_already_absent =
+            is_expected_target_writability_change(&denied_change, 0o555, 0o555);
+        let uncertain = is_expected_target_writability_change(&unknown_change, 0o700, 0o555);
+
+        fixture.cleanup().expect("remove controlled probe fixture");
+        assert!(expected);
+        assert!(!mode_unchanged);
+        assert!(!write_bits_unchanged);
+        assert!(!only_group_write_removed);
+        assert!(!owner_write_was_already_absent);
+        assert!(!uncertain);
+    }
+
+    #[test]
+    fn final_target_writability_exception_requires_each_explaining_fact() {
+        let (fixture, source, target, staging, trash) =
+            controlled_materialization_roots("final-writability-facts");
+        let prepared = prepare_attempt(
+            &MaterializeRequest {
+                source: &source,
+                target: &target,
+                staging: &staging,
+                trash: &trash,
+            },
+            Backend::FullCopy,
+        )
+        .expect("prepare target writability evidence");
+        let before = prepared.report.target_root.writability.clone();
+        let evidence_source = match &before.effective_access_preflight {
+            AccessPreflight::Allowed { source } => source.clone(),
+            other => panic!("controlled target must initially be writable: {other:?}"),
+        };
+        let mut denied = before.clone();
+        denied.effective_access_preflight = AccessPreflight::Denied {
+            errno: Some(libc::EACCES),
+            reason: "synthetic chmod result".to_owned(),
+            source: evidence_source.clone(),
+        };
+        let expected = RevalidationChange::WritabilityChanged {
+            before: before.clone(),
+            after: denied.clone(),
+        };
+
+        let mut different_mount = denied.clone();
+        different_mount.mount_state = match before.mount_state {
+            MountWriteState::WritableAtInspection => MountWriteState::ReadOnly,
+            MountWriteState::ReadOnly => MountWriteState::WritableAtInspection,
+        };
+        let mut wrong_errno = denied.clone();
+        wrong_errno.effective_access_preflight = AccessPreflight::Denied {
+            errno: Some(libc::EPERM),
+            reason: "different denial".to_owned(),
+            source: evidence_source.clone(),
+        };
+        let mut missing_errno = denied.clone();
+        missing_errno.effective_access_preflight = AccessPreflight::Denied {
+            errno: None,
+            reason: "denial without errno".to_owned(),
+            source: evidence_source.clone(),
+        };
+        let mut different_source = denied.clone();
+        different_source.effective_access_preflight = AccessPreflight::Denied {
+            errno: Some(libc::EACCES),
+            reason: "different evidence source".to_owned(),
+            source: EvidenceSource::FstatHeldDirectoryFd,
+        };
+        let before_denied = RevalidationChange::WritabilityChanged {
+            before: {
+                let mut value = before.clone();
+                value.effective_access_preflight = AccessPreflight::Denied {
+                    errno: Some(libc::EACCES),
+                    reason: "already denied".to_owned(),
+                    source: evidence_source,
+                };
+                value
+            },
+            after: denied,
+        };
+        let cases = [
+            RevalidationChange::PathRejected {
+                error: ProbeError::PathMustBeAbsolute,
+            },
+            RevalidationChange::WritabilityChanged {
+                before: before.clone(),
+                after: before,
+            },
+            RevalidationChange::WritabilityChanged {
+                before: match &expected {
+                    RevalidationChange::WritabilityChanged { before, .. } => before.clone(),
+                    _ => unreachable!(),
+                },
+                after: different_mount,
+            },
+            RevalidationChange::WritabilityChanged {
+                before: match &expected {
+                    RevalidationChange::WritabilityChanged { before, .. } => before.clone(),
+                    _ => unreachable!(),
+                },
+                after: wrong_errno,
+            },
+            RevalidationChange::WritabilityChanged {
+                before: match &expected {
+                    RevalidationChange::WritabilityChanged { before, .. } => before.clone(),
+                    _ => unreachable!(),
+                },
+                after: missing_errno,
+            },
+            RevalidationChange::WritabilityChanged {
+                before: match &expected {
+                    RevalidationChange::WritabilityChanged { before, .. } => before.clone(),
+                    _ => unreachable!(),
+                },
+                after: different_source,
+            },
+            before_denied,
+        ];
+
+        let expected_result = is_expected_target_writability_change(&expected, 0o700, 0o555);
+        let rejected = cases
+            .iter()
+            .all(|change| !is_expected_target_writability_change(change, 0o700, 0o555));
+
+        fixture.cleanup().expect("remove controlled probe fixture");
+        assert!(expected_result);
+        assert!(rejected);
+    }
+
+    #[test]
+    fn final_metadata_revalidation_rejects_each_changed_root() {
+        for (index, label) in ["source", "target", "staging", "trash"]
+            .into_iter()
+            .enumerate()
+        {
+            let (fixture, source, target, staging, trash) =
+                controlled_materialization_roots(&format!("final-root-changed-{label}"));
+            let prepared = prepare_attempt(
+                &MaterializeRequest {
+                    source: &source,
+                    target: &target,
+                    staging: &staging,
+                    trash: &trash,
+                },
+                Backend::FullCopy,
+            )
+            .expect("prepare unchanged roots");
+            let opened = revalidate_and_open(&prepared).expect("open verified roots");
+            let changed = match index {
+                0 => &opened.source,
+                1 => &opened.target,
+                2 => &opened.staging,
+                3 => &opened.trash,
+                _ => unreachable!(),
+            };
+            let changed_mode = if index == 0 { 0o100 } else { 0o500 };
+            crate::ffi::set_mode(changed, changed_mode).expect("change one held root mode");
+            let result = revalidate_held_roots_after_target_metadata(
+                &prepared,
+                [
+                    &opened.source,
+                    &opened.target,
+                    &opened.staging,
+                    &opened.trash,
+                ],
+                prepared.target_baseline,
+            );
+            crate::ffi::set_mode(changed, 0o700).expect("restore controlled root mode");
+
+            drop(opened);
+            fixture.cleanup().expect("remove controlled root fixture");
+            assert!(matches!(
+                result,
+                Err(MaterializationError::PlanStale { ref path })
+                    if path == [&source, &target, &staging, &trash][index]
+            ));
+        }
+    }
+
+    #[test]
+    fn final_metadata_revalidation_rejects_a_wrong_held_root_identity() {
+        let (fixture, source, target, staging, trash) =
+            controlled_materialization_roots("final-held-identity");
+        let prepared = prepare_attempt(
+            &MaterializeRequest {
+                source: &source,
+                target: &target,
+                staging: &staging,
+                trash: &trash,
+            },
+            Backend::FullCopy,
+        )
+        .expect("prepare unchanged roots");
+        let opened = revalidate_and_open(&prepared).expect("open verified roots");
+        let result = revalidate_held_roots_after_target_metadata(
+            &prepared,
+            [
+                &opened.staging,
+                &opened.target,
+                &opened.staging,
+                &opened.trash,
+            ],
+            prepared.target_baseline,
+        );
+
+        drop(opened);
+        fixture.cleanup().expect("remove controlled root fixture");
+        assert!(matches!(
+            result,
+            Err(MaterializationError::PlanStale { ref path }) if path == &source
+        ));
+    }
+
+    #[test]
+    fn final_metadata_revalidation_rejects_wrong_target_mode_and_mtime() {
+        for metadata_field in ["mode", "mtime"] {
+            let (fixture, source, target, staging, trash) = controlled_materialization_roots(
+                &format!("final-target-metadata-{metadata_field}"),
+            );
+            fixture
+                .set_modified_time(Path::new("source"), 1_650_000_001, 123_456_789)
+                .expect("set source root mtime");
+            fixture
+                .set_modified_time(Path::new("target"), 1_660_000_002, 234_567_890)
+                .expect("set target root mtime");
+            if metadata_field == "mode" {
+                fixture
+                    .set_modified_time(Path::new("target"), 1_650_000_001, 123_456_789)
+                    .expect("align target root mtime");
+                fixture
+                    .set_mode(Path::new("source"), 0o555)
+                    .expect("set source root mode");
+            }
+            let prepared = prepare_attempt(
+                &MaterializeRequest {
+                    source: &source,
+                    target: &target,
+                    staging: &staging,
+                    trash: &trash,
+                },
+                Backend::FullCopy,
+            )
+            .expect("prepare differing source and target metadata");
+            let opened = revalidate_and_open(&prepared).expect("open verified roots");
+            let result = revalidate_held_roots_after_target_metadata(
+                &prepared,
+                [
+                    &opened.source,
+                    &opened.target,
+                    &opened.staging,
+                    &opened.trash,
+                ],
+                prepared.source.root_metadata,
+            );
+            if metadata_field == "mode" {
+                crate::ffi::set_mode(&opened.source, 0o700)
+                    .expect("restore controlled source mode");
+            }
+
+            drop(opened);
+            fixture
+                .cleanup()
+                .expect("remove controlled metadata fixture");
+            assert!(matches!(
+                result,
+                Err(MaterializationError::ManifestMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn final_metadata_revalidation_does_not_accept_a_non_target_writability_change() {
+        let (fixture, source, target, staging, trash) =
+            controlled_materialization_roots("final-non-target-writability");
+        let prepared = prepare_attempt(
+            &MaterializeRequest {
+                source: &source,
+                target: &target,
+                staging: &staging,
+                trash: &trash,
+            },
+            Backend::FullCopy,
+        )
+        .expect("prepare writable roots");
+        let opened = revalidate_and_open(&prepared).expect("open verified roots");
+        crate::ffi::set_mode(&opened.target, 0o555).expect("set expected target root mode");
+        crate::ffi::set_mode(&opened.staging, 0o555).expect("change non-target root mode");
+        let expected_target =
+            crate::ffi::metadata(&opened.target).expect("observe expected target root metadata");
+        let result = revalidate_held_roots_after_target_metadata(
+            &prepared,
+            [
+                &opened.source,
+                &opened.target,
+                &opened.staging,
+                &opened.trash,
+            ],
+            expected_target,
+        );
+        crate::ffi::set_mode(&opened.target, 0o700).expect("restore controlled target mode");
+        crate::ffi::set_mode(&opened.staging, 0o700).expect("restore controlled staging mode");
+
+        drop(opened);
+        fixture.cleanup().expect("remove controlled root fixture");
+        assert!(matches!(
+            result,
+            Err(MaterializationError::PlanStale { ref path }) if path == &staging
+        ));
+    }
+
+    #[test]
+    fn root_metadata_rollback_helper_restores_or_rejects_without_side_effects() {
+        let (fixture, source, target, staging, trash) =
+            controlled_materialization_roots("root-metadata-rollback-helper");
+        fixture
+            .set_modified_time(Path::new("target"), 1_650_000_001, 123_456_789)
+            .expect("set prepared target baseline mtime");
+        let prepared = prepare_attempt(
+            &MaterializeRequest {
+                source: &source,
+                target: &target,
+                staging: &staging,
+                trash: &trash,
+            },
+            Backend::FullCopy,
+        )
+        .expect("prepare target baseline");
+        let opened = revalidate_and_open(&prepared).expect("open verified roots");
+
+        crate::ffi::set_modified_time(&opened.target, 1_660_000_002, 234_567_890)
+            .expect("change target root mtime");
+        restore_or_verify_target_root_after_rollback(
+            &opened.target,
+            prepared.target_baseline,
+            true,
+        )
+        .expect("restore valid target root baseline");
+        let restored = crate::ffi::metadata(&opened.target).expect("observe restored target root");
+        assert!(same_preserved_root_metadata(
+            restored,
+            prepared.target_baseline
+        ));
+
+        let before_wrong_identity = crate::ffi::metadata(&opened.target)
+            .expect("observe target before wrong identity check");
+        let wrong_identity =
+            crate::ffi::metadata(&opened.staging).expect("observe different controlled directory");
+        let wrong_identity_error =
+            restore_or_verify_target_root_after_rollback(&opened.target, wrong_identity, true)
+                .expect_err("wrong target root identity must be rejected");
+        let after_wrong_identity = crate::ffi::metadata(&opened.target)
+            .expect("observe target after wrong identity check");
+
+        let mut wrong_mode = prepared.target_baseline;
+        wrong_mode.mode = 0o555;
+        let before_wrong_mode =
+            crate::ffi::metadata(&opened.target).expect("observe target before wrong mode check");
+        let wrong_mode_error =
+            restore_or_verify_target_root_after_rollback(&opened.target, wrong_mode, true)
+                .expect_err("wrong target root mode must be rejected");
+        let after_wrong_mode =
+            crate::ffi::metadata(&opened.target).expect("observe target after wrong mode check");
+
+        crate::ffi::set_modified_time(&opened.target, 1_670_000_003, 345_678_901)
+            .expect("change target root mtime without requesting restoration");
+        let before_no_restore =
+            crate::ffi::metadata(&opened.target).expect("observe target before verification only");
+        let no_restore_error = restore_or_verify_target_root_after_rollback(
+            &opened.target,
+            prepared.target_baseline,
+            false,
+        )
+        .expect_err("verification-only call must reject an mtime mismatch");
+        let after_no_restore =
+            crate::ffi::metadata(&opened.target).expect("observe target after verification only");
+
+        drop(opened);
+        fixture
+            .cleanup()
+            .expect("remove controlled rollback fixture");
+        assert_eq!(
+            wrong_identity_error.operation,
+            "compare target root before mtime restoration"
+        );
+        assert_eq!(before_wrong_identity, after_wrong_identity);
+        assert_eq!(
+            wrong_mode_error.operation,
+            "compare target root before mtime restoration"
+        );
+        assert_eq!(before_wrong_mode, after_wrong_mode);
+        assert_eq!(
+            no_restore_error.operation,
+            "compare restored target root metadata"
+        );
+        assert_eq!(before_no_restore, after_no_restore);
+    }
+
+    #[test]
+    fn preserved_metadata_helpers_compare_each_promised_field() {
+        let base = crate::ffi::NodeMetadata {
+            device: 17,
+            inode: 23,
+            kind: crate::ffi::NodeKind::Directory,
+            mode: 0o750,
+            size: 11,
+            modified_seconds: 1_650_000_001,
+            modified_nanoseconds: 123_456_789,
+        };
+        let with = |change: fn(&mut crate::ffi::NodeMetadata)| {
+            let mut changed = base;
+            change(&mut changed);
+            changed
+        };
+        let changed_device = with(|metadata| metadata.device ^= 1);
+        let changed_inode = with(|metadata| metadata.inode ^= 1);
+        let changed_kind = with(|metadata| metadata.kind = crate::ffi::NodeKind::RegularFile);
+        let changed_mode = with(|metadata| metadata.mode = 0o700);
+        let changed_seconds = with(|metadata| metadata.modified_seconds += 1);
+        let changed_nanoseconds = with(|metadata| metadata.modified_nanoseconds += 1);
+
+        assert!(same_preserved_root_metadata(base, base));
+        for changed in [
+            changed_device,
+            changed_inode,
+            changed_kind,
+            changed_mode,
+            changed_seconds,
+            changed_nanoseconds,
+        ] {
+            assert!(!same_preserved_root_metadata(changed, base));
+        }
+
+        assert!(has_preserved_metadata(base, base));
+        assert!(has_preserved_metadata(changed_device, base));
+        assert!(has_preserved_metadata(changed_inode, base));
+        for changed in [
+            changed_kind,
+            changed_mode,
+            changed_seconds,
+            changed_nanoseconds,
+        ] {
+            assert!(!has_preserved_metadata(changed, base));
+        }
+    }
+
+    #[test]
     fn candidate_state_selects_only_the_requested_backend_and_defaults_to_unknown() {
         let (fixture, source, target, staging, trash) =
             controlled_materialization_roots("candidate-state-unit");
@@ -2404,7 +3226,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let mut prepared =
             prepare_attempt(&request, Backend::ApfsFileClone).expect("prepare clone candidates");
@@ -2433,7 +3254,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let options = PolicyExperimentOptions {
             requested_mode: RequestedMode::CowClone,
@@ -2518,11 +3338,26 @@ mod tests {
             device: 17,
             inode: 29,
         };
+        let root_metadata = crate::ffi::NodeMetadata {
+            device: 17,
+            inode: 23,
+            kind: crate::ffi::NodeKind::Directory,
+            mode: 0o700,
+            size: 0,
+            modified_seconds: 1_650_000_000,
+            modified_nanoseconds: 123_456_789,
+        };
         let manifest = TreeManifest {
+            root_permissions: root_metadata.mode,
+            root_modified_time: modified_time(root_metadata),
             entries: vec![ManifestEntry {
                 path: path.clone(),
                 kind: ManifestEntryKind::RegularFile,
                 permissions: Some(0o600),
+                modified_time: Some(ModifiedTime {
+                    seconds: 1_650_000_001,
+                    nanoseconds: 234_567_890,
+                }),
                 length: 4,
                 content_digest_hex: Some(blake3::hash(b"data").to_hex().to_string()),
             }],
@@ -2531,6 +3366,8 @@ mod tests {
             backend: Backend::FullCopy,
             clone_calls_succeeded: 0,
             ordinary_files_materialized: 1,
+            metadata_updates_started: 1,
+            target_root_metadata_started: true,
             created: vec![TrackedCreated {
                 relative: vec![OsString::from("entry")],
                 kind: crate::ffi::NodeKind::RegularFile,
@@ -2541,6 +3378,7 @@ mod tests {
         let exact = TreeSnapshot {
             manifest: manifest.clone(),
             identities: BTreeMap::from([(path.clone(), expected)]),
+            root_metadata,
         };
         assert!(context.matches_target_snapshot(&manifest, &exact));
 
@@ -2672,7 +3510,6 @@ mod tests {
             target: &target,
             staging: &staging,
             trash: &trash,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy).expect("prepare empty attempt");
         let opened = revalidate_and_open(&prepared).expect("open all verified roots");
@@ -2695,9 +3532,9 @@ mod tests {
     }
 
     #[test]
-    fn protected_git_revalidation_distinguishes_missing_changed_and_syscall_error() {
+    fn target_empty_revalidation_rejects_git_and_surfaces_syscall_error() {
         let (mut fixture, _source, target_path, _staging, _trash) =
-            controlled_materialization_roots("git-revalidation-unit");
+            controlled_materialization_roots("target-empty-unit");
         let target = rustix::fs::openat(
             fixture.root_fd(),
             "target",
@@ -2705,24 +3542,15 @@ mod tests {
             Mode::empty(),
         )
         .expect("open controlled target");
-        verify_protected_git(&target, &target_path, None).expect("absent undeclared .git is valid");
+        verify_target_empty(&target, &target_path).expect("empty target is valid");
 
         fixture
-            .create_file(Path::new("target/.git"), b"control", 0o600)
-            .expect("create caller-owned control entry");
-        let expected = crate::ffi::metadata_at(&target, c".git").expect("observe control identity");
-        verify_protected_git(&target, &target_path, Some(expected))
-            .expect("unchanged declared .git is valid");
-        fixture
-            .rename_tracked_exclusive(Path::new("target/.git"), Path::new("target/original-git"))
-            .expect("move exact controlled .git without replacement");
+            .create_file(Path::new("target/.git"), b"ordinary target content", 0o600)
+            .expect("create existing target entry");
         assert!(matches!(
-            verify_protected_git(&target, &target_path, Some(expected)),
-            Err(MaterializationError::TargetChanged { .. })
+            verify_target_empty(&target, &target_path),
+            Err(MaterializationError::UnknownTargetEntry { ref path }) if path.display == ".git"
         ));
-        fixture
-            .rename_tracked_exclusive(Path::new("target/original-git"), Path::new("target/.git"))
-            .expect("restore exact controlled .git");
 
         fixture
             .create_file(Path::new("not-a-directory"), b"file", 0o600)
@@ -2735,7 +3563,7 @@ mod tests {
         )
         .expect("open regular file as deliberately invalid parent");
         assert!(matches!(
-            verify_protected_git(&regular, &target_path, None),
+            verify_target_empty(&regular, &target_path),
             Err(MaterializationError::SystemCall {
                 errno: Some(libc::ENOTDIR),
                 ..
@@ -3336,7 +4164,6 @@ mod tests {
             target: &target_path,
             staging: &staging_path,
             trash: &trash_path,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy)
             .expect("prepare an empty controlled attempt");
@@ -3420,7 +4247,6 @@ mod tests {
             target: &target_path,
             staging: &staging_path,
             trash: &trash_path,
-            protected_git: None,
         };
         let prepared = prepare_attempt(&request, Backend::FullCopy)
             .expect("prepare an empty controlled attempt");

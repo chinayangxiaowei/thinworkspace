@@ -1045,3 +1045,31 @@ lib 补丁中出现一次落点错误：第一次因上下文不唯一，误将�
 两个输出目录的 `mutants.out/outcomes.json`、逐项目标日志和 scratch 原样保留。主 Agent 对照旧全量批次的 34 项输入哈希确认只有上述两份授权测试文件变化；CI、生产实现、依赖与排除配置均未变化。本轮未重新运行四份短预算 fuzz（harness 与受测生产代码均未修改），也未重新启动完整 479 项、远端候选 CI 或第二卷专项；历史全量中断及局部结果均不能合计成当前候选全量通过。P0-03 保持 In Progress，剩余兼容政策、正式 ADR、完整验收与源码提交仍待完成。
 
 Astra / `gpt-6-astra` / `xhigh` 对最终两份测试修正和本节进度记录给出限定 **Approve**：独立核验两个变异的正常 baseline、终态、精确失败集合及恢复 scratch 哈希，未发现非目标失败；允许本进度文档单独提交。主 Agent 另以自动断言复核同一结果，并检查本文 6 个本地链接目标、围栏配对与 `git diff --check`，均通过；链接检查不包括锚点。审核不覆盖完整候选、479 项门禁、源码提交或阶段放行，实验源码和 CI 增量继续保留在原工作区。
+
+### 补测后 Git 全量变异重新执行（2026-09-13 UTC）
+
+上述记录已单独提交并推送为 `8993a5a`。当前继续 P0-03/P0.b/R4；lib `1d5b945f…`、托管拓扑 `6c611b36…` 与 workflow `541d109a…` 未变化。前次批次和两个精确复验均已终止，本机没有遗留的变异或实验测试进程。主 Agent 新建本工作区 `target/p0-03-git-full-final.jepKWg/`，保存当前 34 项输入哈希到 `input-sha256.json`，运行期间不修改这些输入、排除项或超时。
+
+主 Agent 从实际 workflow 提取原预检执行，再仅将枚举的 workspace 选择替换为 Git 包选择执行同一预检，session `57244` 终态退出 0：分别为 **993＝989＋3＋1** 与 **479＝475＋3＋1**，完整覆盖且互斥。Git 完整名称集合的排序/LF 连接 SHA-256 仍为 `37015f03b2e346cad62b473519f7e984035a60e8904db33567455e14e60e40f9`；两组实际正则输出保留为该目录中的 `github-output-workspace` 与 `github-output-git`。本机 Ruby 仍提示既有 ffi 扩展未构建，预检正常完成，未修改环境。
+
+本批依次执行实际 workflow 的三个变异步骤，只将 `--workspace` 替换为 `-p thinws-p0-git-base`、输出目录替换为本批 `main/`、`flags/`、`pipes/`，采用本批预检正则；其余固定工具 27.1.0、正常 baseline、180 秒、jobs 2、locked、leak-dirs 和各分区测试参数不变，每组前后重验 34 项输入。结果必须取得三个分区各自终态并核对日志后才能判断；不能把准入、观察等待超时或旧局部 caught 当作完成。不重新挂载第二卷，不据此替代整个 workspace、兼容矩阵、远端 CI 或阶段放行。
+
+顺序执行器 session `29242` 已启动 main，`outcomes.json` 起点为 `2026-09-13T05:52:45.526294Z`；正常 baseline Build **18.85 秒**、Test **119.62 秒**均成功，34 项输入未变，随后进入实际变异。此处只记录基线结果，不声明批次结束。
+
+同轮供应链复验 session `19388` 终态退出 0：固定 `cargo-deny 0.20.2` 对根/fuzz 两工作区的 advisories、bans、licenses、sources 检查通过，保留未匹配自有包许可例外和 NCSA allowance 的既有警告；固定 `cargo-audit 0.22.2` 更新公告库后加载 1,243 项公告，对根/fuzz 的 36/29 个依赖扫描均未报告漏洞。锁定依赖与所有冻结输入未变化。远端只读核查仍只有已合并的 PR #1–#3，CI 成功，无开放 PR 或 reviewThreads；GitHub reviews 数组仍为空，审核证据的性质及链接沿用前节，不把历史 PR 结果用于当前未提交候选。
+
+本批已分类日志再次发现非目标失败，但不同于上节已修正的 timeout 证据分支：`lib.rs:127:9` 的 ChildTermination Display 变异有 2 项目标诊断失败及 10 项 Base fixture/成功路径 Timeout；`214:9` 的 ExperimentError Display 有 3 项目标诊断及 10 项 fixture Timeout；`270:9` 的 source→None 有 3 项目标 source 断言及有限输出测试的额外失败。后者实际在 1.015893459 秒收集 14,950,400/16,777,216 字节、signal 9、writer BrokenPipe。变异仅改诊断/source 读出，没有改变这些执行路径的预算或收集逻辑；不能把额外失败用于证明对应变异被有效检出。
+
+主 Agent 核验 `cargo-mutants` PID `33487`、父 `33445` 和精确自有输出 argv 后发 SIGINT，session `29242` 终态退出 1（interrupted）。main 停止时 **10/475＝7 caught＋3 unviable**，0 missed/工具 timeout，end_time null；flags/pipes 尚未启动。34 项输入未变，后续 ps 已无该父/子及两份 scratch 的测试进程，现场保留。停止前本机报告 10 个 logical CPU、load averages `165.96/104.34/67.07`，随后为 `109.00/100.10/67.74`；负载、两个 worker 的 Test 重叠和非目标失败是观察事实，尚不能据此证明 CPU 调度或任何特定句柄继承为根因。未终止用户 VM 或其他无关进程。
+
+Astra / `gpt-6-astra` / `xhigh` 独立核验三份完整日志和精确 diff 后，主 Agent 只准入单变量对照：新建 `target/p0-03-jobs-one-control.62yQnf/`，枚举恰好上述三项后，以完整所属 Git 包测试复验；仅将 mutants 的 `--jobs 2` 改为 `--jobs 1`，源码、正常 baseline、180 秒、locked、leak-dirs、libtest 线程设置和 `--include-ignored --nocapture` 均保持。要求 baseline 完整通过 105＋6＋25，三项分别只有 2/3/3 个预期诊断/source 失败，无 fixture Timeout、有限输出不足、其他非目标失败或工具 Timeout。此准入不批准结果、CI 修改或完整 479 项门禁；不扩建调度框架、不提高生产或工具预算。
+
+对照 session `88485` 终态退出 0，`outcomes.json` end_time 为 `2026-09-13T06:04:59.017928Z`：**3 caught、0 missed/timeout/unviable**。正常 baseline Build 11.58 秒、Test 75.49 秒，105＋6＋25 全部通过；127、214、270 三项的 Test 分别为 25.82、25.49、24.64 秒，均正常退出 101，完整 failures section 分别只有上述 2/3/3 项目标断言，无先前非目标失败。270 对照中的有限输出测试通过，记录收尾 325.322791ms；不是将不完整输出改判成功。主 Agent 核验实际 Cargo argv 不变、全部 34 项输入及恢复 scratch 的对应哈希一致。该观察支持后续本机以单 worker 重验，但不证明唯一根因、所有负载稳定、完整 479 项或远端 CI 容量；CI 文件仍未修改。
+
+Sol / `gpt-5.6-sol` / `xhigh` 的限定只读调查确认多个真实 fixture 在同一 libtest 内重叠启动、两个 mutant worker 又叠加完整包测试；Git helper 逐个同步收集，未发现本次范围内的无界 spawn。已观测的 Git Timeout 均记录直接子进程已回收，有限输出测试的自有 writer 亦已 join；不能把保留的磁盘 fixture 当作活进程累积。精确 libtest worker 数和系统负载的唯一原因仍未证实，不以静态的其他等待分支扩建新清理机制。Astra / `gpt-6-astra` / `xhigh` 独立核验对照终态、完整失败集合及全部输入哈希，认可这次限定结果，并同意以同样单 worker、完整 475＋3＋1 分区重新执行本机全量；没有批准 CI 修改或提前放行。
+
+主 Agent 在无变异批次并行时执行原样通用门禁，session `71246` 终态退出 0：fmt、全 workspace Clippy、普通测试 **245 passed、0 failed、2 ignored**；两项额外跨卷测试未配置第二卷，未执行。本轮没有源码或公开契约变更，不重复运行未改变的 fuzz harness 或 Git Release；前次结果及其范围仍按原记录保留，不能替代未完成的全量门禁。
+
+单 worker 的完整新批次根为 `target/p0-03-git-full-serial.dxsAq4/`，34 项 `input-sha256.json` 与前批相同。主 Agent 重跑同一真实预检，session `72750` 终态退出 0，仍为 workspace 993＝989＋3＋1、Git 479＝475＋3＋1，Git 名称集合哈希不变；结果仍各自保存在 `github-output-workspace`、`github-output-git`。顺序执行器 session `13582` 已进入新 main：从冻结 workflow 提取各命令，仅变更本机包选择、独立输出目录和 `--jobs 2`→`--jobs 1`，每组前后重验输入；不改变 CI 文件或内层 libtest 设置。本段是重新准入和启动记录，尚无三个分区的完整终态，不把旧批的 10 项或三项对照计入本批。
+
+Astra / `gpt-6-astra` / `xhigh` 对本节新增进度记录给出限定 **Approve**，确认历史中断、对照结果、负载假说、新批启动与未执行项区分清楚，允许仅此文档提交。主 Agent 检查本文 6 个本地链接目标、围栏配对与 `git diff --check` 通过；链接检查不包括锚点。该批准不覆盖源码、CI、完整 479 项或阶段放行。

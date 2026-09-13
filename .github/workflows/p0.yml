@@ -20,7 +20,8 @@ jobs:
       - name: Initialize experiment paths
         run: |
           test -d "$RUNNER_TEMP"
-          printf 'THINWS_P0_CROSS_VOLUME_ROOT=%s/thinws-p0-cross-volume\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'THINWS_P0_SUBMOUNT_SOURCE=%s/thinws-p0-submount-source\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'THINWS_P0_CROSS_VOLUME_ROOT=%s/thinws-p0-submount-source/mounted\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P0_IMAGE=%s/thinws-p0-cross-volume.dmg\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
@@ -35,6 +36,7 @@ jobs:
       - name: Prepare distinct APFS volume
         id: cross-volume
         run: |
+          mkdir "$THINWS_P0_SUBMOUNT_SOURCE"
           hdiutil create -size 128m -fs APFS -volname thinws-p0-ci "$THINWS_P0_IMAGE"
           hdiutil attach -nobrowse -owners on -mountpoint "$THINWS_P0_CROSS_VOLUME_ROOT" "$THINWS_P0_IMAGE"
       - name: Tests on actual macOS filesystem
@@ -77,7 +79,7 @@ jobs:
         run: |
           set -u
 
-          expected_mountpoint="$RUNNER_TEMP/thinws-p0-cross-volume"
+          expected_mountpoint="$RUNNER_TEMP/thinws-p0-submount-source/mounted"
           if [ "$THINWS_P0_CROSS_VOLUME_ROOT" != "$expected_mountpoint" ]; then
             printf 'refusing to detach unexpected path: %s\n' "$THINWS_P0_CROSS_VOLUME_ROOT" >&2
             exit 64

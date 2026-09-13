@@ -21,6 +21,8 @@ pub(crate) struct NodeMetadata {
     pub(crate) kind: NodeKind,
     pub(crate) mode: u32,
     pub(crate) size: u64,
+    pub(crate) modified_seconds: i64,
+    pub(crate) modified_nanoseconds: i64,
 }
 
 pub(crate) fn open_root_directory() -> io::Result<OwnedFd> {
@@ -209,6 +211,32 @@ pub(crate) fn set_mode(fd: &impl AsRawFd, mode: u32) -> io::Result<()> {
     syscall_unit(result)
 }
 
+pub(crate) fn set_modified_time(
+    fd: &impl AsRawFd,
+    seconds: i64,
+    nanoseconds: i64,
+) -> io::Result<()> {
+    if !(0..1_000_000_000).contains(&nanoseconds) {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: seconds,
+            tv_nsec: nanoseconds,
+        },
+    ];
+
+    // SAFETY: fd is live, `times` is a two-element array with a valid mtime
+    // nanosecond value, and futimens borrows both only for the duration of the
+    // call. UTIME_OMIT tells the kernel not to alter atime.
+    let result = unsafe { libc::futimens(fd.as_raw_fd(), times.as_ptr()) };
+    syscall_unit(result)
+}
+
 pub(crate) fn read_link_at(parent: &OwnedFd, name: &CStr) -> io::Result<Vec<u8>> {
     validate_component(name)?;
     let mut capacity = 256usize;
@@ -314,6 +342,8 @@ fn metadata_from_stat(stat: libc::stat) -> NodeMetadata {
         kind,
         mode: u32::from(stat.st_mode & 0o7777),
         size: stat.st_size.max(0) as u64,
+        modified_seconds: stat.st_mtime,
+        modified_nanoseconds: stat.st_mtime_nsec,
     }
 }
 
@@ -337,7 +367,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use rustix::fs::{Mode, OFlags};
+    use rustix::fs::{Mode, OFlags, Timespec, Timestamps};
     use rustix::io::FdFlags;
 
     use crate::test_support::ControlledTree;
@@ -345,7 +375,7 @@ mod tests {
     use super::{
         DirectoryStream, NodeKind, clone_file_at, create_file_at, metadata, open_directory_at,
         open_file_read_at, open_file_write_at, open_root_directory, owned_fd, read_directory,
-        read_link_at, remove_at, validate_component,
+        read_link_at, remove_at, set_modified_time, validate_component,
     };
 
     fn fixture() -> ControlledTree {
@@ -468,6 +498,70 @@ mod tests {
         fixture.cleanup().expect("remove verified FFI fixture");
         assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
         assert_eq!(contents, b"preserve me");
+    }
+
+    #[test]
+    fn futimens_wrapper_sets_exact_mtime_omits_atime_and_preserves_einval() {
+        let mut fixture = fixture();
+        fixture
+            .create_file(Path::new("timestamps"), b"payload", 0o600)
+            .expect("create timestamp fixture");
+        let production_root = open_with_production_search_flags(&fixture);
+        let file = open_file_read_at(&production_root, c"timestamps")
+            .expect("open timestamp fixture with production flags");
+        rustix::fs::futimens(
+            &file,
+            &Timestamps {
+                last_access: Timespec {
+                    tv_sec: 1_640_000_001,
+                    tv_nsec: 123_456_789,
+                },
+                last_modification: Timespec {
+                    tv_sec: 1_640_000_002,
+                    tv_nsec: 234_567_890,
+                },
+            },
+        )
+        .expect("set independent initial timestamps");
+        let before = rustix::fs::fstat(&file).expect("observe timestamps before production call");
+
+        set_modified_time(&file, 1_650_000_003, 345_678_901)
+            .expect("production futimens wrapper succeeds");
+        let after = rustix::fs::fstat(&file).expect("observe timestamps after production call");
+        set_modified_time(&file, 1_660_000_004, 0).expect("zero nanoseconds is a valid endpoint");
+        let after_zero = rustix::fs::fstat(&file).expect("observe zero-nanosecond endpoint");
+        set_modified_time(&file, 1_670_000_005, 999_999_999)
+            .expect("maximum nanoseconds is a valid endpoint");
+        let after_maximum = rustix::fs::fstat(&file).expect("observe maximum endpoint");
+        let invalid_negative = set_modified_time(&file, 1_680_000_006, -1)
+            .expect_err("negative nanoseconds must not invoke Darwin sentinel semantics");
+        let after_negative =
+            rustix::fs::fstat(&file).expect("observe timestamps after negative rejection");
+        let invalid_upper = set_modified_time(&file, 1_690_000_007, 1_000_000_000)
+            .expect_err("upper-exclusive nanoseconds must preserve EINVAL");
+        let after_upper =
+            rustix::fs::fstat(&file).expect("observe timestamps after upper rejection");
+
+        drop((file, production_root));
+        fixture.cleanup().expect("remove verified FFI fixture");
+        assert_eq!(after.st_atime, before.st_atime);
+        assert_eq!(after.st_atime_nsec, before.st_atime_nsec);
+        assert_eq!(after.st_mtime, 1_650_000_003);
+        assert_eq!(after.st_mtime_nsec, 345_678_901);
+        assert_eq!(after_zero.st_atime, before.st_atime);
+        assert_eq!(after_zero.st_atime_nsec, before.st_atime_nsec);
+        assert_eq!(after_zero.st_mtime, 1_660_000_004);
+        assert_eq!(after_zero.st_mtime_nsec, 0);
+        assert_eq!(after_maximum.st_atime, before.st_atime);
+        assert_eq!(after_maximum.st_atime_nsec, before.st_atime_nsec);
+        assert_eq!(after_maximum.st_mtime, 1_670_000_005);
+        assert_eq!(after_maximum.st_mtime_nsec, 999_999_999);
+        assert_eq!(invalid_negative.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(invalid_upper.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(after_negative.st_mtime, after_maximum.st_mtime);
+        assert_eq!(after_negative.st_mtime_nsec, after_maximum.st_mtime_nsec);
+        assert_eq!(after_upper.st_mtime, after_maximum.st_mtime);
+        assert_eq!(after_upper.st_mtime_nsec, after_maximum.st_mtime_nsec);
     }
 
     #[test]

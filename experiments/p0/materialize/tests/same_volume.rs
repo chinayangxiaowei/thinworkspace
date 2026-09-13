@@ -1099,7 +1099,7 @@ fn same_inode_source_content_change_rejects_clone_and_full_copy_success() {
 }
 
 #[test]
-fn fresh_copy_prepare_reports_latest_source_change_and_retains_first_enotsup_attempt() {
+fn source_metadata_change_stops_clone_attempt_before_runtime_fallback() {
     let fixture = Fixture::create_fixed_tree().expect("create controlled fixed fixture");
     let options = PolicyExperimentOptions {
         requested_mode: RequestedMode::CowClone,
@@ -1113,7 +1113,7 @@ fn fresh_copy_prepare_reports_latest_source_change_and_retains_first_enotsup_att
         second_attempt_faults: FaultInjection::default(),
     };
     let failure = run_policy_experiment(&fixture.request(), &options)
-        .expect_err("fresh fallback preparation must detect changed source contents");
+        .expect_err("source metadata observation must stop before runtime fallback");
     assert!(matches!(
         failure.error,
         MaterializationError::SourceChanged { .. }
@@ -1121,12 +1121,7 @@ fn fresh_copy_prepare_reports_latest_source_change_and_retains_first_enotsup_att
     assert_eq!(failure.attempts.len(), 1);
     assert!(matches!(
         failure.attempts[0].failure,
-        Some(MaterializationError::SystemCall {
-            operation: SystemOperation::CloneFileAt,
-            errno: Some(libc::ENOTSUP),
-            injected: true,
-            ..
-        })
+        Some(MaterializationError::SourceChanged { .. })
     ));
     assert_eq!(
         failure.attempts[0].rollback.status,

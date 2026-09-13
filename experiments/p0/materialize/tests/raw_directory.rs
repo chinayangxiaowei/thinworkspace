@@ -84,6 +84,40 @@ impl Fixture {
         Ok(())
     }
 
+    fn adopt_remaining(&mut self, receipt: &AttemptEvidence) -> io::Result<()> {
+        let target_relative = self
+            .target
+            .strip_prefix(&self.root)
+            .map_err(|_| io::Error::other("fixture target escaped its controlled root"))?;
+        for entry in &receipt.created {
+            if !receipt
+                .rollback
+                .remaining
+                .iter()
+                .any(|remaining| remaining == &entry.path)
+            {
+                continue;
+            }
+            let CreatedIdentity::Confirmed(identity) = entry.identity else {
+                return Err(io::Error::other(
+                    "remaining receipt entry did not confirm its identity",
+                ));
+            };
+            let kind = match entry.kind {
+                ManifestEntryKind::Directory => TrackedKind::Directory,
+                ManifestEntryKind::RegularFile => TrackedKind::RegularFile,
+                ManifestEntryKind::SymbolicLink => TrackedKind::SymbolicLink,
+            };
+            self.tree.adopt_confirmed(
+                &target_relative.join(&entry.path.display),
+                identity.device,
+                identity.inode,
+                kind,
+            )?;
+        }
+        Ok(())
+    }
+
     fn cleanup(self) -> io::Result<()> {
         self.tree.cleanup()
     }
@@ -508,4 +542,284 @@ fn both_backends_reject_nonempty_target_without_overwriting() {
             fixture.cleanup().expect("clean controlled fixture");
         }
     }
+}
+
+#[test]
+fn apfs_clone_preserves_root_directory_and_regular_file_mtime_and_permissions() {
+    assert_backend_preserves_mtime_and_permissions(Backend::ApfsFileClone);
+}
+
+#[test]
+fn full_copy_preserves_root_directory_and_regular_file_mtime_and_permissions() {
+    assert_backend_preserves_mtime_and_permissions(Backend::FullCopy);
+}
+
+fn assert_backend_preserves_mtime_and_permissions(backend: Backend) {
+    let label = match backend {
+        Backend::ApfsFileClone => "metadata-clone",
+        Backend::FullCopy => "metadata-copy",
+    };
+    let mut fixture = Fixture::create(label).expect("create controlled fixture");
+    fixture
+        .tree
+        .create_directory("source/nested", 0o700)
+        .expect("create nested source directory");
+    fixture
+        .tree
+        .create_directory("source/empty", 0o700)
+        .expect("create empty source directory");
+    fixture
+        .tree
+        .create_file("source/root-file", b"root bytes\n", 0o400)
+        .expect("create source root file");
+    fixture
+        .tree
+        .create_file("source/nested/leaf", b"nested bytes\n", 0o440)
+        .expect("create nested source file");
+    fixture
+        .tree
+        .set_mode(Path::new("source/nested"), 0o550)
+        .expect("set nested source directory permissions");
+    fixture
+        .tree
+        .set_mode(Path::new("source/empty"), 0o510)
+        .expect("set empty source directory permissions");
+
+    for (path, seconds, nanoseconds) in [
+        ("source/root-file", 1_651_000_001, 123_456_789),
+        ("source/nested/leaf", 1_652_000_002, 234_567_890),
+        ("source/empty", 1_653_000_003, 345_678_901),
+        ("source/nested", 1_654_000_004, 456_789_012),
+        ("source", 1_655_000_005, 567_890_123),
+    ] {
+        fixture
+            .tree
+            .set_modified_time(Path::new(path), seconds, nanoseconds)
+            .expect("set controlled source mtime");
+    }
+    fixture
+        .tree
+        .set_mode(Path::new("source"), 0o555)
+        .expect("make source root read-only but searchable");
+
+    let result = materialize_once(&fixture.request(), backend);
+    let outcome = match result {
+        Ok(receipt) => {
+            fixture
+                .adopt_created(&receipt)
+                .expect("adopt materialized identities");
+            let source_metadata = [
+                "source",
+                "source/empty",
+                "source/nested",
+                "source/nested/leaf",
+                "source/root-file",
+            ]
+            .map(|path| {
+                fixture
+                    .tree
+                    .mode_and_modified_time_at(Path::new(path))
+                    .expect("observe source metadata")
+            });
+            let target_metadata = [
+                "target",
+                "target/empty",
+                "target/nested",
+                "target/nested/leaf",
+                "target/root-file",
+            ]
+            .map(|path| {
+                fixture
+                    .tree
+                    .mode_and_modified_time_at(Path::new(path))
+                    .expect("observe target metadata")
+            });
+            for path in ["target", "target/empty", "target/nested"] {
+                fixture
+                    .tree
+                    .set_mode(Path::new(path), 0o700)
+                    .expect("restore writable target directory for controlled cleanup");
+            }
+            Ok((source_metadata, target_metadata))
+        }
+        Err(failure) => Err(failure.error.to_string()),
+    };
+    for path in ["source", "source/empty", "source/nested"] {
+        fixture
+            .tree
+            .set_mode(Path::new(path), 0o700)
+            .expect("restore writable source directory for controlled cleanup");
+    }
+    fixture.cleanup().expect("clean controlled fixture");
+
+    let (source_metadata, target_metadata) =
+        outcome.expect("metadata-preserving materialization must succeed");
+    assert_eq!(
+        source_metadata[0].0, 0o555,
+        "source root test is meaningful"
+    );
+    assert_eq!(target_metadata, source_metadata, "backend {backend:?}");
+}
+
+#[test]
+fn prepared_attempt_rejects_root_directory_and_regular_file_mtime_changes() {
+    for (label, changed_path) in [
+        ("source-root-mtime-change", "source"),
+        ("source-directory-mtime-change", "source/nested"),
+        ("source-file-mtime-change", "source/nested/file"),
+    ] {
+        let mut fixture = Fixture::create(label).expect("create controlled fixture");
+        fixture
+            .tree
+            .create_directory("source/nested", 0o700)
+            .expect("create source directory");
+        fixture
+            .tree
+            .create_file("source/nested/file", b"source bytes\n", 0o600)
+            .expect("create source file");
+        let prepared = prepare_attempt(&fixture.request(), Backend::FullCopy)
+            .expect("prepare metadata-observing attempt");
+        fixture
+            .tree
+            .set_modified_time(Path::new(changed_path), 1_670_000_001, 456_789_012)
+            .expect("change guaranteed source metadata after preparation");
+
+        let failure = execute_prepared(&prepared, &FaultInjection::default())
+            .expect_err("guaranteed source metadata change must stale the prepared attempt");
+        assert!(matches!(
+            failure.error,
+            MaterializationError::SourceChanged { ref path } if path == &fixture.source
+        ));
+        assert_eq!(failure.evidence.outcome, AttemptOutcome::Failed);
+        assert!(!failure.evidence.target_root_metadata_started);
+        assert!(failure.evidence.created.is_empty());
+        assert_eq!(
+            failure.evidence.rollback.status,
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert!(failure.evidence.rollback.problems.is_empty());
+        assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
+        fixture.cleanup().expect("clean controlled fixture");
+    }
+}
+
+#[test]
+fn mtime_failure_before_root_metadata_safely_stops_at_read_only_created_parent() {
+    let mut fixture = Fixture::create("mtime-rollback-read-only")
+        .expect("create controlled metadata-failure fixture");
+    fixture
+        .tree
+        .create_directory("source/a-locked", 0o700)
+        .expect("create source directory");
+    fixture
+        .tree
+        .create_file("source/a-locked/child", b"child bytes\n", 0o600)
+        .expect("create child in source directory");
+    fixture
+        .tree
+        .set_mode(Path::new("source/a-locked"), 0o555)
+        .expect("make source directory non-writable");
+    fixture
+        .tree
+        .create_file("source/z-file", b"later bytes\n", 0o600)
+        .expect("create later source file");
+    let prepared = prepare_attempt(&fixture.request(), Backend::FullCopy)
+        .expect("prepare metadata failure attempt");
+
+    let failure = execute_prepared(
+        &prepared,
+        &FaultInjection {
+            mtime_errno_at: Some((2, libc::ENOSPC)),
+            ..FaultInjection::default()
+        },
+    )
+    .expect_err("injected mtime failure must abort materialization");
+    assert!(matches!(
+        failure.error,
+        MaterializationError::SystemCall {
+            ref operation,
+            errno: Some(libc::ENOSPC),
+            injected: true,
+            ..
+        } if operation == &SystemOperation::Named("futimens target mtime".to_owned())
+    ));
+    assert_eq!(failure.evidence.outcome, AttemptOutcome::Partial);
+    assert!(!failure.evidence.target_root_metadata_started);
+    assert_eq!(failure.evidence.rollback.status, RollbackStatus::Incomplete);
+    assert_eq!(
+        failure
+            .evidence
+            .rollback
+            .removed
+            .iter()
+            .map(|path| path.display.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-file"]
+    );
+    assert_eq!(
+        failure
+            .evidence
+            .rollback
+            .remaining
+            .iter()
+            .map(|path| path.display.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-locked", "a-locked/child"]
+    );
+    assert!(failure.evidence.rollback.problems.iter().any(|problem| {
+        problem.operation == "unlinkat rollback entry" && problem.errno == Some(libc::EACCES)
+    }));
+
+    fixture
+        .adopt_remaining(&failure.evidence)
+        .expect("adopt explicitly retained target identities");
+    fixture
+        .tree
+        .set_mode(Path::new("source/a-locked"), 0o700)
+        .expect("restore source directory for controlled cleanup");
+    fixture
+        .tree
+        .set_mode(Path::new("target/a-locked"), 0o700)
+        .expect("restore retained target directory for controlled cleanup");
+    fixture.cleanup().expect("clean controlled fixture");
+}
+
+#[test]
+fn empty_tree_root_mtime_failure_is_partial_and_preserves_the_target() {
+    let fixture = Fixture::create("empty-root-mtime-failure")
+        .expect("create controlled empty metadata fixture");
+    let prepared = prepare_attempt(&fixture.request(), Backend::FullCopy)
+        .expect("prepare empty tree materialization");
+
+    let failure = execute_prepared(
+        &prepared,
+        &FaultInjection {
+            mtime_errno_at: Some((0, libc::ENOSPC)),
+            ..FaultInjection::default()
+        },
+    )
+    .expect_err("injected root mtime failure must abort empty-tree materialization");
+    assert!(matches!(
+        failure.error,
+        MaterializationError::SystemCall {
+            ref operation,
+            errno: Some(libc::ENOSPC),
+            injected: true,
+            ..
+        } if operation == &SystemOperation::Named("futimens target mtime".to_owned())
+    ));
+    assert_eq!(failure.evidence.outcome, AttemptOutcome::Partial);
+    assert!(failure.evidence.target_root_metadata_started);
+    assert!(failure.evidence.created.is_empty());
+    assert_eq!(failure.evidence.rollback.status, RollbackStatus::Incomplete);
+    assert!(failure.evidence.rollback.removed.is_empty());
+    assert!(failure.evidence.rollback.remaining.is_empty());
+    assert_eq!(failure.evidence.rollback.problems.len(), 1);
+    assert_eq!(
+        failure.evidence.rollback.problems[0].operation,
+        "preserve target after root metadata stage failure"
+    );
+    assert!(failure.evidence.target_manifest.is_some());
+    assert_eq!(fs::read_dir(&fixture.target).unwrap().count(), 0);
+    fixture.cleanup().expect("clean controlled fixture");
 }

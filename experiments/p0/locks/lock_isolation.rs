@@ -1,0 +1,1074 @@
+#![deny(unsafe_code)]
+
+use std::env;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags};
+use thinws_p0_materialize::{
+    AttemptEvidence, AttemptOutcome, Backend, CowEvidence, CreatedIdentity, ManifestEntryKind,
+    MaterializeRequest, materialize_once,
+};
+use thinws_p0_probe::{Evidence, inspect_path};
+
+#[path = "../materialize/tests/support/mod.rs"]
+mod support;
+
+use support::{ControlledTree, TrackedIdentity, TrackedKind};
+
+const MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const FAILURE_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+
+const CHILD_PATH: &str = "THINWS_P0_LOCK_CHILD_PATH";
+const CHILD_API: &str = "THINWS_P0_LOCK_CHILD_API";
+
+const ORIGINAL_BYTES: &[u8] = b"p0-05 original bytes\n";
+const CLONE_BYTES: &[u8] = b"p0-05 clone-only bytes\n";
+const COPY_BYTES: &[u8] = b"p0-05 copy-only bytes\n";
+const SOURCE_BYTES: &[u8] = b"p0-05 source-only bytes\n";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LockApi {
+    Flock,
+    PosixFcntl,
+}
+
+impl LockApi {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Flock => "flock",
+            Self::PosixFcntl => "posix-fcntl",
+        }
+    }
+
+    fn syscall(self) -> &'static str {
+        match self {
+            Self::Flock => "flock(LOCK_EX|LOCK_NB)",
+            Self::PosixFcntl => "fcntl(F_SETLK,F_WRLCK,start=0,len=0)",
+        }
+    }
+
+    fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "flock" => Ok(Self::Flock),
+            "posix-fcntl" => Ok(Self::PosixFcntl),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown fixed lock API selector",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl From<TrackedIdentity> for FileIdentity {
+    fn from(value: TrackedIdentity) -> Self {
+        Self {
+            device: value.device,
+            inode: value.inode,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LockAttempt {
+    Acquired { identity: FileIdentity },
+    Conflict { errno: i32, identity: FileIdentity },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct VolumeIdentity {
+    fsid: [i32; 2],
+    uuid: String,
+}
+
+struct LockFixture {
+    tree: ControlledTree,
+    root: PathBuf,
+    source: PathBuf,
+    clone_target: PathBuf,
+    copy_target: PathBuf,
+    clone_staging: PathBuf,
+    copy_staging: PathBuf,
+    clone_trash: PathBuf,
+    copy_trash: PathBuf,
+    source_identity: FileIdentity,
+}
+
+impl LockFixture {
+    fn create(api: LockApi) -> io::Result<Self> {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .ok_or_else(|| io::Error::other("materialize crate is not below repository root"))?
+            .canonicalize()?;
+        let parent = repository_root.join("target/p0-lock-isolation-tests");
+        fs::create_dir_all(&parent)?;
+
+        let mut tree = ControlledTree::create_in(&parent, api.label())?;
+        let root = tree.root_path().to_path_buf();
+        for directory in [
+            "source",
+            "clone-target",
+            "copy-target",
+            "clone-staging",
+            "copy-staging",
+            "clone-trash",
+            "copy-trash",
+        ] {
+            tree.create_directory(directory, 0o700)?;
+        }
+        tree.create_file("source/payload.bin", ORIGINAL_BYTES, 0o600)?;
+        let source_tracked = tree.identity_at(Path::new("source/payload.bin"))?;
+        if source_tracked.kind != TrackedKind::RegularFile {
+            return Err(io::Error::other("source payload is not a regular file"));
+        }
+
+        rustix::fs::linkat(
+            tree.root_fd(),
+            Path::new("source/payload.bin"),
+            tree.root_fd(),
+            Path::new("source/payload-hard-link.bin"),
+            AtFlags::empty(),
+        )
+        .map_err(errno_error)?;
+        tree.adopt_confirmed(
+            Path::new("source/payload-hard-link.bin"),
+            source_tracked.device,
+            source_tracked.inode,
+            TrackedKind::RegularFile,
+        )?;
+        tree.create_symlink("source/payload-symbolic-link.bin", b"payload.bin")?;
+
+        let fixture = Self {
+            source: root.join("source"),
+            clone_target: root.join("clone-target"),
+            copy_target: root.join("copy-target"),
+            clone_staging: root.join("clone-staging"),
+            copy_staging: root.join("copy-staging"),
+            clone_trash: root.join("clone-trash"),
+            copy_trash: root.join("copy-trash"),
+            source_identity: source_tracked.into(),
+            tree,
+            root,
+        };
+        fixture.verify_aliases()?;
+        Ok(fixture)
+    }
+
+    fn verify_aliases(&self) -> io::Result<()> {
+        let hard_link = self
+            .tree
+            .identity_at(Path::new("source/payload-hard-link.bin"))?;
+        if FileIdentity::from(hard_link) != self.source_identity
+            || hard_link.kind != TrackedKind::RegularFile
+        {
+            return Err(io::Error::other(
+                "hard-link control does not resolve to the source inode",
+            ));
+        }
+
+        let symbolic_link = self
+            .tree
+            .identity_at(Path::new("source/payload-symbolic-link.bin"))?;
+        if symbolic_link.kind != TrackedKind::SymbolicLink
+            || fs::read_link(self.source.join("payload-symbolic-link.bin"))?
+                != Path::new("payload.bin")
+        {
+            return Err(io::Error::other(
+                "symbolic-link control is not the expected internal relative link",
+            ));
+        }
+        let followed = metadata_identity(&self.source.join("payload-symbolic-link.bin"))?;
+        if followed != self.source_identity {
+            return Err(io::Error::other(
+                "symbolic-link control does not resolve to the source inode",
+            ));
+        }
+        Ok(())
+    }
+
+    fn request(&self, backend: Backend) -> MaterializeRequest<'_> {
+        match backend {
+            Backend::ApfsFileClone => MaterializeRequest {
+                source: &self.source,
+                target: &self.clone_target,
+                staging: &self.clone_staging,
+                trash: &self.clone_trash,
+            },
+            Backend::FullCopy => MaterializeRequest {
+                source: &self.source,
+                target: &self.copy_target,
+                staging: &self.copy_staging,
+                trash: &self.copy_trash,
+            },
+        }
+    }
+
+    fn target(&self, backend: Backend) -> &Path {
+        match backend {
+            Backend::ApfsFileClone => &self.clone_target,
+            Backend::FullCopy => &self.copy_target,
+        }
+    }
+
+    fn adopt_created(&mut self, backend: Backend, receipt: &AttemptEvidence) -> io::Result<()> {
+        let target_relative = match backend {
+            Backend::ApfsFileClone => Path::new("clone-target"),
+            Backend::FullCopy => Path::new("copy-target"),
+        };
+        for entry in &receipt.created {
+            let CreatedIdentity::Confirmed(identity) = entry.identity else {
+                return Err(io::Error::other(
+                    "materialization receipt contains an unconfirmed identity",
+                ));
+            };
+            let kind = match entry.kind {
+                ManifestEntryKind::Directory => TrackedKind::Directory,
+                ManifestEntryKind::RegularFile => TrackedKind::RegularFile,
+                ManifestEntryKind::SymbolicLink => TrackedKind::SymbolicLink,
+            };
+            self.tree.adopt_confirmed(
+                &target_relative.join(&entry.path.display),
+                identity.device,
+                identity.inode,
+                kind,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+struct ManagedChild {
+    child: Child,
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    started: Instant,
+    diagnostic_bytes: usize,
+}
+
+impl ManagedChild {
+    fn spawn(entry: &str, api: LockApi, path: &Path, cwd: &Path) -> io::Result<Self> {
+        let (parent_channel, child_channel) = UnixStream::pair()?;
+        parent_channel.set_read_timeout(Some(MESSAGE_TIMEOUT))?;
+        parent_channel.set_write_timeout(Some(MESSAGE_TIMEOUT))?;
+        child_channel.set_read_timeout(Some(MESSAGE_TIMEOUT))?;
+        child_channel.set_write_timeout(Some(MESSAGE_TIMEOUT))?;
+        let writer = parent_channel.try_clone()?;
+        let child_input = child_channel.try_clone()?;
+        let child_input: OwnedFd = child_input.into();
+        let child_diagnostics: OwnedFd = child_channel.into();
+        let started = Instant::now();
+        let child = Command::new(env::current_exe()?)
+            .arg("--ignored")
+            .arg("--exact")
+            .arg(entry)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env_clear()
+            .env(CHILD_API, api.label())
+            .env(CHILD_PATH, path)
+            .current_dir(cwd)
+            .stdin(Stdio::from(child_input))
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(child_diagnostics))
+            .spawn()?;
+        Ok(Self {
+            child,
+            reader: BufReader::new(parent_channel),
+            writer,
+            started,
+            diagnostic_bytes: 0,
+        })
+    }
+
+    fn read_message(&mut self) -> io::Result<String> {
+        let message_deadline = Instant::now() + MESSAGE_TIMEOUT;
+        let mut message = Vec::new();
+        loop {
+            let remaining = self.remaining(message_deadline, "lock child message deadline")?;
+            self.reader.get_ref().set_read_timeout(Some(remaining))?;
+            let available = self.reader.fill_buf()?;
+            if available.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "lock child closed its protocol channel",
+                ));
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            if self.diagnostic_bytes + take > MAX_DIAGNOSTIC_BYTES {
+                return Err(io::Error::other(
+                    "lock child exceeded the 64 KiB diagnostic limit",
+                ));
+            }
+            message.extend_from_slice(&available[..take]);
+            self.reader.consume(take);
+            self.diagnostic_bytes += take;
+            if message.last() == Some(&b'\n') {
+                break;
+            }
+        }
+        let message = String::from_utf8(message)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 child message"))?;
+        Ok(message.trim_end_matches(['\r', '\n']).to_owned())
+    }
+
+    fn write_message(&mut self, message: &str) -> io::Result<()> {
+        let deadline = Instant::now() + MESSAGE_TIMEOUT;
+        self.write_all_until(message.as_bytes(), deadline)?;
+        self.write_all_until(b"\n", deadline)?;
+        let remaining = self.remaining(deadline, "lock child message deadline")?;
+        self.writer.set_write_timeout(Some(remaining))?;
+        self.writer.flush()
+    }
+
+    fn wait_for_exit(&mut self) -> io::Result<ExitStatus> {
+        let deadline = self.started + PROCESS_TIMEOUT;
+        wait_until(&mut self.child, deadline)
+    }
+
+    fn terminate_and_confirm(&mut self) -> io::Result<ExitStatus> {
+        if let Some(status) = self.child.try_wait()? {
+            return Ok(status);
+        }
+        self.child.kill()?;
+        wait_until(&mut self.child, Instant::now() + FAILURE_REAP_TIMEOUT)
+    }
+
+    fn write_all_until(&mut self, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+        while !bytes.is_empty() {
+            let remaining = self.remaining(deadline, "lock child message deadline")?;
+            self.writer.set_write_timeout(Some(remaining))?;
+            let written = self.writer.write(bytes)?;
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "lock child protocol write returned zero",
+                ));
+            }
+            bytes = &bytes[written..];
+        }
+        Ok(())
+    }
+
+    fn remaining(&self, local_deadline: Instant, label: &str) -> io::Result<Duration> {
+        let deadline = local_deadline.min(self.started + PROCESS_TIMEOUT);
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, label))
+    }
+}
+
+struct HolderProcess {
+    process: ManagedChild,
+    identity: FileIdentity,
+}
+
+impl HolderProcess {
+    fn spawn(api: LockApi, path: &Path, cwd: &Path) -> io::Result<Self> {
+        let mut process = ManagedChild::spawn("lock_holder_process", api, path, cwd)?;
+        let ready = process.read_message();
+        match ready.and_then(|message| parse_holder_ready(&message, api)) {
+            Ok(identity) => Ok(Self { process, identity }),
+            Err(error) => {
+                let termination = process.terminate_and_confirm();
+                Err(with_termination(error, termination))
+            }
+        }
+    }
+
+    fn release(mut self) -> io::Result<()> {
+        let result = (|| {
+            self.process.write_message("RELEASE")?;
+            let released = self.process.read_message()?;
+            if released != "RELEASED" {
+                return Err(io::Error::other(format!(
+                    "unexpected holder release response: {released}"
+                )));
+            }
+            let status = self.process.wait_for_exit()?;
+            if !status.success() {
+                return Err(io::Error::other(format!(
+                    "holder exited unsuccessfully: {status}"
+                )));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let termination = self.process.terminate_and_confirm();
+            return Err(with_termination(error, termination));
+        }
+        Ok(())
+    }
+
+    fn terminate_after_failure(mut self) -> io::Result<()> {
+        self.process.terminate_and_confirm().map(|_| ())
+    }
+}
+
+#[test]
+#[ignore = "fixed internal holder entry; spawned only by the L1/L2 parent test"]
+fn lock_holder_process() {
+    if !child_invocation_requested() {
+        return;
+    }
+    child_entry(run_holder_child());
+}
+
+#[test]
+#[ignore = "fixed internal contender entry; spawned only by the L1/L2 parent test"]
+fn lock_contender_process() {
+    if !child_invocation_requested() {
+        return;
+    }
+    child_entry(run_contender_child());
+}
+
+#[test]
+fn l1_l2_clone_and_full_copy_are_lock_and_write_isolated() {
+    for api in [LockApi::Flock, LockApi::PosixFcntl] {
+        if let Err(error) = run_l1_l2(api) {
+            panic!("{} L1/L2 failed: {error}", api.label());
+        }
+    }
+}
+
+fn run_l1_l2(api: LockApi) -> io::Result<()> {
+    let mut fixture = LockFixture::create(api)?;
+    eprintln!(
+        "P0-05 fixture={} api={} state=preserved",
+        fixture.root.display(),
+        api.label()
+    );
+    let source_payload = fixture.source.join("payload.bin");
+    let holder = HolderProcess::spawn(api, &source_payload, &fixture.root)?;
+    let scenario = run_l1_l2_while_locked(api, &mut fixture, &holder);
+    match scenario {
+        Ok(()) => holder.release(),
+        Err(error) => {
+            let termination = holder.terminate_after_failure();
+            Err(with_termination(error, termination))
+        }
+    }
+}
+
+fn run_l1_l2_while_locked(
+    api: LockApi,
+    fixture: &mut LockFixture,
+    holder: &HolderProcess,
+) -> io::Result<()> {
+    ensure_equal(
+        "holder/source identity",
+        holder.identity,
+        fixture.source_identity,
+    )?;
+
+    for (alias, path) in [
+        ("same-path", fixture.source.join("payload.bin")),
+        ("hard-link", fixture.source.join("payload-hard-link.bin")),
+        (
+            "symbolic-link",
+            fixture.source.join("payload-symbolic-link.bin"),
+        ),
+    ] {
+        expect_conflict(api, &path, &fixture.root, fixture.source_identity)?;
+        eprintln!(
+            "P0-05 L1 api={} syscall={} alias={} result=conflict dev={} ino={}",
+            api.label(),
+            api.syscall(),
+            alias,
+            fixture.source_identity.device,
+            fixture.source_identity.inode
+        );
+    }
+
+    let source_volume = apfs_volume(&fixture.source)?;
+    eprintln!(
+        "P0-05 volume api={} type=apfs fsid={:?} uuid={}",
+        api.label(),
+        source_volume.fsid,
+        source_volume.uuid
+    );
+    for backend in [Backend::ApfsFileClone, Backend::FullCopy] {
+        let receipt = materialize_once(&fixture.request(backend), backend).map_err(|failure| {
+            io::Error::other(format!(
+                "{backend:?} materialization failed: {} (evidence={:?})",
+                failure.error, failure.evidence
+            ))
+        })?;
+        fixture.adopt_created(backend, &receipt)?;
+        verify_receipt(&receipt, backend, fixture.source_identity)?;
+
+        let target_payload = fixture.target(backend).join("payload.bin");
+        let target_identity = metadata_identity(&target_payload)?;
+        if target_identity.device != fixture.source_identity.device
+            || target_identity.inode == fixture.source_identity.inode
+        {
+            return Err(io::Error::other(format!(
+                "{backend:?} target is not an independent same-device file: source={:?}, target={target_identity:?}",
+                fixture.source_identity
+            )));
+        }
+        ensure_equal(
+            "source/target APFS volume",
+            apfs_volume(fixture.target(backend))?,
+            VolumeIdentity {
+                fsid: source_volume.fsid,
+                uuid: source_volume.uuid.clone(),
+            },
+        )?;
+        expect_acquired(api, &target_payload, &fixture.root, target_identity)?;
+        expect_conflict(
+            api,
+            &fixture.source.join("payload.bin"),
+            &fixture.root,
+            fixture.source_identity,
+        )?;
+        eprintln!(
+            "P0-05 L2 api={} backend={backend:?} cow={:?} clone_calls={} source=({}, {}) target=({}, {}) target_lock=acquired source_lock=conflict",
+            api.label(),
+            receipt.cow_evidence,
+            receipt.clone_calls_succeeded,
+            fixture.source_identity.device,
+            fixture.source_identity.inode,
+            target_identity.device,
+            target_identity.inode
+        );
+    }
+
+    let clone_identity = metadata_identity(&fixture.clone_target.join("payload.bin"))?;
+    let copy_identity = metadata_identity(&fixture.copy_target.join("payload.bin"))?;
+    if clone_identity == copy_identity {
+        return Err(io::Error::other(format!(
+            "clone and Full Copy targets unexpectedly share one identity: {clone_identity:?}"
+        )));
+    }
+
+    write_tracked_file(
+        &fixture.tree,
+        Path::new("clone-target/payload.bin"),
+        CLONE_BYTES,
+    )?;
+    ensure_bytes(&fixture.clone_target.join("payload.bin"), CLONE_BYTES)?;
+    ensure_bytes(&fixture.copy_target.join("payload.bin"), ORIGINAL_BYTES)?;
+    ensure_bytes(&fixture.source.join("payload.bin"), ORIGINAL_BYTES)?;
+
+    write_tracked_file(&fixture.tree, Path::new("source/payload.bin"), SOURCE_BYTES)?;
+    ensure_bytes(&fixture.source.join("payload.bin"), SOURCE_BYTES)?;
+    ensure_bytes(&fixture.source.join("payload-hard-link.bin"), SOURCE_BYTES)?;
+    ensure_bytes(
+        &fixture.source.join("payload-symbolic-link.bin"),
+        SOURCE_BYTES,
+    )?;
+    ensure_bytes(&fixture.clone_target.join("payload.bin"), CLONE_BYTES)?;
+    ensure_bytes(&fixture.copy_target.join("payload.bin"), ORIGINAL_BYTES)?;
+
+    write_tracked_file(
+        &fixture.tree,
+        Path::new("copy-target/payload.bin"),
+        COPY_BYTES,
+    )?;
+    ensure_bytes(&fixture.copy_target.join("payload.bin"), COPY_BYTES)?;
+    ensure_bytes(&fixture.clone_target.join("payload.bin"), CLONE_BYTES)?;
+    ensure_bytes(&fixture.source.join("payload.bin"), SOURCE_BYTES)?;
+    expect_conflict(
+        api,
+        &fixture.source.join("payload.bin"),
+        &fixture.root,
+        fixture.source_identity,
+    )?;
+    eprintln!(
+        "P0-05 L2 api={} writes=source/clone/full-copy-independent source_lock_after_writes=conflict",
+        api.label()
+    );
+    Ok(())
+}
+
+fn run_holder_child() -> io::Result<()> {
+    let api = child_api()?;
+    let path = child_path()?;
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    lock_file(&file, api)?;
+    let identity = fd_identity(&file)?;
+    child_message(&format!(
+        "READY {} {} {}",
+        api.label(),
+        identity.device,
+        identity.inode
+    ))?;
+    let mut command = String::new();
+    BufReader::new(io::stdin().lock()).read_line(&mut command)?;
+    if command.trim_end_matches(['\r', '\n']) != "RELEASE" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "holder received an unexpected command",
+        ));
+    }
+    unlock_file(&file, api)?;
+    child_message("RELEASED")
+}
+
+fn run_contender_child() -> io::Result<()> {
+    let api = child_api()?;
+    let path = child_path()?;
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    let identity = fd_identity(&file)?;
+    match try_lock_file(&file, api) {
+        Ok(()) => {
+            child_message(&format!(
+                "ACQUIRED {} {} {}",
+                api.label(),
+                identity.device,
+                identity.inode
+            ))?;
+            unlock_file(&file, api)
+        }
+        Err(errno) if is_lock_conflict(errno) => child_message(&format!(
+            "CONFLICT {} {} {} {}",
+            api.label(),
+            errno.raw_os_error(),
+            identity.device,
+            identity.inode
+        )),
+        Err(errno) => Err(errno_error(errno)),
+    }
+}
+
+fn child_entry(result: io::Result<()>) {
+    if let Err(error) = result {
+        let _ = child_message(&format!(
+            "ERROR {} {}",
+            error.raw_os_error().unwrap_or(0),
+            error
+        ));
+        panic!("lock child failed: {error}");
+    }
+}
+
+fn child_message(message: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(message.as_bytes())?;
+    stderr.write_all(b"\n")?;
+    stderr.flush()
+}
+
+fn child_api() -> io::Result<LockApi> {
+    let value = env::var(CHILD_API)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "missing child lock API"))?;
+    LockApi::parse(&value)
+}
+
+fn child_path() -> io::Result<PathBuf> {
+    env::var_os(CHILD_PATH)
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing child lock path"))
+}
+
+fn child_invocation_requested() -> bool {
+    env::var_os(CHILD_API).is_some() || env::var_os(CHILD_PATH).is_some()
+}
+
+fn lock_file(file: &File, api: LockApi) -> io::Result<()> {
+    let result = match api {
+        LockApi::Flock => rustix::fs::flock(file, FlockOperation::LockExclusive),
+        LockApi::PosixFcntl => rustix::fs::fcntl_lock(file, FlockOperation::LockExclusive),
+    };
+    result.map_err(errno_error)
+}
+
+fn try_lock_file(file: &File, api: LockApi) -> Result<(), rustix::io::Errno> {
+    match api {
+        LockApi::Flock => rustix::fs::flock(file, FlockOperation::NonBlockingLockExclusive),
+        LockApi::PosixFcntl => {
+            rustix::fs::fcntl_lock(file, FlockOperation::NonBlockingLockExclusive)
+        }
+    }
+}
+
+fn unlock_file(file: &File, api: LockApi) -> io::Result<()> {
+    let result = match api {
+        LockApi::Flock => rustix::fs::flock(file, FlockOperation::Unlock),
+        LockApi::PosixFcntl => rustix::fs::fcntl_lock(file, FlockOperation::Unlock),
+    };
+    result.map_err(errno_error)
+}
+
+fn is_lock_conflict(errno: rustix::io::Errno) -> bool {
+    errno == rustix::io::Errno::WOULDBLOCK
+        || errno == rustix::io::Errno::AGAIN
+        || errno == rustix::io::Errno::ACCESS
+}
+
+fn observe_contender(api: LockApi, path: &Path, cwd: &Path) -> io::Result<LockAttempt> {
+    let mut process = ManagedChild::spawn("lock_contender_process", api, path, cwd)?;
+    let observation = (|| {
+        let message = process.read_message()?;
+        let attempt = parse_lock_attempt(&message, api)?;
+        let status = process.wait_for_exit()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "contender exited unsuccessfully after {message:?}: {status}"
+            )));
+        }
+        Ok(attempt)
+    })();
+    if let Err(error) = observation {
+        let termination = process.terminate_and_confirm();
+        return Err(with_termination(error, termination));
+    }
+    observation
+}
+
+fn expect_conflict(
+    api: LockApi,
+    path: &Path,
+    cwd: &Path,
+    expected_identity: FileIdentity,
+) -> io::Result<()> {
+    match observe_contender(api, path, cwd)? {
+        LockAttempt::Conflict { errno, identity } => {
+            ensure_equal(
+                "conflicting contender identity",
+                identity,
+                expected_identity,
+            )?;
+            if ![libc::EWOULDBLOCK, libc::EAGAIN, libc::EACCES].contains(&errno) {
+                return Err(io::Error::other(format!(
+                    "lock conflict returned unexpected errno {errno}"
+                )));
+            }
+            Ok(())
+        }
+        LockAttempt::Acquired { identity } => Err(io::Error::other(format!(
+            "positive control unexpectedly acquired {} on {path:?} (identity={identity:?})",
+            api.syscall()
+        ))),
+    }
+}
+
+fn expect_acquired(
+    api: LockApi,
+    path: &Path,
+    cwd: &Path,
+    expected_identity: FileIdentity,
+) -> io::Result<()> {
+    match observe_contender(api, path, cwd)? {
+        LockAttempt::Acquired { identity } => ensure_equal(
+            "independent target contender identity",
+            identity,
+            expected_identity,
+        ),
+        LockAttempt::Conflict { errno, identity } => Err(io::Error::other(format!(
+            "independent target conflicted for {}: errno={errno}, identity={identity:?}",
+            api.syscall()
+        ))),
+    }
+}
+
+fn parse_holder_ready(message: &str, api: LockApi) -> io::Result<FileIdentity> {
+    let fields: Vec<_> = message.split_whitespace().collect();
+    if fields.len() != 4 || fields[0] != "READY" || fields[1] != api.label() {
+        return Err(io::Error::other(format!(
+            "unexpected holder handshake: {message:?}"
+        )));
+    }
+    Ok(FileIdentity {
+        device: parse_u64(fields[2])?,
+        inode: parse_u64(fields[3])?,
+    })
+}
+
+fn parse_lock_attempt(message: &str, api: LockApi) -> io::Result<LockAttempt> {
+    let fields: Vec<_> = message.split_whitespace().collect();
+    match fields.as_slice() {
+        ["ACQUIRED", observed_api, device, inode] if *observed_api == api.label() => {
+            Ok(LockAttempt::Acquired {
+                identity: FileIdentity {
+                    device: parse_u64(device)?,
+                    inode: parse_u64(inode)?,
+                },
+            })
+        }
+        ["CONFLICT", observed_api, errno, device, inode] if *observed_api == api.label() => {
+            Ok(LockAttempt::Conflict {
+                errno: errno.parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid child errno")
+                })?,
+                identity: FileIdentity {
+                    device: parse_u64(device)?,
+                    inode: parse_u64(inode)?,
+                },
+            })
+        }
+        _ => Err(io::Error::other(format!(
+            "unexpected contender message: {message:?}"
+        ))),
+    }
+}
+
+fn parse_u64(value: &str) -> io::Result<u64> {
+    value
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid child identity"))
+}
+
+fn fd_identity(file: &File) -> io::Result<FileIdentity> {
+    let metadata = rustix::fs::fstat(file).map_err(errno_error)?;
+    Ok(FileIdentity {
+        device: metadata.st_dev as u64,
+        inode: metadata.st_ino,
+    })
+}
+
+fn metadata_identity(path: &Path) -> io::Result<FileIdentity> {
+    let metadata = fs::metadata(path)?;
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn apfs_volume(path: &Path) -> io::Result<VolumeIdentity> {
+    let report = inspect_path(path)
+        .map_err(|error| io::Error::other(format!("APFS path probe failed: {error}")))?;
+    if report.filesystem.type_name != "apfs" {
+        return Err(io::Error::other(format!(
+            "lock fixture is not on APFS: {}",
+            report.filesystem.type_name
+        )));
+    }
+    let uuid = match report.filesystem.volume_uuid {
+        Evidence::Known { value, .. } => value,
+        Evidence::Unknown { reason, errno } => {
+            return Err(io::Error::other(format!(
+                "APFS Volume UUID is unknown: reason={reason}, errno={errno:?}"
+            )));
+        }
+    };
+    Ok(VolumeIdentity {
+        fsid: report.filesystem.fsid,
+        uuid,
+    })
+}
+
+fn verify_receipt(
+    receipt: &AttemptEvidence,
+    backend: Backend,
+    source_identity: FileIdentity,
+) -> io::Result<()> {
+    ensure_equal("receipt backend", receipt.backend, backend)?;
+    ensure_equal(
+        "receipt outcome",
+        receipt.outcome,
+        AttemptOutcome::Succeeded,
+    )?;
+    ensure_equal(
+        "source/target manifests",
+        &receipt.source_manifest,
+        &receipt.target_manifest,
+    )?;
+    ensure_equal(
+        "ordinary file count",
+        receipt.ordinary_files_materialized,
+        2,
+    )?;
+    match backend {
+        Backend::ApfsFileClone => {
+            ensure_equal(
+                "clone CoW evidence",
+                receipt.cow_evidence,
+                CowEvidence::Confirmed,
+            )?;
+            ensure_equal("real clone call count", receipt.clone_calls_succeeded, 2)?;
+        }
+        Backend::FullCopy => {
+            ensure_equal(
+                "copy CoW evidence",
+                receipt.cow_evidence,
+                CowEvidence::NotUsed,
+            )?;
+            ensure_equal("copy clone call count", receipt.clone_calls_succeeded, 0)?;
+        }
+    }
+    let payload = receipt
+        .ordinary_files
+        .iter()
+        .find(|file| file.path.display == "payload.bin")
+        .ok_or_else(|| io::Error::other("receipt omitted payload.bin identity evidence"))?;
+    ensure_equal(
+        "receipt source identity",
+        FileIdentity {
+            device: payload.source_identity.device,
+            inode: payload.source_identity.inode,
+        },
+        source_identity,
+    )?;
+    ensure_equal(
+        "receipt clone syscall flag",
+        payload.real_clone_call_succeeded,
+        backend == Backend::ApfsFileClone,
+    )
+}
+
+fn ensure_bytes(path: &Path, expected: &[u8]) -> io::Result<()> {
+    let actual = fs::read(path)?;
+    if actual != expected {
+        return Err(io::Error::other(format!(
+            "unexpected content at {path:?}: expected {} bytes, observed {} bytes",
+            expected.len(),
+            actual.len()
+        )));
+    }
+    Ok(())
+}
+
+fn write_tracked_file(tree: &ControlledTree, relative: &Path, mut bytes: &[u8]) -> io::Result<()> {
+    tree.verify_roots()?;
+    let expected = tree
+        .tracked()
+        .get(relative)
+        .copied()
+        .ok_or_else(|| io::Error::other("write target is not registered to this fixture"))?;
+    if expected.kind != TrackedKind::RegularFile {
+        return Err(io::Error::other(
+            "registered write target is not a regular file",
+        ));
+    }
+
+    let mut components = relative.components().peekable();
+    let mut current = tree.root_fd().try_clone()?;
+    let mut prefix = PathBuf::new();
+    let file = loop {
+        let Some(component) = components.next() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registered write target is empty",
+            ));
+        };
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registered write target contains a non-normal component",
+            ));
+        };
+        prefix.push(name);
+        if components.peek().is_none() {
+            break rustix::fs::openat(
+                &current,
+                name,
+                OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(errno_error)?;
+        }
+        let ancestor = tree
+            .tracked()
+            .get(&prefix)
+            .copied()
+            .ok_or_else(|| io::Error::other("write target ancestor is not registered"))?;
+        if ancestor.kind != TrackedKind::Directory {
+            return Err(io::Error::other(
+                "registered write target ancestor is not a directory",
+            ));
+        }
+        let next = rustix::fs::openat(
+            &current,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(errno_error)?;
+        if tracked_fd_identity(&next)? != ancestor {
+            return Err(io::Error::other(
+                "write target ancestor identity changed during no-follow traversal",
+            ));
+        }
+        current = next;
+    };
+
+    if tracked_fd_identity(&file)? != expected {
+        return Err(io::Error::other(
+            "write target identity changed before truncate",
+        ));
+    }
+    rustix::fs::ftruncate(&file, 0).map_err(errno_error)?;
+    while !bytes.is_empty() {
+        let written = rustix::io::write(&file, bytes).map_err(errno_error)?;
+        if written == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "registered file write returned zero",
+            ));
+        }
+        bytes = &bytes[written..];
+    }
+    if tracked_fd_identity(&file)? != expected {
+        return Err(io::Error::other(
+            "write target identity changed while held open",
+        ));
+    }
+    Ok(())
+}
+
+fn tracked_fd_identity(fd: &OwnedFd) -> io::Result<TrackedIdentity> {
+    support::tracked_identity(rustix::fs::fstat(fd).map_err(errno_error)?)
+}
+
+fn ensure_equal<T>(label: &str, actual: T, expected: T) -> io::Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if actual != expected {
+        return Err(io::Error::other(format!(
+            "{label} mismatch: actual={actual:?}, expected={expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "lock child exceeded its observation deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10).min(deadline.duration_since(now)));
+    }
+}
+
+fn with_termination<T>(error: io::Error, termination: io::Result<T>) -> io::Error {
+    match termination {
+        Ok(_) => error,
+        Err(termination_error) => io::Error::other(format!(
+            "{error}; additionally failed to confirm child exit within 1 second: {termination_error}"
+        )),
+    }
+}
+
+fn errno_error(error: rustix::io::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error.raw_os_error())
+}

@@ -33,7 +33,7 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 | P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Done |
 | P0-03 Git 托管拓扑与 Base 实验（已取消） | 原方案不再实施；历史实验及未提交候选保留，不作为新路线通过证据 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P0-04 生命周期故障注入 | 证明原始目录创建、普通/强制清理与日志中断可恢复或安全停止 | P0-06、P0-07 | R4 | Backlog |
-| P0-05 文件副本锁隔离验证 | 可重复的 macOS 文件身份/锁/时间戳实验，形成是否需要锁冲突处理的 Go/No-Go | P0-02 | R4 | In Review |
+| P0-05 文件副本锁隔离验证 | 可重复的 macOS 文件身份/锁/时间戳实验，形成是否需要锁冲突处理的 Go/No-Go | P0-02 | R4 | Done |
 | P0-06 原始目录镜像验证 | 非 Git/完整 .git/ignored 文件物化与首版 mtime 范围、源一致性边界及无 Git 控制项 | P0-02 | R4 | Done |
 | P0-07 已跟踪检查与清理提示验证 | 主/子仓库 tracked-only、Git unknown、显式强制与持久日志的最小真实验证 | P0-06 | R4 | Done |
 
@@ -59,7 +59,7 @@ P0-02 已获规定模型正式 Approve，审核后真实 Verification 和远端�
 
 旧 P0-03 的准入、实验和未完成门禁保存在 [P0-03 历史记录](../implementation/P0-03_Git与Base实验.md)。取消不等于验收通过，不删除其中代码、失败日志、scratch 或保留工作区；可复用的小型代码须在新任务中独立审查，不能带回 Git/Base 领域。
 
-当前顺序：设计文档与 P0-06/P0-07 已完成 → P0-05 锁实验最终候选审核 → P0-04 故障闭环。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 已获规定模型精确 Approve，审核后 Verification、适用门禁与 PR #7 合并均完成；当前证据及保留边界见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 首轮实测、候选门禁与待完成项见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)；不扩大旧任务验证范围，也不代表 P0.b 或整个 P0 放行。
+当前顺序：P0-06/P0-07/P0-05 已完成 → 优先处理 §3.4 的现阶段 Issues → P0-04 故障闭环 → 按依赖进入 P1。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 的审核、Verification、门禁及 PR #7 合并见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 的首轮实测、精确审核、候选 CI 与 PR #8 合并见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)。各任务 Done 不扩大验证范围，也不代表 P0.b 或整个 P0 放行。
 
 ### 3.2 P0-05 排期与实施准入
 
@@ -96,6 +96,21 @@ P0-02 已获规定模型正式 Approve，审核后真实 Verification 和远端�
 P0-06 只补原始目录物化所需证据：非 Git 来源、完整 .git、ignored/未跟踪内容、普通文件/目录 mtime、外部链接与源写入观察、去除 Git 控制项后的回滚。完整契约引用物化设计，不扩展缓存适配或 Git 重定位。
 
 P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无仓库、外部 Git 元数据与安全查询 unknown、显式 force 和工作区外日志。验收断言来自详细设计/手册，不实现自动 commit、push、PR 或交付证明。小阶段需包含未跟踪-only 不触发父/子 dirty 的回归。
+
+### 3.4 Issues 与当前执行优先级
+
+维护者于 2026-09-13 要求审核后优先处理 Issues，并明确 #12、#9、#13 暂不处理。此处仅维护与现有任务的依赖、排期和范围关系；Issue 原始需求、逐项验收和执行证据保留在 GitHub，不复制第二份问题正文或完成清单，也不把 Issue 建议直接视为已接受设计。
+
+| Issue | 当前安排与边界 |
+|---|---|
+| [#16](https://github.com/chinayangxiaowei/thinworkspace/issues/16) | 先处理 P0.b 测试可靠性 Bug；不重开已 Done 的 P0-07，不改变生产配置策略 |
+| [#10](https://github.com/chinayangxiaowei/thinworkspace/issues/10) | 在 #16 后处理同一模块的配置窄化；先以真实查询/安全反例明确范围，不同时改写相同关键文件 |
+| [#15](https://github.com/chinayangxiaowei/thinworkspace/issues/15) | 由 P0-04 验证跨进程故障边界，P1-02/P1-09/P1-12 等按既有依赖实现产品闭环；不以实验 connector 冒充产品，也不在 P0 预建整套 P1 |
+| [#11](https://github.com/chinayangxiaowei/thinworkspace/issues/11) | 作为 P1 可安装纵向交付的跟踪入口，落实下文工程、创建、查询、清理、恢复和发布验收；不提前宣称 CLI 可用 |
+| [#14](https://github.com/chinayangxiaowei/thinworkspace/issues/14) | 先确定可重复数据集与基准环境并测基线，再冻结 P1 发布指标；数值和大规模资源预算不得凭空填写，未验证前不增加性能承诺 |
+| [#12](https://github.com/chinayangxiaowei/thinworkspace/issues/12)、[#9](https://github.com/chinayangxiaowei/thinworkspace/issues/9)、[#13](https://github.com/chinayangxiaowei/thinworkspace/issues/13) | 按维护者决定暂缓，保持 open；不修改许可、普通清理或路径交付契约，不继续追问；仅在维护者明确恢复后再处理 |
+
+#11/#15 的完整解决依赖 P0-04/P1，不能把“所有 Issues 先关闭”反向设为这些任务的前置条件。当前先修复 #16/#10；其他工作按上表与既有阶段依赖展开。暂缓不等于问题已修复或阶段放行豁免。
 
 ## 四、P1 实施序列
 

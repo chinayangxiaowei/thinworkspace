@@ -36,6 +36,7 @@
 
 - [技术栈](project/reference/技术栈.md)
 - [Phase 1 用户操作手册](project/reference/ThinWorkspace_Phase1用户操作手册_v1.0.md)
+- [文件克隆与锁语义调研](project/reference/ThinWorkspace_文件克隆与锁语义调研.md)：跨平台锁、CoW、时间戳与缓存一致性的证据参考；不定义产品接口或实验完成状态。
 
 ## 开发过程
 

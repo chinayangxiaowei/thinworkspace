@@ -103,14 +103,14 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 
 | Issue | 当前安排与边界 |
 |---|---|
-| [#16](https://github.com/chinayangxiaowei/thinworkspace/issues/16) | 先处理 P0.b 测试可靠性 Bug；不重开已 Done 的 P0-07，不改变生产配置策略 |
+| [#16](https://github.com/chinayangxiaowei/thinworkspace/issues/16) | 已通过 [PR #18](https://github.com/chinayangxiaowei/thinworkspace/pull/18) 合并并关闭；P0.b 测试可靠性修复，不重开已 Done 的 P0-07，不改变生产配置策略 |
 | [#10](https://github.com/chinayangxiaowei/thinworkspace/issues/10) | 在 #16 后处理同一模块的配置窄化；先以真实查询/安全反例明确范围，不同时改写相同关键文件 |
 | [#15](https://github.com/chinayangxiaowei/thinworkspace/issues/15) | 由 P0-04 验证跨进程故障边界，P1-02/P1-09/P1-12 等按既有依赖实现产品闭环；不以实验 connector 冒充产品，也不在 P0 预建整套 P1 |
 | [#11](https://github.com/chinayangxiaowei/thinworkspace/issues/11) | 作为 P1 可安装纵向交付的跟踪入口，落实下文工程、创建、查询、清理、恢复和发布验收；不提前宣称 CLI 可用 |
 | [#14](https://github.com/chinayangxiaowei/thinworkspace/issues/14) | 先确定可重复数据集与基准环境并测基线，再冻结 P1 发布指标；数值和大规模资源预算不得凭空填写，未验证前不增加性能承诺 |
-| [#12](https://github.com/chinayangxiaowei/thinworkspace/issues/12)、[#9](https://github.com/chinayangxiaowei/thinworkspace/issues/9)、[#13](https://github.com/chinayangxiaowei/thinworkspace/issues/13) | 按维护者决定暂缓，保持 open；不修改许可、普通清理或路径交付契约，不继续追问；仅在维护者明确恢复后再处理 |
+| [#12](https://github.com/chinayangxiaowei/thinworkspace/issues/12)、[#9](https://github.com/chinayangxiaowei/thinworkspace/issues/9)、[#13](https://github.com/chinayangxiaowei/thinworkspace/issues/13) | 按维护者决定暂缓，不主动变更这些 Issue 的远端状态；不修改许可、普通清理或路径交付契约，不继续追问；仅在维护者明确恢复后再处理 |
 
-#11/#15 的完整解决依赖 P0-04/P1，不能把“所有 Issues 先关闭”反向设为这些任务的前置条件。当前先修复 #16/#10；其他工作按上表与既有阶段依赖展开。暂缓不等于问题已修复或阶段放行豁免。
+#11/#15 的完整解决依赖 P0-04/P1，不能把“所有 Issues 先关闭”反向设为这些任务的前置条件。#16 完成后当前处理 #10；其他工作按上表与既有阶段依赖展开。暂缓不等于问题已修复或阶段放行豁免。
 
 ## 四、P1 实施序列
 

@@ -17,3 +17,7 @@ thiserror = "2"
 
 [dev-dependencies]
 rustix = { version = "1", features = ["fs"] }
+
+[[test]]
+name = "lock_isolation"
+path = "../locks/lock_isolation.rs"

@@ -975,3 +975,34 @@ Astra 逐日志核验 32d 的 75 项时发现，`stop_reading` 的即时 BrokenP
 最终输入的原样通用门禁和相同 release 根测试入口由主 Agent 执行，session `98611` 终态退出 0：全 workspace **243 passed、2 ignored**，release 根 lib **20 passed**。四份入口/过程 Markdown 的 42 个本地链接目标存在，`git diff --check` 通过；链接目标检查不代表锚点校验。未执行项、兼容政策待确认、代码暂未提交及不作完整 P0-03 放行的边界继续适用。
 
 Astra / `gpt-6-astra` / `xhigh` 完成最终限定审核并给出 **Approve**：独立核对 75 个名称、四组终态、14 个编译失败及全部 caught 的目标失败范围，未发现非目标失败；同时认可本轮恢复状态与证据文档可单独提交。该批准仅覆盖 runner 补测及所核验的进度记录，不表示整个拓扑/Base 候选源码、任务或阶段已获批准。
+
+### 当前候选短预算 fuzz、完整 Git Release 与远端前置审核复核（2026-09-13 UTC）
+
+上一节证据已单独提交并推送为 `80782a5`；候选代码仍未提交。本轮 lib 保持 `3e800f36…`，根与 fuzz lockfile 分别保持 `caef7cd…`、`cdab36a…`，不改变兼容政策。主 Agent 使用固定 `cargo-fuzz 0.12.0`、`nightly-2026-08-14`，逐一执行四个 Git 相关目标的 `fuzz build` 和 `fuzz run`，均取得工具终态退出 0。
+
+每个目标使用独立、初始为空的 corpus 和 artifacts 目录，预算参数统一为 `-max_total_time=60 -timeout=5 -max_len=4096 -verbosity=0 -print_final_stats=1`。以下目录均相对于本工作区的 `target/p0-03-fuzz-current.sgAOrV/`；各自 `run.log` 保存工具返回输出及其终态，`corpus/` 和 `artifacts/` 原样保留。
+
+| 目标 | 子目录 | 执行输入数 | 工具报告 new_units_added | 最终 corpus 文件数 | artifacts 文件数 |
+|---|---|---:|---:|---:|---:|
+| `thinws_git_path_output` | `git-path` | 252,784 | 561 | 330 | 0 |
+| `thinws_base_key_candidate` | `base-key` | 5,213,740 | 192 | 78 | 0 |
+| `thinws_git_topology_validation` | `topology` | 1,584,645 | 308 | 187 | 0 |
+| `thinws_checkout_validation` | `checkout` | 2,027,982 | 1,133 | 401 | 0 |
+
+四次均未报告 crash 或单输入 timeout；`new_units_added` 与最终 corpus 数量含义不同，不能互换。topology 和 checkout 的 NEW_FUNC 输出各有 `Can't read from symbolizer at fd 3` / `atos failed to symbolize address` 警告，已保留，不称零警告或完整符号化。未调整 sanitizer、工具版本或警告设置。这些目标只覆盖其已声明的解析/纯校验边界，不证明真实 Git/文件系统行为、兼容政策或阶段长预算通过。
+
+主 Agent 同时执行 `cargo test --locked --release -p thinws-p0-git-base --all-targets --quiet`，session `85733` 终态退出 0：**103 unit＋6 attributes IT＋25 topology IT＝134 passed、0 failed、0 ignored**。本次是完整 Git 包 Release 测试，不再仅为 runner 的 20 项；也不替代完整变异门禁。
+
+按照维护者“不遗漏已推送 PR 审核”的要求，主 Agent 只读核对远端所有 PR、CI、审核评论和 reviewThreads：当前仅 #1、#2、#3，均已合并且对应 CI 成功，三者 reviewThreads 均为空，无开放 PR。规定模型审核证据分别在 [PR #1](https://github.com/chinayangxiaowei/thinworkspace/pull/1#issuecomment-5645043915)、[PR #2](https://github.com/chinayangxiaowei/thinworkspace/pull/2#issuecomment-5645915953)、[PR #3](https://github.com/chinayangxiaowei/thinworkspace/pull/3#issuecomment-5646263248) 的主 Agent 评论中；三者 GitHub `reviews` 数组为空，不能称已有独立账号的 GitHub Approval。详细前置任务结果仍以其原实施记录和 PR 为准，不在本文复制。P0-03 当前只有已推送分支，尚未创建 PR，不将旧 PR 的审核或 CI 外推到当前候选。
+
+当前只读枚举为 Git crate **479** 项、workspace **993** 项变异。原全包入口会使非阻塞设置相关四项进入依赖非阻塞读取的其他测试；上文已记录取消设置后的实际 Timeout，不能外推为四项都已实测 Timeout。因此本轮准入仅调整 CI 的互斥分组：自由 helper 三项使用已验收的 flags 精确测试，OutputPipes 一项使用已验收的 bounded-timeout 精确测试，其余项目保留所属包完整测试。每轮须从实际工具枚举验证完整覆盖、无重复、无遗漏，不新增全局排除，不以 Timeout 作为检出。
+
+Sol / `gpt-5.6-sol` / `xhigh` 完成唯一 CI 文件修改：相对准入 workflow `10f3475…` 为 +142/-2，保留原有未提交增量；冻结 SHA-256 为 `541d109a982d01cd9d6176b189640261746da076910244c9f01c8430b2b5acf6`。主 Agent 从实际 YAML 抽取预检执行，session `75167` 退出 0，工具实际枚举并核验 **993＝989＋3＋1**，不硬编码总数；同一 validator 对缺失、组内重复、额外 selected 和跨组重叠四种受控篡改均拒绝，session `47586` 退出 0。预检输出分别保留于 `target/p0-03-partition-main-20260912-50652-ucxdc1/` 和 `target/p0-03-partition-negatives.cVey7I/`；这些只枚举，不执行变异。
+
+主 Agent 再从冻结 YAML 抽取 flags/pipes 两个真实命令，只把输出目录替换为本轮自有的 `target/p0-03-ci-four-20260912-64816-rkwfd1/{flags,pipes}/`，其余 workspace、正常 baseline、180 秒、jobs 2、leak-dirs、locked、lib 和精确测试参数均保留。session `52955` 终态退出 0：两组 baseline 通过，分别 **3 caught / 1 caught，0 missed、0 timeout、0 unviable**；两个 `mutants.out/outcomes.json` 的 end_time 分别为 `2026-09-13T05:05:13.812905Z`、`2026-09-13T05:05:30.896485Z`。三个 flags 变异由 NONBLOCK/重复设置断言失败，pipes 变异由 signal 断言失败；Test 均正常退出 101，后者工具记录约 5.37 秒、测试内部约 5.02 秒，不靠 180 秒 Timeout 检出。仅此四项已按新入口实跑，989 项主分区和远端 workflow 尚未执行。
+
+本轮原样通用门禁由主 Agent 执行，session `62779` 终态退出 0：fmt、全 workspace Clippy 与普通测试 **243 passed、2 ignored**；两项额外 APFS 卷用例因未配置第二卷仍未执行。fuzz 格式检查、YAML 语法解析、本文 6 个本地链接目标存在性和 `git diff --check` 通过；YAML 工具保留本机 Ruby ffi 扩展提示，链接检查不包含锚点。现有 CI 的 45 分钟总容量尚无当前全量实测证明，本轮不自行增大预算、不发布未审核源码，所有实验现场保留。
+
+Astra / `gpt-6-astra` / `xhigh` 对冻结 workflow 的本次分区增量及本节进度记录给出限定 **Approve**：独立核验动态分区、四项真实 caught 的 baseline/终态/目标日志和四份 fuzz 证据，未发现非目标失败；允许进度文档单独提交。批准不覆盖未执行的主分区、CI 总容量或全候选。CI 修改依赖尚未提交的实验候选，本轮与这些源码一同保留在原工作区，不夹带进文档提交。
+
+P0-03 保持 In Progress。仍须维护者确定无实际转换属性声明及 sparse 来源的产品边界，随后完成对应兼容矩阵、正式 ADR、完整候选门禁、全候选规定审核、源码提交和远端候选 CI；旧 439 项中断、75 项 runner 和五项 Base 专项不能拼成 479 项通过。

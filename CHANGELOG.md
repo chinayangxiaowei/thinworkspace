@@ -24,4 +24,5 @@
 
 ### Changed
 
+- 修订尚未实现的 Phase 1 设计基线：移除 `workspace exec`、用户执行登记和平台构建目录重定向，以普通路径直接使用现有工具为主流程；不是已发布功能的移除，也不新增缓存导入能力。
 - 项目名称统一为 `ThinWorkspace`，GitHub 仓库名为 `thinworkspace`，CLI 与技术命名空间由原暂定名 `agentws` 改为 `thinws`；首次发布前不提供旧名称兼容。

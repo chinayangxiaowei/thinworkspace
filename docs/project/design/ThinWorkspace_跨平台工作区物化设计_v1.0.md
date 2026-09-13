@@ -72,9 +72,9 @@ trait WorkspaceMaterializer {
 }
 ```
 
-Materializer 只处理从不可变 Base 到 Workspace 源码项的物化和回收，不管 Git administrative state、构建目录、SQLite 状态或产品降级决策。目标 Workspace root 可以由 GitBackend 预先创建，并且只允许存在经计划声明的 `.git` 平台控制项；Base 构建阶段必须拒绝会与该保留项冲突的来源。Materializer 不覆盖、克隆或删除该控制项。
+Materializer 从不可变 Base 物化计划指定的文件项，并在获准删除时回收 Workspace 内的非平台控制项；它不识别开发语言、不制定构建输出或缓存策略，也不管理 Git administrative state、SQLite 状态或产品降级决策。目标 Workspace root 可以由 GitBackend 预先创建，并且只允许存在经计划声明的 `.git` 平台控制项；Base 构建阶段必须拒绝会与该保留项冲突的来源。Materializer 不覆盖、克隆或删除该控制项。
 
-`materialize` 的失败可携带 partial receipt。`destroy_materialization` 必须以 dirfd-relative/no-follow 方式幂等清理它管理的源码项，保留已声明的平台控制项，并返回本次删除、原本不存在和仍未清理的对象；不能只返回 `()` 而丢失恢复证据。
+`materialize` 的失败可携带 partial receipt。`destroy_materialization` 必须在 Application 已通过删除保护后，以 dirfd-relative/no-follow 方式幂等清理已验证 Workspace root 内的非平台控制项，包括用户后来生成的文件；保留已声明的平台控制项，不跟随链接清理工作区外的目标。它返回本次删除、原本不存在和仍未清理的对象，不能只返回 `()` 而丢失恢复证据。
 
 ---
 

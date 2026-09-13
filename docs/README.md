@@ -24,6 +24,7 @@
 ### 架构
 
 - [产品与架构演进方案 v2.1](project/architecture/ThinWorkspace_产品与架构演进方案_v2.1.md)
+- [ADR-0001：Phase 1 普通目录与无执行包装](project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)
 - `project/architecture/adr/`：已接受的架构决策记录；草案和审核过程不放在这里。
 
 ### 设计
@@ -35,6 +36,7 @@
 
 - [技术栈](project/reference/技术栈.md)
 - [Phase 1 用户操作手册](project/reference/ThinWorkspace_Phase1用户操作手册_v1.0.md)
+- [文件克隆与锁语义调研](project/reference/ThinWorkspace_文件克隆与锁语义调研.md)：跨平台锁、CoW、时间戳与缓存一致性的证据参考；不定义产品接口或实验完成状态。
 
 ## 开发过程
 

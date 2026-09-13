@@ -8,9 +8,9 @@
 
 - 单机 CLI 组件与 Port 边界；
 - bootstrap config、data root 身份与受控目录布局；
-- Repository、Base、Workspace、Operation 和 Execution 的内部语义；
+- Repository、Base、Workspace 和 Operation 的内部语义；
 - Git 托管拓扑、Base 身份、分支与删除保护；
-- Workspace 状态机、中断恢复、GC 和进程登记。
+- Workspace 状态机、中断恢复、GC 和外部进程占用检查。
 
 跨平台物化契约由《跨平台工作区物化设计》管理；用户可见命令、输出和错误码由 Phase 1 用户操作手册管理；依赖与系统 API 选择由《技术栈》管理。
 
@@ -39,7 +39,7 @@ BootstrapStore
 PlatformProbe
 WorkspaceMaterializer
 GitBackend
-ProcessSupervisor
+ProcessProbe
 MetadataStore
 LifecycleLock
 ```
@@ -89,7 +89,6 @@ thinws-data/
 ├── workspaces/<workspace-id>/.state/incomplete
 ├── workspaces/<workspace-id>/root/
 ├── staging/
-├── builds/<workspace-id>/
 └── trash/
 ```
 
@@ -99,7 +98,7 @@ thinws-data/
 
 ## 四、内部身份与持久化
 
-InstanceId、RepositoryId、WorkspaceId、ExecutionId 和 OperationId 都是不以物理路径为身份的强类型 ID。Repository/Workspace/Execution/Operation ID 的公开序列化格式由 Phase 1 用户操作手册管理；InstanceId 不属于常规 CLI 契约。BaseId 是由 BaseKey 规范字节派生的内部内容/策略身份；具体哈希与编码由技术栈/实现 ADR 冻结。
+InstanceId、RepositoryId、WorkspaceId 和 OperationId 都是不以物理路径为身份的强类型 ID。Repository/Workspace/Operation ID 的公开序列化格式由 Phase 1 用户操作手册管理；InstanceId 不属于常规 CLI 契约。BaseId 是由 BaseKey 规范字节派生的内部内容/策略身份；具体哈希与编码由技术栈/实现 ADR 冻结。
 
 SQLite 至少维护：
 
@@ -107,7 +106,6 @@ SQLite 至少维护：
 - Repository、Base 和活跃 Workspace；
 - Workspace 状态、Plan/Receipt 和不可变删除意图；
 - repo add/fetch、Base build、Workspace create/remove 和 GC 的 operation；
-- 活跃 Execution 登记；
 - 删除完成的 Workspace tombstone。
 
 数据库级不变量：
@@ -130,7 +128,7 @@ LifecycleLock 有两个 scope：
 - bootstrap lock：仅保护首次 `init`，位于用户配置目录；
 - data-root lifecycle lock：串行 repo add/fetch、Workspace create/remove、repair 和 GC。
 
-两者都有界等待。长时间 `workspace exec` 不持有 lifecycle lock，只在启动和结束登记时短暂持有。SQLite busy timeout 不替代 OS 锁。具体时限是 CLI 公开契约，以用户手册为准。
+两者都有界等待。用户直接运行的命令不获取平台 lifecycle lock；该锁不能阻止用户工具并发读写工作区。SQLite busy timeout 不替代 OS 锁。具体时限是 CLI 公开契约，以用户手册为准。
 
 ---
 
@@ -203,7 +201,7 @@ Error → Ready       仅 doctor --repair 完整重验成功
 Error → Deleting    仅显式 remove 且删除保护可证明
 ```
 
-目录存在不等于 Ready。只有 Git 验证、Base/Git/Materialization Receipts 和 SQLite 状态全部一致时，才能对外返回 Workspace 路径或执行命令。
+目录存在不等于 Ready。只有 Git 验证、Base/Git/Materialization Receipts 和 SQLite 状态全部一致时，平台才能对外返回可用 Workspace 路径。该状态约束平台命令，不是阻止外部程序直接访问已知路径的文件系统权限边界。
 
 ### 7.1 创建
 
@@ -229,7 +227,7 @@ Error → Deleting    仅显式 remove 且删除保护可证明
   → 如请求删分支，验证提交保护
   → 写 Deleting 和不可变删除意图
   → 每个破坏性步骤前重验适用保护
-  → 由 Materializer 以 no-follow 方式幂等清理源码项，并清理构建目录
+  → 由 Materializer 以 no-follow 方式幂等清理工作区内非平台控制项
   → 在工作树只剩已验证平台控制项后，由 GitBackend 精确解除 linked-worktree 登记并移除 root
   → 如请求删分支，使用带预期 OID 的 ref transaction
   → 同一 SQLite 事务删活跃记录并写 tombstone
@@ -240,12 +238,14 @@ Error → Deleting    仅显式 remove 且删除保护可证明
 
 tombstone 至少保存 WorkspaceId、RepositoryId、名称、删除 OperationId、时间和结果。它不参与活跃名称解析，不是 Base/目录正引用，也不能单独授权删除归属不明的残留。
 
+用户工具在工作区内生成的文件随工作目录按删除保护处理；工作区外的构建输出或缓存不属于平台删除范围。符号链接只删除链接本身，不跟随到外部目标。
+
 ---
 
 ## 八、查询与恢复
 
 - `workspace list/status` 可以展示全部活跃状态；
-- `workspace path/diff/exec` 只允许 Ready；
+- `workspace path/diff` 只允许 Ready；
 - 普通查询只读检查一致性，不写 SQLite、不修改 Git、不清理目录；
 - `doctor --repair` 获取 lifecycle lock 后，只续跑能从 operation、Receipt、归属和当前系统事实证明安全的步骤；
 - 无法证明时保留 Error/未完成 operation 并报告，不按目录外观猜测。
@@ -254,23 +254,11 @@ repo add/fetch、Base build 和 GC 也使用相同的 operation/Receipt 协议�
 
 ---
 
-## 九、Execution 与外部进程
+## 九、外部进程占用检查
 
-`workspace exec` 是受信任宿主的前台执行，不是 Sandbox。ProcessSupervisor 使用独立托管进程组，并以结构化 TerminationReport 报告正常退出、signal、超时、中断和清理保证。macOS 只能对托管进程组提供 best effort，不宣称等价 cgroup。
+ProcessProbe 是只读 Port，由 macOS Adapter 实现；唯一职责是对已验证的 Workspace 路径查询当前用户可见的外部进程占用，供删除保护使用。它不启动、登记、调度或终止用户命令，不持久化活跃执行记录。
 
-启动协议：
-
-```text
-短锁写 Starting execution
-  → spawn 独立进程组
-  → 写 PID/PGID/进程启动身份和 Running
-  → 释放锁并等待前台进程
-  → 结束时短锁写终止结果并移除活跃登记
-```
-
-进程身份不能只用 PID，必须结合启动身份防止 PID 复用。原 CLI 消失但进程组仍活着时，repair 只报告，不代用户终止。
-
-外部进程占用探测返回：
+占用报告应包含探测时刻、已验证路径身份、扫描完整性和可核验的占用证据；进程证据不能只依赖可能被复用的 PID。探测结果为：
 
 ```text
 confirmed-in-use
@@ -278,7 +266,9 @@ no-evidence
 scan-incomplete
 ```
 
-只有 confirmed-in-use 是确证据并阻止删除；no-evidence 不代表绝对无占用；scan-incomplete 必须警告并记录。`--force` 不改变该判定。
+只有 confirmed-in-use 是确证据并阻止删除；no-evidence 不代表绝对无占用；scan-incomplete 必须警告并记录。`--force` 不改变该判定。用户应先停止使用工作区的工具；扫描与后续文件访问之间仍可能发生竞态，平台不宣称具有阻止外部进程进入目录的能力。repair 沿用相同检查，不代用户终止进程。
+
+平台内部 Git 子进程属于 GitBackend 的实现责任，其有界等待、输出收集、错误和清理证据按《技术栈》《开发规范》执行，不需要用户执行领域对象或通用执行 Port。
 
 ---
 
@@ -286,7 +276,7 @@ scan-incomplete
 
 GC 的正引用根是全部状态的活跃 Workspace、未完成 operation 和显式保留记录。tombstone 只是负向审计证据。
 
-GC 只处理无正引用 Base、到期 trash、明确可回收缓存和失败残留；不删活跃 Workspace、未完成 operation、Git refs/reflog/objects 或托管 Repository。计划在同一 SQLite 只读快照中生成，移动对象前在 lifecycle lock 内重验。
+GC 只处理无正引用 Base、到期 trash 和归属可证明的失败残留；不删活跃 Workspace、未完成 operation、Git refs/reflog/objects、托管 Repository 或用户工具的外部缓存。计划在同一 SQLite 只读快照中生成，移动对象前在 lifecycle lock 内重验。
 
 ---
 

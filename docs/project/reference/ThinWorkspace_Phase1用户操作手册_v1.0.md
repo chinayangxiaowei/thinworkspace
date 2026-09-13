@@ -32,10 +32,10 @@ Phase 1 用一个命令行工具在当前 macOS 机器上管理多个独立 Git 
 
 - 有独立源码视图；
 - 有独立 Git HEAD、index 和托管分支；
-- 修改、删除、重命名不会改变其他 Workspace；
+- 对工作区内独立普通文件的修改、删除和重命名不会改变其他 Workspace 的对应文件；
 - 优先使用 APFS Clone，共享未修改的文件数据块；
-- 可以单独执行命令和测试；
-- 删除前检查未提交内容和平台托管执行。
+- 提供普通绝对路径，现有命令、编辑器和 Agent 可直接使用；
+- 删除前检查未提交内容，并尽力探测外部进程占用。
 
 Phase 1 不提供实时冲突预警、远程执行、Agent 编排或安全 Sandbox。这些边界在本手册末尾集中说明。
 
@@ -55,7 +55,8 @@ thinws workspace create --repo my-app --base main --name auth-refresh
 cd "$(thinws workspace path auth-refresh)"
 # 在这里启动你现有的 Coding Agent，或者直接编辑代码
 
-thinws workspace exec auth-refresh -- cargo test
+# 直接运行项目原有命令；此处以语言无关的 Git 检查为例
+git diff --check
 thinws workspace status auth-refresh
 thinws workspace diff auth-refresh
 
@@ -63,6 +64,8 @@ git add .
 git commit -m "Implement token refresh"
 git push -u origin HEAD  # 仅当 repo add 显示 Push remote: origin
 
+# 停止使用该工作区的工具，并离开该目录后再删除
+cd /Volumes/data/code
 thinws workspace remove auth-refresh
 thinws gc --dry-run
 ```
@@ -70,7 +73,7 @@ thinws gc --dry-run
 日常使用最核心的路径只有：
 
 ```text
-create → path → exec → status/diff → remove
+create → path → 直接开发/测试 → status/diff → remove
 ```
 
 ---
@@ -166,10 +169,6 @@ ThinWorkspace Doctor
 [INFO] File changes
      Phase 1 uses on-demand Git status/diff
      Real-time observation is not enabled
-
-[WARN] Execution isolation
-     Mode: trusted-host
-     Hard cgroup-style isolation is unavailable on macOS
 
 Result: HEALTHY
 ```
@@ -351,7 +350,7 @@ thinws workspace create \
   --name auth-refresh
 ```
 
-Workspace 名称长度 1–63，必须匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`，并在全部活跃 Workspace 中全局唯一；名称不做大小写或 Unicode 归一化。名称只用于查询和展示，实际目录始终由 Workspace ID 推导；所有接受 Workspace 名称的命令也接受完整 Workspace ID。公开输出中的 Repository、Workspace、Execution 和 Operation ID 分别使用 `repo_`、`ws_`、`exec_`、`op_` 前缀的标准小写 UUIDv7 文本。手册中的 `ws_019...`、`repo_019...` 和 `exec_019...` 是缩写展示。
+Workspace 名称长度 1–63，必须匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`，并在全部活跃 Workspace 中全局唯一；名称不做大小写或 Unicode 归一化。名称只用于查询和展示，实际目录始终由 Workspace ID 推导；所有接受 Workspace 名称的命令也接受完整 Workspace ID。公开输出中的 Repository、Workspace 和 Operation ID 分别使用 `repo_`、`ws_`、`op_` 前缀的标准小写 UUIDv7 文本。手册中的 `ws_019...` 和 `repo_019...` 是缩写展示。
 
 重复执行完全相同的 create，在已有 Workspace 已经 Ready 且 Repository、解析后的 commit 和创建策略一致时，返回已有 Workspace 而不新建。相同名称但参数不同返回 `E_NAME_CONFLICT`；已有记录处于 Creating、Deleting 或 Error 时返回 `E_RECOVERY_REQUIRED`，要求先处理原记录。
 
@@ -407,7 +406,7 @@ Reason:           managed data root does not support block sharing
 Estimated added:  3.2 GiB
 ```
 
-Phase 1 的全部平台管理目录都由 data root 派生并位于初始化时记录的同一卷；不能用子挂载或符号链接把其中一部分重定向到其他卷，也不接受外部 build root。发现布局跨卷时返回数据根布局错误，`--allow-copy` 不能绕过该不变量。
+Phase 1 的全部平台管理目录都由 data root 派生并位于初始化时记录的同一卷；不能用子挂载或符号链接把其中一部分重定向到其他卷。发现布局跨卷时返回数据根布局错误，`--allow-copy` 不能绕过该不变量。用户工具自行配置的工作区外输出或缓存不属于平台管理目录，也不由平台回收。
 
 Phase 1 init 只接受 APFS data root；非 APFS 返回 `E_CAPABILITY_UNAVAILABLE`。Full Copy Adapter 的非 APFS/跨文件系统能力属于 Phase 0 技术验证，不是本手册承诺的产品路径。
 
@@ -454,7 +453,7 @@ Phase 1 不负责启动或管理 Agent 会话。用户在该目录运行已有�
 your-agent-command
 ```
 
-也可以直接使用编辑器或终端修改源码。
+也可以直接把绝对路径交给编辑器、终端或脚本。工作区是普通目录，工具不需要 ThinWorkspace 插件或命令包装；读写权限和 Git 工作树规则仍然适用。不要手工移动整个工作区或改写 `.git`、平台管理目录；工作区生命周期继续通过平台命令管理。
 
 如果要并行开发，可以继续创建其他 Workspace：
 
@@ -515,13 +514,9 @@ Storage:
   CoW:              confirmed
   Logical size:     3.2 GiB
   Physical delta:   best available estimate
-
-Execution:
-  Managed running:  0
-  External process detection: best-effort only
 ```
 
-`workspace status` 可用于查看任何活跃状态。只有 `workspace path`、`workspace diff` 和 `workspace exec` 要求 Workspace 为 `Ready`；其他状态调用这些命令返回 `E_WORKSPACE_NOT_READY`。
+`workspace status` 可用于查看任何活跃状态。只有 `workspace path` 和 `workspace diff` 要求 Workspace 为 `Ready`；其他状态调用这些命令返回 `E_WORKSPACE_NOT_READY`。这是平台命令的准入条件，不代表平台能阻止外部程序访问已知目录。
 
 Phase 1 的命令/状态边界固定如下：
 
@@ -529,7 +524,7 @@ Phase 1 的命令/状态边界固定如下：
 |---|---|---|---|---|
 | `workspace list` | 展示 | 展示 | 展示 | 展示 |
 | `workspace status` | 只读诊断 | 只读状态 | 只读诊断 | 只读诊断 |
-| `workspace path/diff/exec` | 拒绝 | 允许 | 拒绝 | 拒绝 |
+| `workspace path/diff` | 拒绝 | 允许 | 拒绝 | 拒绝 |
 | `workspace remove` | 要求先 repair | 开始删除 | 相同 flags 时幂等继续；不同则拒绝 | 仅在删除保护和对象归属可证明时允许，否则要求 repair/人工处理 |
 | `doctor` | 只读诊断 | 只读检查 | 只读诊断 | 只读诊断 |
 | `doctor --repair` | 安全继续或转 Error | 只修复已证明的不一致 | 幂等继续 | 修复或只报告，不猜测删除 |
@@ -548,84 +543,29 @@ thinws workspace diff auth-refresh
 
 ---
 
-## 八、执行检查和测试
+## 八、直接运行现有工具
 
-### 8.1 前台执行命令
-
-```bash
-thinws workspace exec auth-refresh -- cargo test
-```
-
-启动子进程前，CLI 向 stderr 输出以下诊断：
-
-```text
-Workspace:       auth-refresh
-Working dir:     /Volumes/data/thinws-data/workspaces/ws_019.../root
-Execution mode:  trusted-host (not sandboxed)
-Build dir:       /Volumes/data/thinws-data/builds/ws_019...
-
-Executable: cargo
-------------------------------------------------------------
-```
-
-随后将子命令 stdout 原样写入 CLI stdout，将子命令 stderr 原样写入 CLI stderr；平台自己的标题、警告和 termination summary 只写 stderr，不污染子命令 stdout。子命令正常 `exit(n)` 时返回同一 0–255；被其他 signal 终止时返回 `128+signal` 并在 stderr 标明 signal。平台超时/用户 Ctrl-C 固定返回 124/130。
-
-如果在 spawn 前就无法创建子进程，例如 executable 不存在，平台返回 `E_EXEC_START`；此时不存在可原样转发的子进程退出状态。
-
-平台不回显或持久化完整 argv，因为参数可能包含 token；诊断最多显示不含参数的 executable basename。
-
-如果仓库根目录存在 `Cargo.toml`，Phase 1 Rust 验证路径会设置：
-
-```text
-CARGO_TARGET_DIR=<data-root>/builds/<workspace-id>
-```
-
-所有项目都会获得：
-
-```text
-THINWS_WORKSPACE=<workspace-root>
-THINWS_BUILD_DIR=<workspace-build-dir>
-```
-
-子进程继承启动 `thinws` 的当前终端环境，平台覆盖上述 `THINWS_*`；Rust 仓库再覆盖 `CARGO_TARGET_DIR`。这不构成秘密隔离：仓库命令能够读取继承的 token、代理或其他环境变量，但平台不会把完整环境记录到日志。运行不可信代码前应先清理环境或使用外部 Sandbox。其他构建系统默认使用自己的行为；Phase 1 不自动猜测所有语言的构建变量。
-
-### 8.2 超时
+### 8.1 在普通目录内开发和测试
 
 ```bash
-thinws workspace exec auth-refresh --timeout 20m -- cargo test
+cd "$(thinws workspace path auth-refresh)"
+git diff --check
+# 接着运行项目原有的构建、测试或开发服务器命令
 ```
 
-未传 `--timeout` 时不设置平台超时。时长格式为正整数加 `s`、`m` 或 `h`，最大 `168h`，不接受小数或组合写法。超时后先向托管进程组发送 TERM，等待固定 10 秒，再对仍存活的组内进程发送 KILL。
+例如，已有相应工具和项目配置时，可以直接使用 `cargo test`、`npm test`、`python -m unittest` 或项目自己的脚本；这些只是示例，不是语言支持白名单。
 
-超时后平台终止托管进程组，并报告清理范围：
+Phase 1 不提供 `thinws workspace exec`，也不提供等价的执行包装入口。用户命令的参数、环境、输出、退出码、超时和 Ctrl-C 全部遵循当前终端、Agent Runtime 与工具自身的行为；ThinWorkspace 不转发命令、不注入构建变量、不保存运行清单或构建日志。
 
-```text
-Execution timed out after 20m
-Managed process group: terminated
-Escaped descendants: not guaranteed on macOS
-Exit code: 124
-```
+工作区不是 Sandbox。程序仍拥有当前用户授予的宿主权限，可能读取环境凭据或访问工作区外路径；运行不可信代码应使用外部安全隔离工具。
 
-### 8.3 Ctrl-C
+### 8.2 构建输出与缓存
 
-按 Ctrl-C 后，CLI 将 INT 转发给托管进程组，等待固定 5 秒；如果进程仍未退出，再发送 KILL。
+编译输出、增量缓存和依赖缓存的位置与复用方式由项目和工具原有配置决定。ThinWorkspace 不按语言检测、重定向、强制共享或隔离这些目录，也不承诺缓存命中。
 
-Phase 1 无后台队列、Job 页面和持久日志。终端输出由用户自己的终端或 Agent Runtime 保存。
+创建时的输入范围仍遵循本手册 §4.2 的 Git 导入契约：来源中未纳入该基线的本地构建输出和缓存不会自动进入新工作区。取消命令包装不等于已支持克隆现有编译缓存。
 
-### 8.4 直接在 Workspace 运行命令
-
-用户也可以进入目录后直接运行：
-
-```bash
-cargo test
-```
-
-这种命令不由平台管理：
-
-- 不会登记为平台托管执行；
-- 不会获得平台的超时和进程组清理；
-- 不保证注入 `THINWS_BUILD_DIR` 或 `CARGO_TARGET_DIR`；
-- 删除检查只能尽力发现它是否仍在使用 Workspace。
+工作区内的生成文件仍占用空间，并随工作目录按 §10 的保护规则处理；工作区外的缓存和输出不由 ThinWorkspace 删除或 GC。
 
 ---
 
@@ -671,7 +611,6 @@ thinws workspace remove auth-refresh
 Removal check
 
 Git working tree:       clean
-Managed executions:     none
 External process check: no-evidence (best-effort)
 Managed branch:         thinws/ws_019...a17c
 
@@ -682,11 +621,12 @@ Branch preserved: thinws/ws_019...a17c
 默认只删除：
 
 - Workspace 工作目录；
-- 独立构建目录；
 - 平台为该 Workspace 保存的 Git worktree 登记；
 - Workspace 活跃元数据。
 
 平台保留最小删除审计信息，但该记录不会再被当作活跃 Workspace，也不会单独授权删除归属不明的残留。托管 Git 分支默认保留，因此已经提交的代码不会因普通删除 Workspace 消失；普通删除不要求提交已经存在于远程引用。
+
+工作目录内的编译输出、缓存和其他生成文件也会随目录删除，不因被 Git 忽略而永久保留。请先保存需要保留的内容，并停止相关工具、让终端离开该目录；工作区外的输出和缓存不会被删除。
 
 ### 10.2 删除 dirty Workspace
 
@@ -725,23 +665,20 @@ thinws workspace remove auth-refresh --delete-branch
 
 Phase 1 不提供绕过未保护提交检查的参数。`--force` 只丢弃未提交工作树内容，不能授权删除仅由目标分支保存的提交。要删除该分支，必须先 push、创建 tag/其他分支，或建立归档引用。
 
-### 10.4 有托管命令正在运行
+### 10.4 外部进程正在使用工作区
 
 ```text
 Workspace removal refused
 
-Code:       E_WORKSPACE_BUSY
-Execution:  exec_019...
-Executable: cargo
+Code:                   E_WORKSPACE_BUSY
+External process check: confirmed-in-use
 
 Wait for the command to finish or stop it from its owning terminal.
 ```
 
-Phase 1 不提供跨终端后台 Job 管理，因此默认不由另一个终端强制取消正在运行的前台命令。
+平台只尽力检查当前用户可见的外部进程，结果分为 `confirmed-in-use`、`no-evidence`、`scan-incomplete`。confirmed 返回 `E_WORKSPACE_BUSY`，用户必须先停止占用再重试；no-evidence 只表示未取得占用证据；权限不足或扫描不完整时显示 scan-incomplete 警告，不会伪装成“未发现”。Phase 1 不提供绕过参数，`--force` 也不改变判定；后两种结果都不构成绝对无人使用的保证。
 
-如果原 CLI 异常退出但托管进程组仍存活，`doctor --repair` 只报告已核验的 PID/PGID，不替用户终止它；用户在系统层停止该进程组后再次 repair。只有确认进程已经不存在时，repair 才清除 stale execution 登记。
-
-平台还会尽力检查当前用户可见的外部进程，结果分为 `confirmed-in-use`、`no-evidence`、`scan-incomplete`。confirmed 同样返回 `E_WORKSPACE_BUSY`，用户必须先停止该进程；no-evidence 只表示未取得占用证据；权限不足或扫描不完整时显示 scan-incomplete 警告，不会伪装成“未发现”。Phase 1 不提供绕过参数，`--force` 也不改变判定；后两种结果都不构成绝对无人使用的保证。
+ThinWorkspace 不替用户终止进程，`doctor --repair` 也不管理用户命令。占用扫描不能阻止其他工具在扫描后重新访问目录，因此删除前仍须由用户停止相关工具。
 
 ---
 
@@ -760,7 +697,7 @@ Garbage collection plan
 
 Unreferenced bases:  2    1.4 GiB logical
 Expired trash:       3    620 MiB
-Build directories:   0    0 B
+Failed remnants:     0    0 B
 Active workspaces:   never removed by gc
 Protected branches:  never removed by gc
 
@@ -783,9 +720,9 @@ GC 只回收：
 
 - 无 Workspace 引用的 Base；
 - 已到期的 trash；
-- 明确标为可回收的缓存和失败残留。
+- 归属可证明且明确标为可回收的失败残留。
 
-GC 不删除任何状态的活跃 Workspace、未完成操作、托管分支或无法确认引用关系的对象。删除审计记录本身不会让已无引用的数据永久占用空间。
+GC 不删除任何状态的活跃 Workspace、未完成操作、托管分支、用户工具的外部缓存或无法确认引用关系的对象。删除审计记录本身不会让已无引用的数据永久占用空间。
 
 Phase 1 的 `thinws gc` 也不运行 Git object GC，不删除 Git refs/reflog，并且不执行无范围的 `git worktree prune`。托管 Repository 的自动 Git maintenance 默认关闭；本阶段宁可多占用 Git object 空间，也不引入未经单独验收的提交回收语义。
 
@@ -815,7 +752,7 @@ Action: partial materialization removed
 Result: workspace marked Error
 ```
 
-不完整的 Workspace 会以 `Creating` 或 `Error` 出现在默认 `workspace list` 中，但不会被 `workspace path`、`diff` 或 `exec` 当作可用 Workspace。
+不完整的 Workspace 会以 `Creating` 或 `Error` 出现在默认 `workspace list` 中，但不会被 `workspace path` 或 `diff` 当作可用 Workspace。
 
 ### 12.2 删除中断
 
@@ -873,7 +810,6 @@ Phase 1 的 JSON 支持按命令冻结如下：
 | `gc`、`gc --dry-run` | 支持 | 返回计划或实际回收结果 |
 | `workspace path` | 不支持成功 JSON | stdout 专用于一行原始绝对路径；平台侧 `--json` 返回 JSON envelope `E_USAGE`，不查询路径 |
 | `workspace diff` | 不支持成功 JSON | stdout 专用于原始 patch；平台侧 `--json` 返回 JSON envelope `E_USAGE`，不计算 diff |
-| `workspace exec` | 不支持成功 JSON | stdout/stderr 专用于子进程流转发；分隔符前 `--json` 返回 JSON envelope `E_USAGE` 且不 spawn，分隔符后的 `--json` 原样传给子进程 |
 
 示例：
 
@@ -914,8 +850,7 @@ thinws workspace status auth-refresh --json
         "reason": null
       },
       "failed_attempts": []
-    },
-    "managed_executions": []
+    }
   }
 }
 ```
@@ -941,7 +876,7 @@ thinws workspace status auth-refresh --json
 JSON 模式要求：
 
 - 使用 `--json` 后，无论成功或失败，stdout 只输出一个 JSON 文档；
-- 平台在 exec 的 `--` 之前预识别全局 `--json`，因此参数格式错误也返回 JSON `E_USAGE`；`--help/--version` 与 `--json` 互斥，单独 help/version 仍是人类输出；
+- 平台预识别全局 `--json`，扫描在 `--` 处停止，之后的文本不作为平台选项解释；参数格式错误也使用已识别的 JSON 模式返回 `E_USAGE`。`--help/--version` 与 `--json` 互斥，单独 help/version 仍是人类输出；
 - 诊断日志写 stderr；
 - 字段含义由 `schema_version` 管理；
 - 不使用本地化字符串作为状态值；
@@ -965,23 +900,20 @@ JSON 模式要求：
 | 18 | E_GIT_REF_NOT_FOUND | `--base` 在允许的 ref/OID 范围内没有候选 |
 | 19 | E_GIT_REF_AMBIGUOUS | `--base` 短名命中多个允许候选，必须改用完整 ref/OID |
 | 20 | E_WORKSPACE_NOT_FOUND | Workspace 不存在 |
-| 21 | E_WORKSPACE_NOT_READY | `path/diff/exec` 等要求 Ready 的命令遇到 Creating、Deleting 或 Error |
+| 21 | E_WORKSPACE_NOT_READY | `path/diff` 等要求 Ready 的命令遇到 Creating、Deleting 或 Error |
 | 22 | E_WORKSPACE_DIRTY | 删除被未提交内容阻止 |
-| 23 | E_WORKSPACE_BUSY | 存在平台托管执行，或明确检测到外部进程正在使用 Workspace |
+| 23 | E_WORKSPACE_BUSY | 明确检测到外部进程正在使用 Workspace |
 | 24 | E_UNPROTECTED_COMMITS | 删除分支会导致提交失去保护引用 |
 | 30 | E_GIT | Git 操作失败 |
 | 31 | E_FILESYSTEM | 文件系统操作失败 |
 | 32 | E_DATA_ROOT_UNAVAILABLE | 数据根目录或预期卷不可用 |
 | 33 | E_DATA_ROOT_LAYOUT | 受控 data root 子目录不满足路径归属或 Phase 1 同卷布局 |
-| 34 | E_EXEC_START | 子命令无法创建；没有可返回的子进程退出状态 |
 | 35 | E_METADATA | SQLite/schema/元数据操作失败且不能映射为更具体的恢复错误 |
 | 36 | E_DATA_ROOT_NOT_EMPTY | 首次 init 的目标非空且没有可验证的平台根标记 |
 | 40 | E_RECOVERY_REQUIRED | 需要恢复或人工处理 |
 | 41 | E_LOCK_TIMEOUT | 生命周期变更锁等待超过 5 秒；当前命令未开始修改目标 |
-| 124 | EXEC_TIMEOUT | 托管命令超时 |
-| 130 | EXEC_INTERRUPTED | 用户通过 Ctrl-C 中断 |
 
-`workspace exec` 成功启动子命令后，正常结束时原样返回子命令的退出状态。由于子命令自身也可能返回 124 或 130，仅凭 shell 数字无法绝对区分“子命令主动返回”和“平台超时/中断”；终端摘要会额外输出 termination reason。Phase 1 明确接受该限制，不把 `workspace exec` 描述为具有可机器区分的结构化终止协议。
+本表只定义 ThinWorkspace 管理命令的产品错误码，不定义用户直接运行程序的退出状态。首发前移除执行包装后，其余错误码不重排，34 保留不分配。
 
 ---
 
@@ -1020,13 +952,23 @@ your-agent-command
 
 ### 14.3 分别执行测试
 
+假设示例项目已有 `scripts/test.sh`，在各自终端直接调用它；实际项目使用自己的命令：
+
 ```bash
-thinws workspace exec login-api -- cargo test auth
-thinws workspace exec login-tests -- cargo test login_tests
-thinws workspace exec session-refactor -- cargo check
+# 终端 A
+cd "$(thinws workspace path login-api)"
+./scripts/test.sh
+
+# 终端 B
+cd "$(thinws workspace path login-tests)"
+./scripts/test.sh
+
+# 终端 C
+cd "$(thinws workspace path session-refactor)"
+./scripts/test.sh
 ```
 
-这些命令可以在不同终端同时运行。每个 Workspace 有自己的源码和构建输出。
+这些命令可以在不同终端同时运行。各工作区源码文件独立；构建输出是否留在工作区内、是否使用外部缓存，遵循项目原有配置，平台不改写。
 
 ### 14.4 查看结果
 
@@ -1049,7 +991,10 @@ git push -u origin HEAD  # 仅当 repo add 显示 Push remote: origin
 
 ### 14.6 清理工作区
 
+先停止三个工作区中的 Agent、开发服务器等工具，并让相关终端离开这些目录，再执行：
+
 ```bash
+cd /Volumes/data/code
 thinws workspace remove login-api
 thinws workspace remove login-tests
 thinws workspace remove session-refactor
@@ -1069,10 +1014,12 @@ thinws gc
 | 远程构建测试 | 不支持；Phase 3 引入 Worker 和 Job |
 | 把开发 Workspace 放到其他节点 | 不支持；Phase 4 引入 Placement |
 | 自动启动和管理 Agent | 不支持；用户使用现有 Agent Runtime |
-| 安全执行不可信代码 | 不支持；`workspace exec` 是 trusted-host 模式 |
+| 包装或托管用户命令 | 不支持；用户直接在普通工作区路径运行工具 |
+| 自动配置构建目录或共享缓存 | 不支持；遵循项目和工具原有配置 |
+| 安全执行不可信代码 | 不支持；普通目录不构成 Sandbox |
 | 自动合并或创建 PR | 不支持；继续使用标准 Git 和现有平台 |
 | 任意指定 Workspace 目录 | 不支持；Phase 1 使用受控 data root |
-| 删除已接入 Repository 或回收不可达 Git objects | 不支持；Phase 1 只回收 Base、trash、失败残留和明确缓存 |
+| 删除已接入 Repository 或回收不可达 Git objects | 不支持；Phase 1 只回收 Base、trash 和归属可证明的失败残留 |
 | 所有 Git 仓库特性 | 不支持；LFS、submodule、sparse checkout 等明确拒绝 |
 
 Phase 1 的产品承诺只有：
@@ -1091,9 +1038,9 @@ Phase 1 完成时，以下体验必须成立：
 4. 默认不允许 CoW 静默退化为完整复制。
 5. `workspace path` 可以直接用于 `cd "$(...)"`。
 6. 用户不需要理解 lowerdir、upperdir、Git administrative directory 或 SQLite。
-7. `workspace exec` 明确显示 trusted-host，不伪装成 Sandbox。
-8. dirty Workspace、使用中的 Workspace，以及删除分支请求涉及的未保护提交都不会被破坏。
+7. 现有命令、编辑器和 Agent 可直接使用普通路径，不需要包装；平台不覆盖工具链配置，也不承诺安全 Sandbox。
+8. dirty 内容、已确认的外部进程占用和未保护提交分别阻止适用的删除操作；扫描不完整如实警告，不宣称绝对无占用。
 9. 创建或删除中断后，查询命令能只读识别问题，`doctor --repair` 或重复删除能安全恢复，无法证明安全时明确停止。
-10. Agent 和脚本可以依赖已声明支持命令的 JSON、稳定错误码和 `workspace path` 的绝对路径完成管理自动化；`diff` 和 `exec` 的原始流是明确例外。
+10. Agent 和脚本可以依赖已声明支持命令的 JSON、稳定错误码和 `workspace path` 的绝对路径完成管理自动化；`path` 和 `diff` 的原始输出是成功 JSON 的明确例外。
 
 如果这十项中任何一项不能稳定成立，Phase 1 就不应标记为完成。

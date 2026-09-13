@@ -47,7 +47,7 @@
 |---|---|---|
 | 项目品牌、仓库名和技术命名空间 | [仓库入口](README.md) | 决定 `ThinWorkspace`、`thinworkspace` 和 `thinws` 的用途 |
 | 产品范围、阶段、架构方向和能力边界 | [产品与架构演进方案 v2.1](docs/project/architecture/ThinWorkspace_产品与架构演进方案_v2.1.md) | 决定做什么、何时做以及如何演进 |
-| Phase 1 内部领域、数据布局、Git、状态机和恢复 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
+| Phase 1 数据布局、只读 Git 检查、状态机和恢复 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
 | 工作区物化、能力检测、跨卷和 Adapter 语义 | [跨平台工作区物化设计](docs/project/design/ThinWorkspace_跨平台工作区物化设计_v1.0.md) | 决定 Probe/Plan/Receipt 和平台实现契约 |
 | Rust、crate、Adapter、依赖和测试工具 | [技术栈](docs/project/reference/技术栈.md) | 决定使用什么技术以及依赖边界 |
 | 编码、安全、状态机、测试和评审规则 | [开发规范](docs/development/process/开发规范.md) | 决定代码必须如何实现和验证 |
@@ -62,7 +62,7 @@
 不同文档负责不同类型的事实，不使用笼统的全文优先级：
 
 - 阶段、产品边界和演进方向以架构方案为准；
-- Phase 1 内部领域、生命周期与 Git 设计以 Phase 1 详细设计为准；
+- Phase 1 生命周期、只读 Git 检查与恢复以 Phase 1 详细设计为准；
 - 物化、跨卷和 Adapter 语义以跨平台物化设计为准；
 - 已发布或已冻结的 CLI 行为以用户操作手册为准；
 - 技术选型以技术栈为准；
@@ -109,8 +109,9 @@
 | Workspace 创建、删除、恢复、GC | Phase 1 详细设计的状态机、查询恢复和 GC 章节；开发规范相关章节 |
 | init、bootstrap config 或 data root 身份 | Phase 1 详细设计的实例与 data root 章节；技术栈的实现选型章节 |
 | APFS、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的 macOS/APFS 选型章节 |
-| Git、Base、branch、worktree | Phase 1 详细设计的 Repository/Git 章节；技术栈和开发规范相关章节 |
-| exec、信号、超时、进程清理 | Phase 1 详细设计的 Execution 章节；用户手册的可见契约；技术栈和开发规范相关章节 |
+| Git、子仓库、branch、worktree 或旧 Base 路线 | Phase 1 详细设计的只读 Git 检查章节、ADR-0002；技术栈和开发规范相关章节；交付追加任务流程 §13.1 |
+| 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/恢复章节；开发规范 §13；任务流程 §13.1 |
+| 内部子进程、超时或外部进程占用检查 | Phase 1 详细设计的外部进程占用章节；用户手册的删除契约；技术栈和开发规范相关章节 |
 | 新依赖、工具链或 CI | 技术栈的选型、测试、供应链和发布章节 |
 | 许可证、商业使用、贡献权属、商业授权申请或对外授权称谓 | 完整读取 `LICENSE.md`、`LICENSING.md` 与 `COMMERCIAL-LICENSING.md`；涉及依赖时追加技术栈的供应链章节 |
 | 版本发布或显著变更记录 | `CHANGELOG.md`；追加任务流程的阶段收口与放行章节 |
@@ -137,6 +138,8 @@
 
 - 当前只实施 P0/P1；不得预建后续阶段的领域对象、Port、crate、daemon 或空占位实现。
 - P1 是单机 CLI，不引入常驻服务、HTTP/gRPC、消息队列、远程控制面或异步运行时。
+- P1 交付可直接使用的普通工作区路径，不包装用户命令，不接管语言工具链、构建目录重定向或缓存共享策略；职责收缩依据见 [ADR-0001](docs/project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)。
+- P1 直接镜像原始目录，创建不依赖 Git，不实现托管 Repository/Base 或自动分支/提交/PR。清理提示只针对已跟踪变更，允许显式强制并持久记日志；commit 交付由任务流程 §13.1 和主管 Agent 验收，不设为底层不可绕过的释放条件。依据见 [ADR-0002](docs/project/architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)。
 - 依赖方向固定为 `cli → application → core/ports`，Adapter 实现 Port；Core/Application 不直接调用具体 OS、Git CLI 或 SQLite API。
 - Port 的完整名单和语义以 Phase 1 详细设计为准；未先更新该设计和相关 ADR，不得新增平行抽象。
 
@@ -145,8 +148,9 @@
 - 不得静默降级、把预检当成执行成功、把目录存在当成 Ready，或在无法证明安全时覆盖/删除/迁移数据。
 - 文件物化必须遵循《跨平台工作区物化设计》的 Probe/Plan/Revalidate/Execute/Receipt 契约；Adapter 只报告事实，降级政策由 Core/Application 决定。
 - 受控对象必须由类型 ID 和已验证根目录推导；禁止任意 Workspace 路径、路径逃逸、跟随未验证符号链接，或用 shell/glob/未验证环境变量选择删除目标。
-- Git、文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有过渡状态/operation、Receipt 和幂等协调路径。
-- Git 与子进程使用 argv 调用，不通过 shell 拼接；`workspace exec` 始终是 trusted-host，不得宣称为 Sandbox。
+- 文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有过渡状态/operation、Receipt 和幂等协调路径。Git 检查只读，不自动修改来源或副本的 Git 元数据。
+- 平台内部 Git 与子进程使用 argv 调用，不通过 shell 拼接；工作区不是 Sandbox，不得宣称用户直接运行的命令受安全隔离。
+- 清理成功或强制清理日志不能作为任务完成证明；主管 Agent 按《任务流程》核验实际 commit，不在产品实现中增加交付证明机制。
 - 不记录密钥、完整环境、完整 argv、源码正文或未脱敏凭据 URL。
 
 ### 4.3 公开契约与质量
@@ -166,7 +170,7 @@
 1. 判断任务属于 P0 还是 P1、归属哪个小阶段，确认该小阶段已有退出条件，并标记《任务流程》中的 R1–R4 风险等级。
 2. 按第三节加载所需文档；先确认公开契约、状态影响、失败行为和范围外事项。
 3. 检查工作区现状并保留用户已有修改；不得覆盖或回退无关变更。
-4. 涉及架构、状态机、BaseId、降级策略、SQLite 主模型或安全边界时，先确认是否需要 ADR。
+4. 涉及架构、状态机、物化输入、降级策略、SQLite 主模型或安全边界时，先确认是否需要 ADR。
 5. 超出 P1 边界时停止实施，转为需求或 ADR，不用隐藏开关偷渡功能。
 
 ### 5.2 实施中
@@ -187,7 +191,7 @@
 | 变化 | 必须修改的单一来源 | 只做联动检查的位置 |
 |---|---|---|
 | CLI 命令、输出或错误码 | 用户手册 | `--help`、fixture 和 CLI 测试；其他文档只检查引用是否失效 |
-| Workspace 状态、恢复或 Git 领域语义 | Phase 1 详细设计 | migration、故障注入和 Git 集成测试 |
+| Workspace 状态、恢复或 Git 检查语义 | Phase 1 详细设计 | migration、故障注入和只读 Git 集成测试 |
 | PlatformProbe、Materializer 或跨卷语义 | 跨平台物化设计 | 平台 Adapter、真实文件系统测试和技术选型 |
 | 阶段名称、范围或演进边界 | 架构方案 | 任务阶段映射和用户手册的可见边界 |
 | 新依赖、系统 API 或质量工具 | 技术栈 | lockfile、供应链检查和 CI |

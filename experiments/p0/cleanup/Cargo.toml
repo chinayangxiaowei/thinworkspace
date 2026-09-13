@@ -1,0 +1,12 @@
+[package]
+name = "thinws-p0-cleanup"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "thinws_p0_cleanup"
+
+[dependencies]

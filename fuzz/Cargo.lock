@@ -166,6 +166,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinws-p0-cleanup"
+version = "0.0.0"
+
+[[package]]
 name = "thinws-p0-probe"
 version = "0.0.0"
 dependencies = [
@@ -180,6 +184,7 @@ name = "thinws-p0-probe-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "thinws-p0-cleanup",
  "thinws-p0-probe",
 ]
 

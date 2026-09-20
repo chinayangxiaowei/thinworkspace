@@ -43,8 +43,8 @@ pub enum GitQuery<'a> {
     ExecPath,
     /// Read exactly one caller-prevalidated config file without includes.
     Config { file: &'a Path },
-    /// Read tracked status using the command frozen in the technical design.
-    TrackedStatus,
+    /// Read tracked status with command-scoped guards for prevalidated filters.
+    TrackedStatus { filter_drivers: &'a [OsString] },
     /// Read stable index flags without changing them.
     IndexFlags,
 }
@@ -296,6 +296,8 @@ fn git_command(
     environment: QueryEnvironment<'_>,
     prevalidated_git_dir: Option<&Path>,
 ) -> Command {
+    const BASE_CONFIG_COUNT: usize = 4;
+
     let mut command = Command::new(GIT_EXECUTABLE);
     command
         .current_dir(cwd)
@@ -316,7 +318,6 @@ fn git_command(
         .env("PAGER", "cat")
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_EXTERNAL_DIFF", "/usr/bin/false")
-        .env("GIT_CONFIG_COUNT", "4")
         .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
         .env("GIT_CONFIG_VALUE_0", "false")
         .env("GIT_CONFIG_KEY_1", "core.hooksPath")
@@ -325,6 +326,30 @@ fn git_command(
         .env("GIT_CONFIG_VALUE_2", "cat")
         .env("GIT_CONFIG_KEY_3", "color.ui")
         .env("GIT_CONFIG_VALUE_3", "false");
+
+    let filter_drivers = match &query {
+        GitQuery::TrackedStatus { filter_drivers } => *filter_drivers,
+        _ => &[],
+    };
+    command.env(
+        "GIT_CONFIG_COUNT",
+        (BASE_CONFIG_COUNT + filter_drivers.len() * 3).to_string(),
+    );
+    for (driver_index, driver) in filter_drivers.iter().enumerate() {
+        for (field_index, (field, value)) in [("clean", ""), ("process", ""), ("required", "true")]
+            .into_iter()
+            .enumerate()
+        {
+            let index = BASE_CONFIG_COUNT + driver_index * 3 + field_index;
+            let mut key = OsString::from("filter.");
+            key.push(driver);
+            key.push(".");
+            key.push(field);
+            command
+                .env(format!("GIT_CONFIG_KEY_{index}"), key)
+                .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+        }
+    }
 
     match environment {
         QueryEnvironment::Isolated => {
@@ -372,7 +397,7 @@ fn git_command(
             command.arg(file);
             command.args(["--no-includes", "--null", "--list"]);
         }
-        GitQuery::TrackedStatus => {
+        GitQuery::TrackedStatus { .. } => {
             command.arg(git_dir_argument(cwd, prevalidated_git_dir));
             command.args([
                 "--no-optional-locks",
@@ -755,10 +780,11 @@ fn git_exit(status: ExitStatus) -> GitExit {
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::{self, Write};
     use std::net::Shutdown;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
@@ -1022,7 +1048,9 @@ mod tests {
                 ],
             ),
             (
-                GitQuery::TrackedStatus,
+                GitQuery::TrackedStatus {
+                    filter_drivers: &[],
+                },
                 vec![
                     OsStr::new("--git-dir=/tmp/thinws-p0-07-query-cwd/.git"),
                     OsStr::new("--no-optional-locks"),
@@ -1056,6 +1084,48 @@ mod tests {
             );
             assert!(environment.contains(&(OsStr::new("PATH"), Some(OsStr::new("/usr/bin:/bin")))));
         }
+    }
+
+    #[test]
+    fn tracked_status_guards_preserve_exact_driver_bytes() {
+        let cwd = Path::new("/tmp/thinws-p0-07-query-cwd");
+        let drivers = [
+            OsString::from_vec(b"Case.dot = space \xff".to_vec()),
+            OsString::from("EndingZ"),
+        ];
+        let command = git_command(
+            cwd,
+            GitQuery::TrackedStatus {
+                filter_drivers: &drivers,
+            },
+            QueryEnvironment::Isolated,
+            None,
+        );
+        let environment = command.get_envs().collect::<Vec<_>>();
+
+        assert!(environment.contains(&(OsStr::new("GIT_CONFIG_COUNT"), Some(OsStr::new("10")))));
+        for (driver_index, driver) in drivers.iter().enumerate() {
+            for (field_index, (field, value)) in
+                [("clean", ""), ("process", ""), ("required", "true")]
+                    .into_iter()
+                    .enumerate()
+            {
+                let mut expected_key = OsString::from("filter.");
+                expected_key.push(driver);
+                expected_key.push(".");
+                expected_key.push(field);
+                let index = 4 + driver_index * 3 + field_index;
+                let key_name = format!("GIT_CONFIG_KEY_{index}");
+                let value_name = format!("GIT_CONFIG_VALUE_{index}");
+                assert!(
+                    environment.contains(&(OsStr::new(&key_name), Some(expected_key.as_os_str())))
+                );
+                assert!(environment.contains(&(OsStr::new(&value_name), Some(OsStr::new(value)))));
+            }
+        }
+        assert!(!environment.iter().any(|(_, value)| {
+            value.is_some_and(|value| value.as_bytes().ends_with(b".smudge"))
+        }));
     }
 
     #[test]

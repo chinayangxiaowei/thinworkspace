@@ -148,11 +148,16 @@ struct InspectionLimits {
     max_depth: usize,
     max_text_bytes: usize,
     #[cfg(test)]
+    before_status_query: fn(&Path, &Path),
+    #[cfg(test)]
     before_final_root_revalidation: fn(&Path),
 }
 
 #[cfg(test)]
 fn keep_root_unchanged(_: &Path) {}
+
+#[cfg(test)]
+fn keep_status_sources_unchanged(_: &Path, _: &Path) {}
 
 impl InspectionLimits {
     const fn production() -> Self {
@@ -162,6 +167,8 @@ impl InspectionLimits {
             max_repositories: MAX_REPOSITORIES,
             max_depth: MAX_DEPTH,
             max_text_bytes: MAX_TEXT_BYTES,
+            #[cfg(test)]
+            before_status_query: keep_status_sources_unchanged,
             #[cfg(test)]
             before_final_root_revalidation: keep_root_unchanged,
         }
@@ -278,6 +285,7 @@ struct GlobalContext {
 
 struct PreparedRepository {
     relative_path: PathBuf,
+    filter_drivers: Vec<OsString>,
     worktree_identity: Identity,
     git_dir: PathBuf,
     git_dir_identity: Identity,
@@ -385,20 +393,36 @@ fn inspect_with_options(
     }
 
     indexed.sort_by_key(|repository| std::cmp::Reverse(path_depth(&repository.relative_path)));
-    for repository in indexed {
+    for index in 0..indexed.len() {
+        let repository = &indexed[index];
         let unsafe_descendant = repositories.iter().any(|inspected| {
             inspected.state == RepositoryState::Unknown
                 && is_strict_descendant(&inspected.relative_path, &repository.relative_path)
         });
         if unsafe_descendant {
             repositories.push(RepositoryInspection {
-                relative_path: repository.relative_path,
+                relative_path: repository.relative_path.clone(),
                 state: RepositoryState::Unknown,
                 issues: vec![InspectionIssue::UnsafeDescendant],
             });
             continue;
         }
-        repositories.push(inspect_status(copy_root, repository, &environment, &budget));
+        let participants = indexed
+            .iter()
+            .filter(|candidate| {
+                candidate.relative_path == repository.relative_path
+                    || is_strict_descendant(&candidate.relative_path, &repository.relative_path)
+            })
+            .collect::<Vec<_>>();
+        let filter_drivers = filter_driver_union(&participants);
+        repositories.push(inspect_status(
+            copy_root,
+            repository,
+            &participants,
+            &filter_drivers,
+            &environment,
+            &budget,
+        ));
     }
 
     #[cfg(test)]
@@ -927,6 +951,7 @@ fn preflight_repository(
         }
     }
     validate_config_entries(&entries)?;
+    let filter_drivers = filter_drivers(&entries)?;
     validate_effective_user_attributes(&entries, environment, budget, &mut evidence)?;
     let mut worktree_corresponds = marker_file_identity.is_none();
     for entry in &entries {
@@ -981,7 +1006,7 @@ fn preflight_repository(
         false,
     )? {
         let gitmodules = parse_config_file(copy_root, &read.evidence.path, budget)?;
-        validate_config_entries(&gitmodules)?;
+        validate_gitmodules_config_entries(&gitmodules)?;
         validate_gitmodules(copy_root, relative_path, &gitmodules)?;
         evidence.push(read.evidence);
     }
@@ -1025,6 +1050,7 @@ fn preflight_repository(
     revalidate_file_evidence(&evidence, budget)?;
     Ok(PreparedRepository {
         relative_path: relative_path.to_path_buf(),
+        filter_drivers,
         worktree_identity,
         git_dir: copy_root.join(&git_dir),
         git_dir_identity,
@@ -1279,7 +1305,7 @@ fn parse_config_output(output: &[u8]) -> Result<Vec<ConfigEntry>, InspectionIssu
             return Err(InspectionIssue::InvalidGitOutput);
         }
         let mut key = record[..separator].to_vec();
-        key.make_ascii_lowercase();
+        normalize_config_key(&mut key);
         entries.push(ConfigEntry {
             key,
             value: record[separator + 1..].to_vec(),
@@ -1288,12 +1314,59 @@ fn parse_config_output(output: &[u8]) -> Result<Vec<ConfigEntry>, InspectionIssu
     Ok(entries)
 }
 
+fn normalize_config_key(key: &mut [u8]) {
+    let first_separator = key.iter().position(|byte| *byte == b'.');
+    let last_separator = key.iter().rposition(|byte| *byte == b'.');
+    match (first_separator, last_separator) {
+        (Some(first), Some(last)) if first != last => {
+            key[..first].make_ascii_lowercase();
+            key[last + 1..].make_ascii_lowercase();
+        }
+        _ => key.make_ascii_lowercase(),
+    }
+}
+
+fn filter_driver(key: &[u8]) -> Result<Option<&[u8]>, InspectionIssue> {
+    let Some(filter_key) = key.strip_prefix(b"filter.") else {
+        return Ok(None);
+    };
+    for field in [
+        b".clean".as_slice(),
+        b".smudge".as_slice(),
+        b".process".as_slice(),
+        b".required".as_slice(),
+    ] {
+        if let Some(driver) = filter_key.strip_suffix(field) {
+            return if driver.is_empty() {
+                Err(InspectionIssue::UnsupportedConfiguration)
+            } else {
+                Ok(Some(driver))
+            };
+        }
+    }
+    Err(InspectionIssue::UnsupportedConfiguration)
+}
+
+fn filter_drivers(entries: &[ConfigEntry]) -> Result<Vec<OsString>, InspectionIssue> {
+    let mut drivers = Vec::new();
+    for entry in entries {
+        if let Some(driver) = filter_driver(&entry.key)? {
+            drivers.push(OsString::from_vec(driver.to_vec()));
+        }
+    }
+    drivers.sort();
+    drivers.dedup();
+    Ok(drivers)
+}
+
 fn validate_config_entries(entries: &[ConfigEntry]) -> Result<(), InspectionIssue> {
     for entry in entries {
         let key = entry.key.as_slice();
+        if filter_driver(key)?.is_some() {
+            continue;
+        }
         if key == b"include.path"
             || key.starts_with(b"includeif.")
-            || key.starts_with(b"filter.")
             || key == b"core.hookspath"
             || key == b"core.fsmonitor" && !is_false(&entry.value)
             || key == b"core.sparsecheckout" && !is_false(&entry.value)
@@ -1308,12 +1381,22 @@ fn validate_config_entries(entries: &[ConfigEntry]) -> Result<(), InspectionIssu
         if key.starts_with(b"core.") && !known_core_key(key)
             || key.starts_with(b"extensions.") && key != b"extensions.worktreeconfig"
             || key.starts_with(b"index.") && key != b"index.version"
-            || key.starts_with(b"status.")
+            || key.starts_with(b"status.") && key != b"status.showuntrackedfiles"
         {
             return Err(InspectionIssue::UnsupportedConfiguration);
         }
     }
     Ok(())
+}
+
+fn validate_gitmodules_config_entries(entries: &[ConfigEntry]) -> Result<(), InspectionIssue> {
+    if entries
+        .iter()
+        .any(|entry| entry.key.starts_with(b"filter."))
+    {
+        return Err(InspectionIssue::UnsupportedConfiguration);
+    }
+    validate_config_entries(entries)
 }
 
 fn known_core_key(key: &[u8]) -> bool {
@@ -1324,10 +1407,12 @@ fn known_core_key(key: &[u8]) -> bool {
             | b"core.bare"
             | b"core.checkstat"
             | b"core.eol"
+            | b"core.excludesfile"
             | b"core.filemode"
             | b"core.fsmonitor"
             | b"core.hookspath"
             | b"core.ignorecase"
+            | b"core.longpaths"
             | b"core.logallrefupdates"
             | b"core.precomposeunicode"
             | b"core.protecthfs"
@@ -1464,66 +1549,82 @@ fn validate_index_flags_output(output: &[u8]) -> Result<(), InspectionIssue> {
 
 fn inspect_status(
     copy_root: &Path,
-    mut repository: PreparedRepository,
+    repository: &PreparedRepository,
+    participants: &[&PreparedRepository],
+    filter_drivers: &[OsString],
     environment: &SourceEnvironment,
     budget: &CooperativeBudget,
 ) -> RepositoryInspection {
-    if let Err(issue) = revalidate_repository(copy_root, &repository, budget) {
-        repository.issues.push(issue);
+    let mut issues = repository.issues.clone();
+    #[cfg(test)]
+    (budget.limits.before_status_query)(copy_root, &repository.relative_path);
+    if let Err(issue) = revalidate_repositories(copy_root, participants, budget) {
+        issues.push(issue);
         return RepositoryInspection {
-            relative_path: repository.relative_path,
+            relative_path: repository.relative_path.clone(),
             state: RepositoryState::Unknown,
-            issues: repository.issues,
+            issues,
         };
     }
     let Some(timeout) = budget.query_timeout() else {
-        repository.issues.push(InspectionIssue::BudgetExpired);
+        issues.push(InspectionIssue::BudgetExpired);
         return RepositoryInspection {
-            relative_path: repository.relative_path,
+            relative_path: repository.relative_path.clone(),
             state: RepositoryState::Unknown,
-            issues: repository.issues,
+            issues,
         };
     };
     let output = match map_query_result(run_prevalidated_repository(
         &copy_root.join(&repository.relative_path),
         &repository.git_dir,
-        GitQuery::TrackedStatus,
+        GitQuery::TrackedStatus { filter_drivers },
         preserved_environment(environment),
         timeout,
     )) {
         Ok(output) => output,
         Err(issue) => {
-            repository.issues.push(issue);
+            issues.push(issue);
             return RepositoryInspection {
-                relative_path: repository.relative_path,
+                relative_path: repository.relative_path.clone(),
                 state: RepositoryState::Unknown,
-                issues: repository.issues,
+                issues,
             };
         }
     };
-    if let Err(issue) = revalidate_repository(copy_root, &repository, budget) {
-        repository.issues.push(issue);
+    if let Err(issue) = revalidate_repositories(copy_root, participants, budget) {
+        issues.push(issue);
         return RepositoryInspection {
-            relative_path: repository.relative_path,
+            relative_path: repository.relative_path.clone(),
             state: RepositoryState::Unknown,
-            issues: repository.issues,
+            issues,
         };
     }
     match parse_tracked_change_count(&output.stdout) {
         Ok(count) => RepositoryInspection {
-            relative_path: repository.relative_path,
+            relative_path: repository.relative_path.clone(),
             state: RepositoryState::from_tracked_change_count(count),
-            issues: repository.issues,
+            issues,
         },
         Err(_) => {
-            repository.issues.push(InspectionIssue::InvalidGitOutput);
+            issues.push(InspectionIssue::InvalidGitOutput);
             RepositoryInspection {
-                relative_path: repository.relative_path,
+                relative_path: repository.relative_path.clone(),
                 state: RepositoryState::Unknown,
-                issues: repository.issues,
+                issues,
             }
         }
     }
+}
+
+fn revalidate_repositories(
+    copy_root: &Path,
+    repositories: &[&PreparedRepository],
+    budget: &CooperativeBudget,
+) -> Result<(), InspectionIssue> {
+    for repository in repositories {
+        revalidate_repository(copy_root, repository, budget)?;
+    }
+    Ok(())
 }
 
 fn preserved_environment(environment: &SourceEnvironment) -> PreservedGitEnvironment<'_> {
@@ -1916,6 +2017,16 @@ fn is_strict_descendant(candidate: &Path, parent: &Path) -> bool {
     candidate != parent && candidate.starts_with(parent)
 }
 
+fn filter_driver_union(repositories: &[&PreparedRepository]) -> Vec<OsString> {
+    let mut drivers = repositories
+        .iter()
+        .flat_map(|repository| repository.filter_drivers.iter().cloned())
+        .collect::<Vec<_>>();
+    drivers.sort();
+    drivers.dedup();
+    drivers
+}
+
 fn push_unique(issues: &mut Vec<InspectionIssue>, issue: InspectionIssue) {
     if !issues.contains(&issue) {
         issues.push(issue);
@@ -2241,6 +2352,7 @@ mod tests {
         fs::create_dir_all(&common_dir).expect("create identity common dir");
         PreparedRepository {
             relative_path: PathBuf::from("worktree"),
+            filter_drivers: Vec::new(),
             worktree_identity: owned_directory_identity(&worktree),
             git_dir: git_dir.clone(),
             git_dir_identity: owned_directory_identity(&git_dir),
@@ -2283,6 +2395,15 @@ mod tests {
         let retained = copy_root.with_file_name("copy-root-before-final-revalidation");
         fs::rename(copy_root, &retained).expect("retain original copy root");
         fs::create_dir(copy_root).expect("create replacement copy root");
+    }
+
+    fn modify_nested_config_before_root_status(copy_root: &Path, relative_path: &Path) {
+        if relative_path.as_os_str().is_empty() {
+            let config = copy_root.join("nested/.git/config");
+            let mut contents = fs::read(&config).expect("read controlled nested config");
+            contents.extend_from_slice(b"\n[user]\n\tname = changed evidence\n");
+            fs::write(config, contents).expect("change controlled nested config evidence");
+        }
     }
 
     #[test]
@@ -2605,6 +2726,372 @@ mod tests {
     }
 
     #[test]
+    fn allows_irrelevant_status_config_and_unused_filter_driver() {
+        let fixture = Fixture::new("unused-filter-config");
+        fixture.init_repo(&fixture.root);
+        let excludes = fixture.home.join("global-excludes");
+        fs::write(&excludes, b"ignored-by-config\ntracked.txt\n")
+            .expect("write controlled excludes file");
+        let global = fixture.home.join("approved.gitconfig");
+        fs::write(
+            &global,
+            format!(
+                "[core]\n\texcludesFile = {}\n\tlongpaths = true\n[status]\n\tshowUntrackedFiles = all\n[filter \"LFS\"]\n\tclean = /usr/bin/false\n\tsmudge = /usr/bin/false\n\tprocess = /usr/bin/false\n\trequired = true\n",
+                excludes.display()
+            ),
+        )
+        .expect("write approved global Git config");
+        fs::write(fixture.root.join("ignored-by-config"), b"untracked\n")
+            .expect("write controlled untracked file");
+        fs::write(fixture.root.join("visible-untracked"), b"untracked\n")
+            .expect("write controlled untracked file not covered by excludes");
+        let before = repository_metadata_snapshot(&fixture.root.join(".git"));
+        let mut environment = fixture.environment();
+        environment.git_config_global = Some(global.into_os_string());
+
+        let inspection = inspect_with_environment(&fixture.root, environment.clone());
+
+        assert_eq!(repository(&inspection, "").state, RepositoryState::Clean);
+        assert_eq!(inspection.aggregate, GitState::Clean);
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            before
+        );
+
+        fs::write(fixture.root.join("tracked.txt"), b"changed\n")
+            .expect("write tracked file covered by excludes semantics");
+        let dirty = inspect_with_environment(&fixture.root, environment);
+        assert_eq!(repository(&dirty, "").state.tracked_change_count(), Some(1));
+        assert_eq!(dirty.aggregate, GitState::Dirty);
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            before
+        );
+    }
+
+    #[test]
+    fn exact_non_utf8_filter_driver_round_trips_through_git_and_command_guard() {
+        let fixture = Fixture::new("opaque-filter-driver");
+        fixture.init_repo(&fixture.root);
+        let config = fixture.root.join("opaque.gitconfig");
+        let mut contents = b"[filter \"Case.dot = space ".to_vec();
+        contents.push(0xff);
+        contents.extend_from_slice(
+            b"\"]\n\tclean = /usr/bin/false\n[filter \"EndingZ\"]\n\tclean = /usr/bin/false\n",
+        );
+        fs::write(&config, contents).expect("write opaque controlled config");
+        let budget = CooperativeBudget::new(InspectionLimits::production());
+
+        let entries = parse_config_file(&fixture.root, &config, &budget)
+            .expect("parse opaque driver with native Git");
+        let drivers = filter_drivers(&entries).expect("collect exact opaque driver");
+        assert_eq!(
+            drivers,
+            vec![
+                OsString::from_vec(b"Case.dot = space \xff".to_vec()),
+                OsString::from("EndingZ"),
+            ]
+        );
+        let environment = fixture.environment();
+        let before = repository_metadata_snapshot(&fixture.root.join(".git"));
+        let output = run_prevalidated_repository(
+            &fixture.root,
+            &fixture.root.join(".git"),
+            GitQuery::TrackedStatus {
+                filter_drivers: &drivers,
+            },
+            preserved_environment(&environment),
+            Duration::from_secs(5),
+        )
+        .expect("run status with opaque driver guard");
+        assert_eq!(output.exit.code, Some(0));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            before
+        );
+    }
+
+    #[test]
+    fn index_only_filter_conversion_fails_closed_without_running_the_driver() {
+        let fixture = Fixture::new("index-only-filter");
+        fixture.init_repo(&fixture.root);
+        fs::write(
+            fixture.root.join(".gitattributes"),
+            b"*.txt filter=IndexOnly\n",
+        )
+        .expect("write controlled attributes");
+        fixture.git(&fixture.root, &["add", ".gitattributes"]);
+        fixture.git(
+            &fixture.root,
+            &["commit", "--quiet", "-m", "indexed attributes"],
+        );
+        fs::remove_file(fixture.root.join(".gitattributes"))
+            .expect("retain attributes only in the index");
+        let canary = fixture.root.join("filter-ran");
+        fixture.git(
+            &fixture.root,
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        fixture.git(
+            &fixture.root,
+            &[
+                "config",
+                "--worktree",
+                "filter.IndexOnly.clean",
+                &format!("/usr/bin/touch {}", canary.display()),
+            ],
+        );
+        fixture.git(
+            &fixture.root,
+            &["config", "--worktree", "filter.IndexOnly.required", "true"],
+        );
+        fs::write(fixture.root.join("tracked.txt"), b"changed\n")
+            .expect("same-size tracked modification");
+        let before = repository_metadata_snapshot(&fixture.root.join(".git"));
+
+        let inspection = inspect_with_environment(&fixture.root, fixture.environment());
+
+        let root = repository(&inspection, "");
+        assert_eq!(root.state, RepositoryState::Unknown);
+        assert!(matches!(
+            root.issues.as_slice(),
+            [InspectionIssue::QueryNonZeroExit(GitExit {
+                code: Some(128),
+                signal: None
+            })]
+        ));
+        assert!(
+            !canary.exists(),
+            "the configured clean command must not run"
+        );
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            before
+        );
+    }
+
+    #[test]
+    fn child_only_filter_guard_is_inherited_by_parent_status() {
+        let fixture = Fixture::new("recursive-filter-guard");
+        fixture.init_repo(&fixture.root);
+        let source = fixture
+            .root
+            .parent()
+            .expect("fixture base")
+            .join("submodule-source");
+        fixture.init_repo(&source);
+        fs::write(source.join(".gitattributes"), b"*.txt filter=ChildOnly\n")
+            .expect("write controlled child attributes");
+        fixture.git(&source, &["add", ".gitattributes"]);
+        fixture.git(
+            &source,
+            &["commit", "--quiet", "-m", "indexed child attributes"],
+        );
+        fixture.git(
+            &fixture.root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                source.to_str().expect("UTF-8 fixture source"),
+                "modules/sub",
+            ],
+        );
+        fixture.git(
+            &fixture.root,
+            &["commit", "--quiet", "-am", "submodule baseline"],
+        );
+        let child = fixture.root.join("modules/sub");
+        fs::remove_file(child.join(".gitattributes"))
+            .expect("retain child attributes only in the index");
+        let canary = fixture.root.join("recursive-filter-ran");
+        fixture.git(
+            &child,
+            &[
+                "config",
+                "filter.ChildOnly.clean",
+                &format!("/usr/bin/touch {}", canary.display()),
+            ],
+        );
+        fixture.git(&child, &["config", "filter.ChildOnly.required", "true"]);
+        fs::write(child.join("tracked.txt"), b"changed\n")
+            .expect("same-size controlled child modification");
+        let parent_before = repository_metadata_snapshot(&fixture.root.join(".git"));
+        let child_git_dir = fixture.root.join(".git/modules/modules/sub");
+        let child_before = repository_metadata_snapshot(&child_git_dir);
+
+        let drivers = [OsString::from("ChildOnly")];
+        let environment = fixture.environment();
+        let output = run_prevalidated_repository(
+            &fixture.root,
+            &fixture.root.join(".git"),
+            GitQuery::TrackedStatus {
+                filter_drivers: &drivers,
+            },
+            preserved_environment(&environment),
+            Duration::from_secs(5),
+        )
+        .expect("run guarded parent status");
+        assert_eq!(output.exit.code, Some(128));
+        assert!(!canary.exists(), "the child-only driver must stay disabled");
+
+        let inspection = inspect_with_environment(&fixture.root, environment);
+
+        let child_result = repository(&inspection, "modules/sub");
+        assert_eq!(child_result.state, RepositoryState::Unknown);
+        assert!(matches!(
+            child_result.issues.as_slice(),
+            [InspectionIssue::QueryNonZeroExit(GitExit {
+                code: Some(128),
+                signal: None
+            })]
+        ));
+        let root = repository(&inspection, "");
+        assert_eq!(root.state, RepositoryState::Unknown);
+        assert_eq!(root.issues, vec![InspectionIssue::UnsafeDescendant]);
+        assert!(!canary.exists(), "the child-only driver must stay disabled");
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            parent_before
+        );
+        assert_eq!(repository_metadata_snapshot(&child_git_dir), child_before);
+    }
+
+    #[test]
+    fn inspector_applies_an_unused_child_driver_guard_to_the_parent_query() {
+        let fixture = Fixture::new("inspector-descendant-filter-guard");
+        fixture.init_repo(&fixture.root);
+        fs::write(
+            fixture.root.join(".gitattributes"),
+            b"*.txt filter=ChildOnly\n",
+        )
+        .expect("write controlled parent attributes");
+        fixture.git(&fixture.root, &["add", ".gitattributes"]);
+        fixture.git(
+            &fixture.root,
+            &["commit", "--quiet", "-m", "indexed parent attributes"],
+        );
+        let source = fixture
+            .root
+            .parent()
+            .expect("fixture base")
+            .join("submodule-source");
+        fixture.init_repo(&source);
+        fixture.git(
+            &fixture.root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                source.to_str().expect("UTF-8 fixture source"),
+                "modules/sub",
+            ],
+        );
+        fixture.git(
+            &fixture.root,
+            &["commit", "--quiet", "-am", "submodule baseline"],
+        );
+        fs::remove_file(fixture.root.join(".gitattributes"))
+            .expect("retain parent attributes only in the index");
+        fs::write(fixture.root.join("tracked.txt"), b"changed\n")
+            .expect("same-size controlled parent modification");
+        let child = fixture.root.join("modules/sub");
+        let canary = fixture.root.join("unused-child-filter-ran");
+        fixture.git(
+            &child,
+            &[
+                "config",
+                "filter.ChildOnly.clean",
+                &format!("/usr/bin/touch {}", canary.display()),
+            ],
+        );
+        fixture.git(&child, &["config", "filter.ChildOnly.required", "true"]);
+        let parent_before = repository_metadata_snapshot(&fixture.root.join(".git"));
+        let child_git_dir = fixture.root.join(".git/modules/modules/sub");
+        let child_before = repository_metadata_snapshot(&child_git_dir);
+
+        let inspection = inspect_with_environment(&fixture.root, fixture.environment());
+
+        assert_eq!(
+            repository(&inspection, "modules/sub").state,
+            RepositoryState::Clean
+        );
+        let root = repository(&inspection, "");
+        assert_eq!(root.state, RepositoryState::Unknown);
+        assert!(matches!(
+            root.issues.as_slice(),
+            [InspectionIssue::QueryNonZeroExit(GitExit {
+                code: Some(128),
+                signal: None
+            })]
+        ));
+        assert!(!canary.exists(), "the unused child filter must not run");
+        assert_eq!(
+            repository_metadata_snapshot(&fixture.root.join(".git")),
+            parent_before
+        );
+        assert_eq!(repository_metadata_snapshot(&child_git_dir), child_before);
+    }
+
+    #[test]
+    fn descendant_evidence_change_before_parent_status_fails_closed() {
+        let fixture = Fixture::new("descendant-evidence-change");
+        fixture.init_repo(&fixture.root);
+        fixture.init_repo(&fixture.root.join("nested"));
+
+        let inspection = inspect_with_options(
+            &fixture.root,
+            fixture.environment(),
+            InspectionLimits {
+                before_status_query: modify_nested_config_before_root_status,
+                ..InspectionLimits::production()
+            },
+        );
+
+        assert_eq!(
+            repository(&inspection, "nested").state,
+            RepositoryState::Clean
+        );
+        let root = repository(&inspection, "");
+        assert_eq!(root.state, RepositoryState::Unknown);
+        assert!(root.issues.contains(&InspectionIssue::EvidenceChanged));
+    }
+
+    #[test]
+    fn filter_guard_union_uses_the_same_selected_query_participants() {
+        let fixture = Fixture::new("filter-driver-union");
+        let mut root = prepared_identity_fixture(&fixture);
+        root.relative_path = PathBuf::new();
+        root.filter_drivers = vec![OsString::from("Root"), OsString::from("Shared")];
+        let mut child = prepared_identity_fixture(&fixture);
+        child.relative_path = PathBuf::from("modules/sub");
+        child.filter_drivers = vec![OsString::from("Child"), OsString::from("Shared")];
+        let mut sibling = prepared_identity_fixture(&fixture);
+        sibling.relative_path = PathBuf::from("sibling");
+        sibling.filter_drivers = vec![OsString::from("Sibling")];
+        let repositories = [root, child, sibling];
+
+        assert_eq!(
+            filter_driver_union(&repositories.iter().collect::<Vec<_>>()),
+            vec![
+                OsString::from("Child"),
+                OsString::from("Root"),
+                OsString::from("Shared"),
+                OsString::from("Sibling"),
+            ]
+        );
+        assert_eq!(
+            filter_driver_union(&[&repositories[1]]),
+            vec![OsString::from("Child"), OsString::from("Shared")]
+        );
+    }
+
+    #[test]
     fn validates_repository_core_attributes_file_and_info_attributes() {
         let fixture = Fixture::new("repository-attributes");
         fixture.init_repo(&fixture.root);
@@ -2720,10 +3207,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_includes_filters_promisors_and_unclassified_core_settings() {
+    fn rejects_includes_unknown_filters_promisors_and_unclassified_core_settings() {
         for (label, key, value) in [
             ("include", "include.path", "/dev/null"),
-            ("filter", "filter.tripwire.clean", "/bin/cat"),
+            ("unknown-filter", "filter.tripwire.delay", "/bin/cat"),
             ("promisor", "remote.origin.promisor", "true"),
             ("unclassified", "core.preloadindex", "true"),
         ] {
@@ -2771,6 +3258,14 @@ mod tests {
         assert!(parsed[0].value.is_empty());
         assert_eq!(parsed[1].key, b"user.name");
         assert_eq!(parsed[1].value, b"Fixture");
+
+        let parsed = parse_config_output(b"FiLtEr.Case.dot = \xff.ClEaN\ncommand\0")
+            .expect("parse filter key with an opaque subsection");
+        assert_eq!(parsed[0].key, b"filter.Case.dot = \xff.clean");
+        assert_eq!(
+            filter_drivers(&parsed).expect("collect exact filter driver"),
+            vec![OsString::from_vec(b"Case.dot = \xff".to_vec())]
+        );
 
         for malformed in [
             b"core.bare\n".as_slice(),
@@ -2872,18 +3367,34 @@ mod tests {
         for key in [
             b"include.path".as_slice(),
             b"includeif.gitdir:controlled.path".as_slice(),
-            b"filter.tripwire.clean".as_slice(),
             b"core.hookspath".as_slice(),
             b"sparse.expectfilesoutsideofsparsecone".as_slice(),
         ] {
             assert_rejected(key, b"");
         }
+        for key in [
+            b"filter.Trip.Wire.clean".as_slice(),
+            b"filter.Trip.Wire.smudge".as_slice(),
+            b"filter.Trip.Wire.process".as_slice(),
+            b"filter.Trip.Wire.required".as_slice(),
+            b"core.excludesfile".as_slice(),
+            b"core.longpaths".as_slice(),
+            b"status.showuntrackedfiles".as_slice(),
+        ] {
+            assert_valid(key, b"");
+        }
+        assert_rejected(b"filter..clean", b"");
+        assert_rejected(b"filter.tripwire.delay", b"");
+        assert_eq!(
+            validate_gitmodules_config_entries(&[entry(b"filter.tripwire.clean", b"")]),
+            Err(InspectionIssue::UnsupportedConfiguration)
+        );
 
         assert_valid(b"extensions.worktreeconfig", b"true");
         assert_rejected(b"extensions.future", b"");
         assert_valid(b"index.version", b"4");
         assert_rejected(b"index.future", b"");
-        assert_rejected(b"status.showuntrackedfiles", b"no");
+        assert_rejected(b"status.relativepaths", b"false");
         assert_valid(b"core.autocrlf", b"input");
         assert_rejected(b"core.preloadindex", b"true");
         assert_valid(b"user.name", b"Fixture");
@@ -3412,6 +3923,7 @@ mod tests {
         );
         let repository = PreparedRepository {
             relative_path: PathBuf::from("must-not-be-opened"),
+            filter_drivers: Vec::new(),
             worktree_identity: identity,
             git_dir: PathBuf::from("/must-not-be-opened/git-dir"),
             git_dir_identity: identity,
@@ -3751,10 +4263,11 @@ mod tests {
             ..SourceEnvironment::default()
         };
         let mut budget = CooperativeBudget::new(InspectionLimits::production());
-        assert_eq!(
-            preflight_sources(&fixture.root, &environment, &mut budget).map(|_| ()),
-            Err(InspectionIssue::UnsupportedConfiguration)
-        );
+        let global = preflight_sources(&fixture.root, &environment, &mut budget)
+            .expect("approved filter shape from selected system config");
+        assert!(global.entries.iter().any(|entry| {
+            entry.key == b"filter.tripwire.clean" && entry.value == b"/usr/bin/false"
+        }));
     }
 
     #[test]
@@ -4265,6 +4778,23 @@ mod tests {
                 .issues
                 .contains(&InspectionIssue::ExternalRepositoryMetadata)
         );
+    }
+
+    #[test]
+    fn gitmodules_filter_configuration_remains_unsupported() {
+        let fixture = Fixture::new("gitmodules-filter-config");
+        fixture.init_repo(&fixture.root);
+        fs::write(
+            fixture.root.join(".gitmodules"),
+            b"[filter \"unused\"]\n\tclean = /usr/bin/false\n",
+        )
+        .expect("write controlled gitmodules filter");
+
+        let inspection = inspect_with_environment(&fixture.root, fixture.environment());
+
+        let root = repository(&inspection, "");
+        assert_eq!(root.state, RepositoryState::Unknown);
+        assert_eq!(root.issues, vec![InspectionIssue::UnsupportedConfiguration]);
     }
 
     #[test]

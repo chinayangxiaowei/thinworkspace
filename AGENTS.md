@@ -47,7 +47,7 @@
 |---|---|---|
 | 项目品牌、仓库名和技术命名空间 | [仓库入口](README.md) | 决定 `ThinWorkspace`、`thinworkspace` 和 `thinws` 的用途 |
 | 产品范围、阶段、架构方向和能力边界 | [产品与架构演进方案 v2.1](docs/project/architecture/ThinWorkspace_产品与架构演进方案_v2.1.md) | 决定做什么、何时做以及如何演进 |
-| Phase 1 数据布局、只读 Git 检查、状态机和恢复 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
+| Phase 1 数据布局、只读 Git 检查、状态机和失败边界 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
 | 工作区物化、能力检测、跨卷和 Adapter 语义 | [跨平台工作区物化设计](docs/project/design/ThinWorkspace_跨平台工作区物化设计_v1.0.md) | 决定 Probe/Plan/Receipt 和平台实现契约 |
 | Rust、crate、Adapter、依赖和测试工具 | [技术栈](docs/project/reference/技术栈.md) | 决定使用什么技术以及依赖边界 |
 | 编码、安全、状态机、测试和评审规则 | [开发规范](docs/development/process/开发规范.md) | 决定代码必须如何实现和验证 |
@@ -62,7 +62,7 @@
 不同文档负责不同类型的事实，不使用笼统的全文优先级：
 
 - 阶段、产品边界和演进方向以架构方案为准；
-- Phase 1 生命周期、只读 Git 检查与恢复以 Phase 1 详细设计为准；
+- Phase 1 生命周期、只读 Git 检查与失败边界以 Phase 1 详细设计为准；
 - 物化、跨卷和 Adapter 语义以跨平台物化设计为准；
 - 已发布或已冻结的 CLI 行为以用户操作手册为准；
 - 技术选型以技术栈为准；
@@ -106,11 +106,11 @@
 |---|---|
 | 阶段、范围、架构或阶段能力 | 架构方案相关完整章节和阶段能力边界表 |
 | CLI 命令、参数、输出、JSON、错误码 | 用户操作手册对应章节；开发规范的 CLI 与兼容章节 |
-| Workspace 创建、删除、恢复、GC | Phase 1 详细设计的状态机、查询恢复和 GC 章节；开发规范相关章节 |
+| Workspace 创建、删除、未完成状态、GC | Phase 1 详细设计的状态机、查询与未完成状态和 GC 章节；开发规范相关章节 |
 | init、bootstrap config 或 data root 身份 | Phase 1 详细设计的实例与 data root 章节；技术栈的实现选型章节 |
 | APFS、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的 macOS/APFS 选型章节 |
 | Git、子仓库、branch、worktree 或旧 Base 路线 | Phase 1 详细设计的只读 Git 检查章节、ADR-0002；技术栈和开发规范相关章节；交付追加任务流程 §13.1 |
-| 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/恢复章节；开发规范 §13；任务流程 §13.1 |
+| 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/失败边界章节；开发规范 §13；任务流程 §13.1 |
 | 内部子进程、超时或外部进程占用检查 | Phase 1 详细设计的外部进程占用章节；用户手册的删除契约；技术栈和开发规范相关章节 |
 | 新依赖、工具链或 CI | 技术栈的选型、测试、供应链和发布章节 |
 | 许可证、商业使用、贡献权属、商业授权申请或对外授权称谓 | 完整读取 `LICENSE.md`、`LICENSING.md` 与 `COMMERCIAL-LICENSING.md`；涉及依赖时追加技术栈的供应链章节 |
@@ -140,15 +140,16 @@
 - P1 是单机 CLI，不引入常驻服务、HTTP/gRPC、消息队列、远程控制面或异步运行时。
 - P1 交付可直接使用的普通工作区路径，不包装用户命令，不接管语言工具链、构建目录重定向或缓存共享策略；职责收缩依据见 [ADR-0001](docs/project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)。
 - P1 直接镜像原始目录，创建不依赖 Git，不实现托管 Repository/Base 或自动分支/提交/PR。清理提示只针对已跟踪变更，允许显式强制并持久记日志；commit 交付由任务流程 §13.1 和主管 Agent 验收，不设为底层不可绕过的释放条件。依据见 [ADR-0002](docs/project/architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)。
+- P0/P1 中断恢复已取消，未完成目录不自动续做或修复；仅允许用户显式清理受控残留。依据见 [ADR-0003](docs/project/architecture/adr/ADR-0003_Phase1不实现中断恢复.md)。
 - 依赖方向固定为 `cli → application → core/ports`，Adapter 实现 Port；Core/Application 不直接调用具体 OS、Git CLI 或 SQLite API。
 - Port 的完整名单和语义以 Phase 1 详细设计为准；未先更新该设计和相关 ADR，不得新增平行抽象。
 
-### 4.2 数据安全与可恢复性
+### 4.2 数据安全与失败边界
 
 - 不得静默降级、把预检当成执行成功、把目录存在当成 Ready，或在无法证明安全时覆盖/删除/迁移数据。
 - 文件物化必须遵循《跨平台工作区物化设计》的 Probe/Plan/Revalidate/Execute/Receipt 契约；Adapter 只报告事实，降级政策由 Core/Application 决定。
 - 受控对象必须由类型 ID 和已验证根目录推导；禁止任意 Workspace 路径、路径逃逸、跟随未验证符号链接，或用 shell/glob/未验证环境变量选择删除目标。
-- 文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有过渡状态/operation、Receipt 和幂等协调路径。Git 检查只读，不自动修改来源或副本的 Git 元数据。
+- 文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有非 Ready 过渡状态，完整物化后才记录最终 Receipt。P0/P1 不实现中断操作重放、自动续做或 `doctor --repair`；未完成目录仅由用户重新显式授权清理整个受控工作区。Git 检查只读，不自动修改来源或副本的 Git 元数据。
 - 平台内部 Git 与子进程使用 argv 调用，不通过 shell 拼接；工作区不是 Sandbox，不得宣称用户直接运行的命令受安全隔离。
 - 清理成功或强制清理日志不能作为任务完成证明；主管 Agent 按《任务流程》核验实际 commit，不在产品实现中增加交付证明机制。
 - 不记录密钥、完整环境、完整 argv、源码正文或未脱敏凭据 URL。
@@ -181,7 +182,7 @@
 - 子 Agent 严禁自行把问题复杂化。确实无法在现有边界内安全解决时，必须向主 Agent 报告原始问题、已验证证据、简单方案为何不足、拟增加的复杂度及影响范围，并暂停扩项；由主 Agent 决定简化后当前处理、拆成独立任务并排期，或修改对应权威文档和实施计划，明确承认该缺口、限制与暂不实现的边界。未经主 Agent 决定，不得继续增加机制掩盖缺口。
 - 每个行为变更遵循《任务流程》的“对齐 → RED → GREEN → 重构 → 本地门禁 → 自查 → 提交”；RED 必须确认测试因预期原因失败。
 - Adapter 返回结构化证据；禁止用布尔 `supported=true` 表达不同保证强度。
-- 外部操作前记录 operation/过渡状态，完成后记录 Receipt；失败保留可解释状态。
+- 外部操作前记录非 Ready 过渡状态，完整物化后记录最终 Receipt；失败保留可解释状态，不自动重放。
 - 用户可见行为、错误码或阶段边界变化时同步修改对应权威文档。
 - 测试和评审证据写入已有任务、PR、CI 或阶段状态载体；不新建独立 Agent 审核轮次或交接报告。
 - 子 Agent 发现规则或文档错误时不得擅自修改；必须把位置、证据、影响和修改建议通知主 Agent，由主 Agent 核验并决定是否及如何修改。错误会影响实现或安全边界时，暂停受影响工作。
@@ -191,7 +192,7 @@
 | 变化 | 必须修改的单一来源 | 只做联动检查的位置 |
 |---|---|---|
 | CLI 命令、输出或错误码 | 用户手册 | `--help`、fixture 和 CLI 测试；其他文档只检查引用是否失效 |
-| Workspace 状态、恢复或 Git 检查语义 | Phase 1 详细设计 | migration、故障注入和只读 Git 集成测试 |
+| Workspace 状态、失败边界或 Git 检查语义 | Phase 1 详细设计 | migration、未完成状态和只读 Git 集成测试 |
 | PlatformProbe、Materializer 或跨卷语义 | 跨平台物化设计 | 平台 Adapter、真实文件系统测试和技术选型 |
 | 阶段名称、范围或演进边界 | 架构方案 | 任务阶段映射和用户手册的可见边界 |
 | 新依赖、系统 API 或质量工具 | 技术栈 | lockfile、供应链检查和 CI |

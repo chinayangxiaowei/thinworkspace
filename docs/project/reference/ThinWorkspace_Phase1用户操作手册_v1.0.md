@@ -36,11 +36,11 @@ thinws doctor
 
 首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；这是已有实验环境与后续资格目标，不代表新流程或所有旧 macOS 已验收。Git 仅用于按需检查，缺少 Git 不影响目录物化。
 
-init 只接管新目录、空目录或属于本次实例中断初始化且可验证的目录。重复指定原路径幂等；指定另一 data root 返回 E_DATA_ROOT_CHANGE_UNSUPPORTED，非归属的非空目录返回 E_DATA_ROOT_NOT_EMPTY。无 reset/migrate。
+init 只接管新目录或空目录；已完整初始化且身份一致时重复指定原路径幂等。中断初始化留下的非空目录不自动接管，需用户核对后在平台之外显式处理。指定另一 data root 返回 E_DATA_ROOT_CHANGE_UNSUPPORTED，非归属的非空目录返回 E_DATA_ROOT_NOT_EMPTY。无 reset/migrate。
 
 配置固定在 `~/Library/Application Support/ThinWorkspace/config.toml`，不通过环境变量切换。数据卷身份必须与登记匹配；卷不在线时不在其他位置新建替代目录。
 
-doctor 默认只读，报告主机、数据根与 Git 检查是否可用。只读预检不是 CoW 成功证据。显式 `doctor --repair` 才恢复已登记的中断操作；不自动扩大清理范围或增加 force。
+doctor 只读，报告主机、数据根、未完成工作区与 Git 检查是否可用。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 
 ## 四、原始目录镜像
 
@@ -68,9 +68,9 @@ Git setup:       not performed
 
 加 `--dry-run` 只展示当前 source/target 卷关系、目标路径模式、后端计划和降级原因，不分配 WorkspaceId、不预留名称、不保留可执行 plan token。正式创建重新检测。
 
-名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称全局唯一，实际目录只由 WorkspaceId 推导。后续命令可以用名称或完整 ID；Workspace/Operation ID 分别为 `ws_`/`op_` 加标准小写 UUIDv7。示例缩写不是真实可执行 ID。
+名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称全局唯一，实际目录只由 WorkspaceId 推导。后续命令可以用名称或完整 ID；Workspace ID 为 `ws_` 加标准小写 UUIDv7。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
 
-相同名称、规范源路径和创建策略，若已有 Ready 记录则返回原副本，不重新复制，也不比较源是否已变。想复制当前源的新内容必须使用新名称；同名参数不同返回 E_NAME_CONFLICT，原记录未 Ready 返回 E_RECOVERY_REQUIRED。该幂等返回不会因来源随后消失而失效。
+相同名称、规范源路径和创建策略，若已有 Ready 记录则返回原副本，不重新复制，也不比较源是否已变。想复制当前源的新内容必须使用新名称；同名参数不同返回 E_NAME_CONFLICT，原记录未 Ready 返回 E_WORKSPACE_INCOMPLETE。该幂等返回不会因来源随后消失而失效。
 
 ### 4.2 复制哪些内容
 
@@ -120,11 +120,10 @@ Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修�
 |---|---|---|---|---|
 | list/status | 只读诊断 | 只读查询 | 只读诊断 | 只读诊断 |
 | path | 拒绝 | 允许 | 拒绝 | 拒绝 |
-| remove | 先 repair | 检查后执行 | 原 flags 幂等继续 | 仅在归属和清理意图可证明时允许 |
+| remove | 仅显式 --force 清理 | 检查后执行 | 仅显式 --force 清理 | 仅显式 --force 清理 |
 | doctor | 只读 | 只读 | 只读 | 只读 |
-| doctor --repair | 验证后继续或 Error | 只修复已证实不一致 | 续跑原意图 | 安全恢复或报告 |
 
-查询不写平台状态或 Git 元数据。Git unknown 不自行将 Ready 改成 Error。物化与恢复未证明完整时不能仅因目录存在返回 Ready。
+查询不写平台状态或 Git 元数据。Git unknown 不自行将 Ready 改成 Error。物化未证明完整时不能仅因目录存在返回 Ready。
 
 ## 六、清理工作区
 
@@ -171,7 +170,7 @@ thinws workspace remove auth-refresh --force
 
 force 明确授权丢弃副本内容，绕过 tracked dirty 和 Git 检查不完整；不要求填写理由、提供 commit、联网或取得主管在线批准。无额外交互确认，脚本中的显式 flag 就是清理意图。
 
-force 不绕过实例/目标归属、卷身份、路径安全和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。
+force 不绕过实例/目标归属、卷身份、路径安全和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。成功时删除整个已登记的 `workspaces/<workspace-id>/` 目录；data root 内的日志保留。
 
 ```text
 Workspace removed
@@ -182,7 +181,7 @@ Log: /Volumes/data/thinws-data/logs/operations.jsonl
 Delivery verification: not performed
 ```
 
-普通拒绝后可改用 force；删除已开始后，重复命令必须携带原 force 值，否则返回 E_RECOVERY_REQUIRED。repair 不自行增加 force。
+普通拒绝后可改用 force。删除已开始但未完成时，不自动续做；只能由用户再次显式执行 `remove --force`，在重新验证受控目录归属与当前占用后清理整个剩余目录，包括 `.git`。
 
 ### 6.3 日志与结果边界
 
@@ -224,21 +223,20 @@ thinws gc
 thinws gc --yes
 ```
 
-dry-run 只显示可回收 staging/trash 残留及大小估算，不删除、不预留计划。实际 GC 在交互终端要求确认；非交互必须 --yes。GC 不删除活跃 Workspace（包括 Error）、未完成操作、日志、源目录或外部缓存，也不执行 Git object GC/prune。
+dry-run 只显示可回收 staging/trash 残留及大小估算，不删除、不预留计划。实际 GC 在交互终端要求确认；非交互必须 --yes。GC 不删除任何活跃 Workspace（包括 Creating、Deleting、Error）、日志、源目录或外部缓存，也不执行 Git object GC/prune。
 
 没有 Base 缓存可回收。普通副本文件逻辑大小不等于独占磁盘大小，实际回收共享块数量只提供可获得的估算，不保证零额外空间。
 
-## 九、故障恢复
+## 九、中断与失败边界
 
 ```bash
 thinws doctor
-thinws doctor --repair
 ```
 
-- 创建中断：普通查询仅报告；repair 验证已登记 Receipt，无法证明完整就保留 Error，不重新镜像变化后的源覆盖旧操作。
-- 删除中断：按持久化原意图和剩余范围继续，不要求已删除的 Git 数据仍可读取；发现范围变化或新占用则停止。
+- 创建中断：普通查询仅报告非 Ready 状态；不会续做或把残留目录当成可用工作区。确认无需保留后，可显式 `workspace remove <name> --force` 清理登记目录，再重新创建。
+- 删除中断：不自动续做，也不依赖可能已损坏的 Git 元数据作普通清理。若目录仍在，用户再次显式 `workspace remove <name> --force`，每次重新核对归属、卷及占用；确认整个目录已不存在后才报告成功。
 - 数据卷缺失：E_DATA_ROOT_UNAVAILABLE，不选择替代路径。
-- 归属/配置冲突：E_RECOVERY_REQUIRED；force 不覆盖身份冲突。
+- 归属/配置冲突：报告对应身份或布局错误；force 不覆盖身份冲突，也不删除未登记目录。
 - 已删除 Workspace 再按原完整 ID remove：依据本实例最小删除记录返回 already-removed，不删除任何同名新对象；按已不存在名称查询仍是 E_WORKSPACE_NOT_FOUND。
 
 ## 十、命令与 JSON 契约
@@ -248,7 +246,7 @@ thinws doctor --repair
 | 命令 | 成功 --json | 结果内容 |
 |---|---|---|
 | init | 支持 | data root、卷与初始化结果 |
-| doctor / doctor --repair | 支持 | 检查或逐项恢复结果 |
+| doctor | 支持 | 只读检查结果 |
 | workspace create / create --dry-run | 支持 | source、目标或目标模式、物化证据；dry-run ID 为 null |
 | workspace list | 支持 | 所有活跃记录的稳定排序数组 |
 | workspace status | 支持 | 当前状态、Git 检查完整性、逐仓库摘要和空间估算 |
@@ -337,7 +335,7 @@ JSON 模式 stdout 只输出一个文档，诊断写 stderr，持久异常日志
 | 33 | E_DATA_ROOT_LAYOUT | 源/目标同卷、包含关系或受控路径布局不合法 |
 | 35 | E_METADATA | SQLite/schema/元数据失败 |
 | 36 | E_DATA_ROOT_NOT_EMPTY | 非空 data root 无有效归属 |
-| 40 | E_RECOVERY_REQUIRED | 需要恢复或人工处理 |
+| 40 | E_WORKSPACE_INCOMPLETE | 工作区创建或清理未完成；只允许显式强制清理受控残留 |
 | 41 | E_LOCK_TIMEOUT | 生命周期锁等待超过 5 秒，未开始修改目标 |
 
 旧 Repository/Base/分支保护相关编号 13、14、17、18、19、24，以及旧执行包装编号 34 保留不再分配，不重新赋义。工具自身的退出码不受本表管理。
@@ -352,5 +350,5 @@ JSON 模式 stdout 只输出一个文档，诊断写 stderr，持久异常日志
 6. 普通拒绝返回非零且不删除；显式 force 可以清理并保留异常日志。
 7. 不要求 commit/push/PR 证明，不把清理当成交付。
 8. 外部引用、非原子快照和保真边界不被隐藏；不宣称完全 Git 隔离或安全 Sandbox。
-9. 路径/卷/占用保护、错误状态和显式恢复可解释。
+9. 路径/卷/占用保护和未完成状态可解释；无自动或 doctor 修复。
 10. 当前文档仅定义目标，全部相应自动和真实平台验收通过后才进入人工阶段放行。

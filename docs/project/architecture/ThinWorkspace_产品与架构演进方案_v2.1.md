@@ -72,7 +72,7 @@ PlacementGeneration
 Control Plane
 ```
 
-实现内部只保留实例、Workspace 和操作身份，不维护 Repository/Base 或固定 Git 基线。名称/ID、命令幂等和错误码只由用户手册管理；内部布局、状态和恢复由 Phase 1 详细设计管理。
+实现内部只保留实例、Workspace 和日志关联身份，不维护 Repository/Base 或固定 Git 基线。名称/ID、命令幂等和错误码只由用户手册管理；内部布局、状态和失败边界由 Phase 1 详细设计管理。
 
 ### 2.3 Phase 1 明确不做什么
 
@@ -123,7 +123,7 @@ CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例�
 ┌──────────────────────────────────────────────┐
 │ CLI：参数、人类输出、JSON、退出码       │
 ├──────────────────────────────────────────────┤
-│ Application：单机用例编排、锁和恢复协调    │
+│ Application：单机用例编排、锁和状态协调    │
 ├─────────────────────────────────────────────┤
 │ Core/Ports：身份、状态、策略和窄接口       │
 ├──────────────────────────────────────────────┤
@@ -139,7 +139,7 @@ Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCode
 
 为了避免架构方案同时承担产品路线图和实现手册，细节按两个独立设计域管理：
 
-- [Phase 1 单机 CLI 详细设计](../design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)：单机组件、data root、Workspace、只读 Git 检查、状态机、恢复、外部占用检查和 GC。
+- [Phase 1 单机 CLI 详细设计](../design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)：单机组件、data root、Workspace、只读 Git 检查、状态机、失败边界、外部占用检查和 GC。
 - [跨平台工作区物化设计](../design/ThinWorkspace_跨平台工作区物化设计_v1.0.md)：PlatformProbe、WorkspaceMaterializer、跨卷判定、CoW 证据、降级和平台 Adapter 契约。
 
 本文档只保留跨阶段架构决策和产品边界，不复制 trait 方法、SQLite 约束、系统调用序列、Git 命令参数或测试矩阵。
@@ -178,7 +178,7 @@ Linux Btrfs/XFS/OverlayFS 和 Windows ReFS 的历史起点、跨卷限制与接�
 
 ### 6.2 内部对象
 
-用户只需提供源目录并管理 Workspace。实现内部保留 Workspace、Operation 和最小删除结果；不创建 Repository/Base、用户执行记录、后台 Job、Agent 会话或交付证明对象。
+用户只需提供源目录并管理 Workspace。实现内部保留 Workspace、日志关联 ID 和最小删除结果；不创建可重放 Operation、Repository/Base、用户执行记录、后台 Job、Agent 会话或交付证明对象。
 
 ### 6.3 生命周期决策
 
@@ -186,12 +186,12 @@ Phase 1 的核心不变量是：
 
 1. 配置、data root 所有权标记和卷身份互相校验；数据卷丢失或变更时安全失败。
 2. Workspace 的可用性由持久化状态和可验证 Receipt 决定，不由目录是否存在决定。
-3. 创建、删除和 GC 可从中断中显式、幂等恢复。普通查询不隐式修复；不要求初始 Git clean。
+3. 创建或删除中断不自动续做、重放或修复；未完成工作区不是 Ready。用户可显式强制清理归属可证的整个受控工作区；不要求初始 Git clean。
 4. 普通清理仅对已跟踪变更强提示并拒绝，未跟踪文件不提示、不阻塞；显式强制可绕过内容检查且必须有持久日志。Git 提交、推送、PR 与主管验收由外部流程管理。已确认外部进程占用及路径归属保护仍保留；占用探测不承诺发现所有使用者。
 5. 用户直接在工作区运行工具，平台不托管或终止这些进程，也不自动配置其构建输出和缓存。
-6. GC 不删除活跃 Workspace、未完成 operation、日志或源目录。副本内部的 Git 数据随显式工作区清理一起删除，不承诺保留其中提交；产品不验证交付完成。
+6. GC 不删除任何活跃 Workspace、日志或源目录。副本内部的 Git 数据随显式工作区清理一起删除，不承诺保留其中提交；产品不验证交付完成。
 
-内部 ID、data root、Git 检查边界、状态迁移、operation/Receipt、删除和 GC 细节由《Phase 1 单机 CLI 详细设计》管理。命令和可见行为由 Phase 1 用户操作手册管理。
+内部 ID、data root、Git 检查边界、状态迁移、最终 Receipt、删除和 GC 细节由《Phase 1 单机 CLI 详细设计》管理。命令和可见行为由 Phase 1 用户操作手册管理。
 
 ---
 
@@ -199,7 +199,7 @@ Phase 1 的核心不变量是：
 
 ## 七、Phase 0 到 Phase 1 的转换
 
-Phase 0 验证原始目录物化、只读 Git 提示和可恢复清理，Phase 1 只实现这一条本机闭环。旧 Git/Base 实验不再是创建前置，历史结果保留；新范围仍须补实测，实验代码不直接升格为生产代码。
+Phase 0 验证原始目录物化、只读 Git 提示和显式整目录清理，Phase 1 只实现这一条本机闭环。旧 Git/Base 实验不再是创建前置，历史结果保留；新范围仍须补实测，实验代码不直接升格为生产代码。
 
 Phase 0/Phase 1 的任务编号、依赖和小阶段只由[《Phase 1 实施计划》](../../development/planning/ThinWorkspace_Phase1实施计划_v1.0.md)管理。Phase 0/Phase 1 的产品进入/退出控制点只由本文第十三节的阶段边界表管理；具体收口与人工放行操作由《任务流程》管理。
 
@@ -421,8 +421,8 @@ Node Runtime 继续使用相同的 Platform Adapters。控制面只消费统一�
 
 | 阶段 | 产品形态与用户概念 | 本阶段必须交付的能力 | 明确边界：本阶段不得承诺或引入 | 进入条件 | 退出控制点 |
 |---|---|---|---|---|---|
-| Phase 0 技术验证 | 非产品原型；目录与 Workspace | 路径检测；APFS/Full Copy；原样目录与元数据范围；主/子仓库已跟踪检查；强制清理日志与故障验证 | 不发布完整 CLI；无 Git 托管/Base、自动交付、daemon 或 UI | macOS/APFS 环境就绪；ADR-0002 与物化边界明确 | 同卷 CoW 与跨卷限制可复查；原样 .git/未跟踪/ignored 内容不被过滤；支持范围内只读 Git 检查准确；未知如实报告；普通拒绝不删，强制有日志；创建/删除中断可恢复或安全停止 |
-| Phase 1 单机 CLI | 一个二进制；源目录与 Workspace | 目录镜像与普通路径交付；Host/Path Probe；同卷 APFS/显式 Full Copy；按需 tracked 检查；SQLite 生命周期；普通/强制清理及日志；doctor、空间统计与受限 GC | 无 Git 接入/托管/Base/分支管理或自动 commit/push/PR；无提交交付硬门禁、独立审计系统、用户命令包装或缓存策略；无跨卷产品布局、后台服务、实时协同或 Sandbox 保证 | 当前未取消的 Phase 0 控制点通过；原始目录与检查/清理语义已实测 | 10 个副本的普通文件写入独立；非 Git 目录可用；原样复制与声明的保真范围成立；未跟踪不提示、不阻塞，tracked 变更普通拒绝、显式强制有日志；不要求提交发布证明；路径和占用保护、恢复及 CLI/JSON 契约通过 |
+| Phase 0 技术验证 | 非产品原型；目录与 Workspace | 路径检测；APFS/Full Copy；原样目录与元数据范围；主/子仓库已跟踪检查；强制清理日志验证 | 不发布完整 CLI；无 Git 托管/Base、自动交付、daemon、UI 或中断恢复 | macOS/APFS 环境就绪；ADR-0002、ADR-0003 与物化边界明确 | 同卷 CoW 与跨卷限制可复查；原样 .git/未跟踪/ignored 内容不被过滤；支持范围内只读 Git 检查准确；未知如实报告；普通拒绝不删，强制有日志 |
+| Phase 1 单机 CLI | 一个二进制；源目录与 Workspace | 目录镜像与普通路径交付；Host/Path Probe；同卷 APFS/显式 Full Copy；按需 tracked 检查；SQLite 生命周期；普通/强制清理及日志；doctor、空间统计与受限 GC | 无 Git 接入/托管/Base/分支管理或自动 commit/push/PR；无提交交付硬门禁、独立审计系统、用户命令包装、缓存策略或中断恢复；无跨卷产品布局、后台服务、实时协同或 Sandbox 保证 | 当前未取消的 Phase 0 控制点通过；原始目录与检查/清理语义已实测 | 10 个副本的普通文件写入独立；非 Git 目录可用；原样复制与声明的保真范围成立；未跟踪不提示、不阻塞，tracked 变更普通拒绝、显式强制有日志；不要求提交发布证明；路径和占用保护、未完成状态及 CLI/JSON 契约通过 |
 | Phase 2 单机协同 | CLI＋本地 `thinwsd`；新增 WorkspaceCheckpoint、冲突预警 | Unix Socket RPC；Agent Adapter；ChangeObserver；重新扫描校准；prepare/apply；EditToken；文本冲突索引；WorkspaceCheckpoint；本机固定输入验证 | 不做 Remote Worker、网络控制面、Job 调度、Workspace 迁移和多节点所有权；不把非受管写入标成写前预警 | Phase 1 稳定运行；确有多个 Agent 同机协同需求；选定至少一种可控编辑接入 | 受管修改在写入前看到有效报告；竞态会要求重新 prepare；事件丢失可校准；非受管写入明确标为写后发现；WorkspaceCheckpoint 可恢复 Git 和源码状态 |
 | Phase 3 远程验证 | 本机开发＋远程 Worker；新增 SourceSnapshot、Job、Attempt、Worker | 可移植 SourceSnapshot；CAS/传输；Worker 注册与租约；远程执行；日志、结果和产物；环境/配方摘要；重试 attempt | 不做远程可写 Workspace、开发任务迁移、源码双向同步、跨机共享可变构建目录和多节点编辑 | Phase 2 的内容清单/寻址内部能力已稳定；SourceSnapshot schema 与泄漏边界 ADR 已批准；重型验证成为已测量瓶颈；外部 Sandbox/Worker 信任模型明确 | 结果严格绑定 SourceSnapshot 和环境摘要；不同 SourceSnapshot/配方摘要的结果互不污染；重试不覆盖旧 attempt；节点丢失、环境失败、测试失败可区分 |
 | Phase 4 多节点开发 | 控制面＋Node Runtime；新增 Task、Node、Placement、Generation | Workspace Registry；节点能力报告；放置；全局协调；写入 generation；停机恢复迁移；中央元数据 | 不做同一 Workspace 多节点同时写；不做进程热迁移；不承诺分区期间实时预警；旧节点本地写入不能被描述为物理上已停止 | Phase 3 稳定；存在开发 Workspace 必须远程放置的真实需求；RPO/RTO 已定义 | 旧 generation 无法正式发布；失联修改被隔离为 fork；事件重复/乱序可恢复；新节点内容与持久化 WorkspaceCheckpoint 一致 |
@@ -433,7 +433,7 @@ Node Runtime 继续使用相同的 Platform Adapters。控制面只消费统一�
 1. 阶段只允许增加能力，不改变已经发布对象的身份和已有 CLI 语义；破坏性变化必须版本化迁移。
 2. Phase 1 代码中不得出现 Job、Node、Placement、远程租约等未来领域概念；只允许存在不依赖这些概念的窄 Port。
 3. support、计划、执行证据、保证强度和 fallback 是不同维度，任何界面和 JSON 不得混用。
-4. “实验支持”不能计入退出控制点；必须有故障注入、可重复测试和明确恢复路径。
+4. “实验支持”不能计入退出控制点；必须有可重复测试和明确失败边界。中断后的不成功状态不得冒充自动恢复。
 5. 新平台先实现 PlatformProbe 和能力矩阵，再实现对应 WorkspaceMaterializer Adapter，最后才加入产品支持列表。
 6. 超出阶段边界的用户请求可以记录为需求，但不能通过隐藏配置变成未验收功能。
 
@@ -458,7 +458,7 @@ APFS Clone 主后端
 原始目录按当前磁盘内容复制
 按需已跟踪变更提示、显式强制与持久日志
 普通路径直接交给用户、编辑器和 Agent
-路径安全、清理提示和故障恢复
+路径安全、清理提示和失败边界
 ```
 
 第一期明确不解决：

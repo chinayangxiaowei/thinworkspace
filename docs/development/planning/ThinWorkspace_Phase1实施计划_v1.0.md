@@ -32,12 +32,12 @@ P0 的产物是可重复实验、ADR 和失败边界，不是可直接发布的�
 | P0-01 Host/Path Probe 实验 | 可稳定识别主机、APFS Volume ID、可写性和路径身份变化 | 无 | R4 | Done |
 | P0-02 APFS clone 与跨卷实验 | 证明同卷 CoW、跨卷失败、显式 Full Copy 及 partial rollback | P0-01 | R4 | Done |
 | P0-03 Git 托管拓扑与 Base 实验（已取消） | 原方案不再实施；历史实验及未提交候选保留，不作为新路线通过证据 | 不再参与依赖 | —（历史 R4） | Cancelled |
-| P0-04 生命周期故障注入 | 证明原始目录创建、普通/强制清理与日志中断可恢复或安全停止 | P0-06、P0-07 | R4 | Backlog |
+| P0-04 生命周期故障注入（已取消） | 中断恢复不再属于 P0/P1；已有未合并实验仅保留为历史输入，不作为通过证据 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P0-05 文件副本锁隔离验证 | 可重复的 macOS 文件身份/锁/时间戳实验，形成是否需要锁冲突处理的 Go/No-Go | P0-02 | R4 | Done |
 | P0-06 原始目录镜像验证 | 非 Git/完整 .git/ignored 文件物化与首版 mtime 范围、源一致性边界及无 Git 控制项 | P0-02 | R4 | Done |
 | P0-07 已跟踪检查与清理提示验证 | 主/子仓库 tracked-only、Git unknown、显式强制与持久日志的最小真实验证 | P0-06 | R4 | Done |
 
-P0-03 因 ADR-0002 取消，旧属性/sparse 兼容选择不再阻塞新路线；不再启动其旧全量收尾批次。P0-06/P0-07 为新任务，不复用已取消编号；两项任务级验收证据见下方链接。P0-04 按新依赖和当前顺序执行。
+P0-03 因 ADR-0002 取消，旧属性/sparse 兼容选择不再阻塞新路线；不再启动其旧全量收尾批次。P0-06/P0-07 为新任务，不复用已取消编号；两项任务级验收证据见下方链接。P0-04 按 [ADR-0003](../../project/architecture/adr/ADR-0003_Phase1不实现中断恢复.md) 取消，不把未合并实验代码并入产品。
 
 P0-05 是新增 Spike，不预设“扫描后重写”方案成立；首次执行顺序与时间预算见 §3.2，不改变已完成任务的状态。
 
@@ -49,7 +49,8 @@ P0-05 是新增 Spike，不预设“扫描后重写”方案成立；首次执�
 |---|---|---|---|
 | P0.a 路径能力证据 | P0-01 | 实际路径的卷身份、权限和缺失目标证据可复查；路径/符号链接替换被识别；预检不产生 CoW confirmed | Rust 通用门禁、真实 APFS 和跨卷身份测试、受影响 crate 全量变异、路径 fuzz、专项审核 |
 | P0.b 原始目录与清理可行性 | P0-02、P0-05、P0-06、P0-07 | 目录原样物化和首版保真范围可复查；tracked-only/子仓库检查、显式 force 和日志准确；锁隔离有实测结论，不预设修复功能 | 小阶段门禁、真实 clone/跨卷/回滚、只读 Git、强制日志和双进程锁验证 |
-| P0.c 故障闭环 | P0-04 | 创建/删除中断可恢复或安全停止；P0 阶段退出控制点逐项有证据 | 完整阶段门禁和人工放行 |
+
+P0.b 收口后直接核对 P0 阶段退出控制点、执行完整阶段门禁并请求人工放行；不再设置 P0.c 或 P0-04 前置。
 
 P0-01 从文档基线 `f7a400f` 开始，工作分支为 `task/p0-01-host-path-probe`。本次使用 FD 与卷属性 FFI，按最高影响将风险从 R3 调整为 R4。验收断言、实际命令、审核结论和未完成项统一记录在 [P0-01 实施记录](../implementation/P0-01_HostPathProbe实验.md)。P0.a 收口不代表整个 P0 放行。
 
@@ -59,7 +60,7 @@ P0-02 已获规定模型正式 Approve，审核后真实 Verification 和远端�
 
 旧 P0-03 的准入、实验和未完成门禁保存在 [P0-03 历史记录](../implementation/P0-03_Git与Base实验.md)。取消不等于验收通过，不删除其中代码、失败日志、scratch 或保留工作区；可复用的小型代码须在新任务中独立审查，不能带回 Git/Base 领域。
 
-当前顺序：P0-06/P0-07/P0-05 已完成 → 优先处理 §3.4 的现阶段 Issues → P0-04 故障闭环 → 按依赖进入 P1。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 的审核、Verification、门禁及 PR #7 合并见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 的首轮实测、精确审核、候选 CI 与 PR #8 合并见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)。各任务 Done 不扩大验证范围，也不代表 P0.b 或整个 P0 放行。
+当前顺序：P0-06/P0-07/P0-05 已完成 → 核验当前未取消的 P0 控制点与阶段门禁 → 人工确认 P0 放行 → 按依赖进入 P1。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 的审核、Verification、门禁及 PR #7 合并见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 的首轮实测、精确审核、候选 CI 与 PR #8 合并见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)。各任务 Done 不扩大验证范围，也不代表 P0.b 或整个 P0 放行。
 
 ### 3.2 P0-05 排期与实施准入
 
@@ -105,12 +106,12 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 |---|---|
 | [#16](https://github.com/chinayangxiaowei/thinworkspace/issues/16) | 已通过 [PR #18](https://github.com/chinayangxiaowei/thinworkspace/pull/18) 合并并关闭；P0.b 测试可靠性修复，不重开已 Done 的 P0-07，不改变生产配置策略 |
 | [#10](https://github.com/chinayangxiaowei/thinworkspace/issues/10) | 在 #16 后处理同一模块的配置窄化；先以真实查询/安全反例明确范围，不同时改写相同关键文件 |
-| [#15](https://github.com/chinayangxiaowei/thinworkspace/issues/15) | 由 P0-04 验证跨进程故障边界，P1-02/P1-09/P1-12 等按既有依赖实现产品闭环；不以实验 connector 冒充产品，也不在 P0 预建整套 P1 |
-| [#11](https://github.com/chinayangxiaowei/thinworkspace/issues/11) | 作为 P1 可安装纵向交付的跟踪入口，落实下文工程、创建、查询、清理、恢复和发布验收；不提前宣称 CLI 可用 |
+| [#15](https://github.com/chinayangxiaowei/thinworkspace/issues/15) | 维护者已取消中断恢复范围；本地计划不再据此实施 P0-04 或 P1 repair，远端 Issue 状态未在本次修改 |
+| [#11](https://github.com/chinayangxiaowei/thinworkspace/issues/11) | 作为 P1 可安装纵向交付的跟踪入口，落实下文工程、创建、查询、清理和发布验收；不提前宣称 CLI 可用 |
 | [#14](https://github.com/chinayangxiaowei/thinworkspace/issues/14) | 先确定可重复数据集与基准环境并测基线，再冻结 P1 发布指标；数值和大规模资源预算不得凭空填写，未验证前不增加性能承诺 |
 | [#12](https://github.com/chinayangxiaowei/thinworkspace/issues/12)、[#9](https://github.com/chinayangxiaowei/thinworkspace/issues/9)、[#13](https://github.com/chinayangxiaowei/thinworkspace/issues/13) | 按维护者决定暂缓，不主动变更这些 Issue 的远端状态；不修改许可、普通清理或路径交付契约，不继续追问；仅在维护者明确恢复后再处理 |
 
-#11/#15 的完整解决依赖 P0-04/P1，不能把“所有 Issues 先关闭”反向设为这些任务的前置条件。#16 完成后当前处理 #10；其他工作按上表与既有阶段依赖展开。暂缓不等于问题已修复或阶段放行豁免。
+#11 依赖 P1 交付；#15 的原中断恢复范围已撤销，不能把“所有 Issues 先关闭”反向设为基础功能的前置条件。#10 和 #14 不阻塞 P1 的最小功能链；暂缓不等于问题已修复或阶段放行豁免。
 
 ## 四、P1 实施序列
 
@@ -125,10 +126,10 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Backlog |
-| P1-02 BootstrapStore、SQLite schema、双 scope 锁和 operation | 可迁移 schema、实例身份、并发唯一性和恢复记录 | P1-01 | R4 | Backlog |
-| P1-03 init/doctor | 完成可见初始化、能力诊断和 bootstrap 恢复边界 | P1-02 | R3 | Backlog |
+| P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Backlog |
+| P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
 
-小阶段退出：全新、幂等、中断和冲突初始化都有自动证据；未经验证的 data root 不被接管。
+小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
 
 ### 4.2 原 P1.b Git 托管任务处置
 
@@ -146,9 +147,9 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Backlog |
 | P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-03、P0-06 | R4 | Backlog |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
-| P1-09 Workspace create/reconciliation | 从 source 直接镜像、Creating 到 Ready/Error 及中断恢复 | P1-06、P1-07 | R4 | Backlog |
+| P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
 
-小阶段退出：非 Git 来源、原样目录范围、默认 CoW、显式复制、路径竞态、partial rollback 和恢复通过；Ready 不要求 Git clean。
+小阶段退出：非 Git 来源、原样目录范围、默认 CoW、显式复制、路径竞态和 partial rollback 通过；未完成目录不被误报 Ready，Ready 不要求 Git clean。
 
 ### 4.4 P1.d 查询与路径交付
 
@@ -164,7 +165,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe、幂等清理 | P1-09、P1-16 | R4 | Backlog |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | Backlog |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
@@ -174,7 +175,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | Backlog |
-| P1-15 Phase 1 端到端与故障验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据 | 全部未取消的前置 P1 任务 | R4 | Backlog |
+| P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | Backlog |
 
 小阶段退出：全部公开契约与发布二进制一致，未执行门禁和剩余风险已列出，进入人工阶段放行。
 
@@ -187,7 +188,6 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 ```text
 P0-01 → P0-02 → P0-06 → P0-07
               └→ P0-05
-P0-06、P0-07 → P0-04
 
 P0 当前未取消任务与阶段条件 → P1-01 → P1-02 → P1-03
 P1-03、P0-06 → P1-06 / P1-07 → P1-09

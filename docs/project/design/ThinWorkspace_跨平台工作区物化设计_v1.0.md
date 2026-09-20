@@ -74,7 +74,7 @@ trait WorkspaceMaterializer {
 
 Materializer 从原始目录物化计划指定的文件项；它不调用 Git、不按 `.gitignore` 或 Git 跟踪状态过滤、不识别开发语言，也不制定构建目录或缓存策略。目标必须不存在或是本操作已验证的空目录；没有预建 `.git` 控制项。来源 `.git` 与其他名称同样处理，不保留 Git 特判。
 
-`materialize` 的失败可携带 partial receipt。`destroy_materialization` 在 Application 授权后，以 dirfd-relative/no-follow 方式幂等清理已验证副本内的全部内容，包括 `.git`、未跟踪文件和后来生成的文件；不跟随链接清理外部目标。平台状态和日志在副本 root 外，不属于该范围。返回本次删除、原本不存在和仍未清理的对象，不能丢失恢复证据。
+`materialize` 的失败可携带 partial receipt。`destroy_materialization` 在 Application 授权后，以 dirfd-relative/no-follow 方式清理已验证副本 `root/` 内的全部内容，包括 `.git`、未跟踪文件和后来生成的文件；不跟随链接清理外部目标。Application 随后删除同一 WorkspaceId 下的 `.state` 和空容器目录；data root 日志不属于删除范围。返回本次删除、原本不存在和仍未清理的对象，供失败诊断；不承诺中断后自动续做。
 
 ### 3.3 输入内容与保证范围
 
@@ -204,7 +204,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | 真实 clone 以“同卷不支持”失败，且允许 Full Copy | 先依 partial receipt 回滚并确认清理，再重新 Probe/Plan；不得留下 Clone/Copy 混合树 |
 | `EXDEV`/卷身份变化 | 数据根布局错误，不降级 |
 | `ENOSPC` | 空间失败，不降级 |
-| 回滚无法确认 | 保留 operation/partial receipt，转恢复流程，不启动第二后端 |
+| 回滚无法确认 | 保留非 Ready 状态与 partial receipt，报告失败，不启动第二后端；后续仅允许用户显式清理受控目录 |
 
 ---
 
@@ -219,7 +219,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | Windows Server ReFS Block Clone | Windows Server 2016 | 支持块克隆的 ReFS 卷格式 | 未排期 |
 | Windows 11 ReFS 优化复制 | Windows 11 24H2 | 支持的系统复制操作与 ReFS 卷 | 未排期 |
 
-历史起点只是候选能力，不是本产品支持承诺。新组合必须经过 Host Probe、Path Probe、真实执行、故障和恢复验证后才可加入发布矩阵。
+历史起点只是候选能力，不是本产品支持承诺。新组合必须经过 Host Probe、Path Probe、真实执行及失败边界验证后才可加入发布矩阵。
 
 ---
 

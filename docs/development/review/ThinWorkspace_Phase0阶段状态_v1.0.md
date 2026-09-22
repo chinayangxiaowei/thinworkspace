@@ -25,7 +25,7 @@
 | 普通拒绝不删，显式强制有日志 | P0-07 已验收；当前候选清理、日志和失败注入回归在 Debug/Release 均通过 | 已满足，待独立审核 |
 | 锁隔离形成 Go/No-Go 结论 | P0-05 L1–L7 结论为不实现“扫描＋重写”；当前候选真实双进程锁回归通过 | 已满足，待独立审核 |
 
-任务 Done 与上表技术证据都不等于阶段放行。完整变异、独立审核及人工确认仍是阻断项。
+任务 Done 与上表技术证据都不等于阶段放行。完整变异、审核后 Verification 及人工确认仍是阻断项。
 
 ## 四、当前阶段门禁证据
 
@@ -42,17 +42,24 @@
 ## 五、全 workspace 变异执行登记
 
 - 候选：`6f9a85d`；执行负责人：主 Agent。
-- 计划启动：2026-09-22 08:06 UTC；首次主动查看按无当前可比完整 workspace 成功批次暂定为启动后 1 小时。
 - 范围：`cargo-mutants 27.1.0` 的完整 workspace 选择集；不使用模块、crate 或 diff 过滤。
 - 固定参数：单变异超时 60 秒、并发 2、`--leak-dirs`、`--test-workspace true`，测试参数 `--include-ignored --nocapture`。
 - 入口：`python3 -B tools/ci_mutation.py --scope workspace`；结果位置：`target/mutants.out/outcomes.json`。
 - 执行期间不修改生产源码、测试、依赖、fuzz harness、工具或变异配置；文档结果回填按《任务流程》§18.1 单独核验，不冒充重新执行。
-- 当前结果：待运行。
 
-## 六、尚未完成
+首次运行于 2026-09-22 08:06:19 UTC 启动，工具枚举出 1,091 个 mutants，但 unmutated baseline 因未设置 `THINWS_P0_CROSS_VOLUME_ROOT` 而在真实跨卷 ignored 测试失败，08:06:46 UTC 以 exit 4 结束。结果为 0 caught、0 missed、0 timeout、0 unviable、0 success，明确是环境配置失败，不能作为变异证据；原始结果移入忽略目录 `target/p0-stage-mutation-baseline-env-failure/` 保留。
 
-1. 全 workspace 变异取得完整终态，并处置所有 missed/timeout 或证据异常。
-2. GPT-6 Astra / `xhigh` 对最终本地候选做只读独立审核；审核 Agent 不修改文件、不创建分支或 PR。
-3. 主 Agent 在审核后完成 Verification，列明 Critical/High、Normal/Low 和开放边界。
+重跑保持同一 1,091 项完整范围和全部固定参数，在 `/private/tmp` 创建专用 APFS 镜像并同时设置 `THINWS_P0_CROSS_VOLUME_ROOT`、`THINWS_P0_SUBMOUNT_SOURCE`；运行结束后使用仓库受控 helper 卸载精确镜像。实际启动时间、结果目录、完整计数和耗时在终态后补记；首次主动查看仍按重跑启动后 1 小时，用户明确要求查看时可提前读取。
+
+## 六、独立审核
+
+GPT-6 Astra / `xhigh` 已对 `6f9a85d` 及证据载体 `dd2b7c1` 完成只读独立审核并 Approve：Critical、High 和阻断性 Normal finding 均为 0。审核未修改文件、创建分支或运行耗时门禁，也没有把 mutation、在线公告刷新、Verification 或人工放行记为完成。
+
+本次任务流程与阶段状态回填发生在上述审核之后；最终提交前须由同一规定模型只读复核这段文档增量，不把前一次 Approve 外推到未读差异。
+
+## 七、尚未完成
+
+1. 在完整 APFS 环境重跑全 workspace 变异，取得终态并处置所有 missed/timeout 或证据异常。
+2. 串行刷新 RustSec 公告数据库并重跑根/fuzz audit；不能只沿用 2026-09-09 的本地快照作为最终在线证据。
+3. GPT-6 Astra / `xhigh` 复核审核后的文档增量；主 Agent随后完成 Verification，列明 Critical/High、Normal/Low 和开放边界。
 4. 维护者对明确的 Phase 0 候选与证据人工确认放行；确认前不打 tag、不进入 P1-01。
-

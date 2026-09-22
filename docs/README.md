@@ -55,6 +55,8 @@
 
 ### 实施与审核
 
+实施记录按发生时序保留当时的计划、失败和未完成表述，不随每次后续决策重写历史。当前任务状态与依赖只看《Phase 1 实施计划》；其中对 P0-04“后续实施”的旧表述已由 ADR-0003 取代，不表示该任务仍待执行。
+
 - [P0-01 Host/Path Probe 实施记录](development/implementation/P0-01_HostPathProbe实验.md)：任务验收断言、实验结果、审核结论与未完成项；不定义产品接口。
 - [P0-02 APFS clone 与跨卷实施记录](development/implementation/P0-02_APFS物化实验.md)：物化实验准入、失败补偿验收、执行证据与剩余边界。
 - [P0-03 Git 与 Base 历史档案](development/implementation/P0-03_Git与Base实验.md)：已取消路线的实验与失败证据，原位归档；不作为当前设计或继续执行的依据。

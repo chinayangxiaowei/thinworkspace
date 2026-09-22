@@ -105,7 +105,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | Issue | 当前安排与边界 |
 |---|---|
 | [#16](https://github.com/chinayangxiaowei/thinworkspace/issues/16) | 已通过 [PR #18](https://github.com/chinayangxiaowei/thinworkspace/pull/18) 合并并关闭；P0.b 测试可靠性修复，不重开已 Done 的 P0-07，不改变生产配置策略 |
-| [#10](https://github.com/chinayangxiaowei/thinworkspace/issues/10) | 在 #16 后处理同一模块的配置窄化；先以真实查询/安全反例明确范围，不同时改写相同关键文件 |
+| [#10](https://github.com/chinayangxiaowei/thinworkspace/issues/10) | 已通过 [PR #19](https://github.com/chinayangxiaowei/thinworkspace/pull/19) 合并配置窄化修复；不重开已 Done 的 P0-07，不把该修复扩大为通用 Git 配置兼容层 |
 | [#15](https://github.com/chinayangxiaowei/thinworkspace/issues/15) | 维护者已取消中断恢复范围；本地计划不再据此实施 P0-04 或 P1 repair，远端 Issue 状态未在本次修改 |
 | [#11](https://github.com/chinayangxiaowei/thinworkspace/issues/11) | 作为 P1 可安装纵向交付的跟踪入口，落实下文工程、创建、查询、清理和发布验收；不提前宣称 CLI 可用 |
 | [#14](https://github.com/chinayangxiaowei/thinworkspace/issues/14) | 先确定可重复数据集与基准环境并测基线，再冻结 P1 发布指标；数值和大规模资源预算不得凭空填写，未验证前不增加性能承诺 |

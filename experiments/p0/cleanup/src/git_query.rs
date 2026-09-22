@@ -1087,6 +1087,39 @@ mod tests {
     }
 
     #[test]
+    fn preserved_query_environment_is_forwarded_exactly() {
+        let cwd = Path::new("/tmp/thinws-p0-07-query-cwd");
+        let command = git_command(
+            cwd,
+            GitQuery::Version,
+            QueryEnvironment::Preserved(PreservedGitEnvironment {
+                home: Some(OsStr::new("/controlled/home")),
+                xdg_config_home: Some(OsStr::new("/controlled/xdg")),
+                git_config_nosystem: Some(OsStr::new("true")),
+                git_config_system: Some(OsStr::new("/controlled/system")),
+                git_config_global: Some(OsStr::new("/controlled/global")),
+                git_attr_nosystem: Some(OsStr::new("yes")),
+            }),
+            None,
+        );
+        let environment = command.get_envs().collect::<Vec<_>>();
+
+        for (key, value) in [
+            ("HOME", "/controlled/home"),
+            ("XDG_CONFIG_HOME", "/controlled/xdg"),
+            ("GIT_CONFIG_NOSYSTEM", "true"),
+            ("GIT_CONFIG_SYSTEM", "/controlled/system"),
+            ("GIT_CONFIG_GLOBAL", "/controlled/global"),
+            ("GIT_ATTR_NOSYSTEM", "yes"),
+        ] {
+            assert!(
+                environment.contains(&(OsStr::new(key), Some(OsStr::new(value)))),
+                "preserved {key} must be forwarded to the Git child"
+            );
+        }
+    }
+
+    #[test]
     fn tracked_status_guards_preserve_exact_driver_bytes() {
         let cwd = Path::new("/tmp/thinws-p0-07-query-cwd");
         let drivers = [

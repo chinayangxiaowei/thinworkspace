@@ -727,7 +727,7 @@ fn partial_full_copy_write_failure_registers_partial_file_then_rolls_back_revers
 }
 
 #[test]
-fn registration_failure_retains_unconfirmed_created_object_for_recovery() {
+fn registration_failure_retains_unconfirmed_created_object_without_unsafe_rollback() {
     let fixture = Fixture::create_fixed_tree().expect("create controlled fixed fixture");
     let prepared = prepare_attempt(&fixture.request(), Backend::ApfsFileClone)
         .expect("prepare fixed clone attempt");

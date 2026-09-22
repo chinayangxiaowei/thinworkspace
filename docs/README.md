@@ -63,6 +63,7 @@
 - [P0-05 文件副本锁隔离实验](development/implementation/P0-05_文件副本锁隔离实验.md)：独立锁实验的准入、执行证据、结论审核与未执行边界。
 - [P0-06 原始目录镜像实验](development/implementation/P0-06_原始目录镜像实验.md)：新路线准入、原始内容与 mtime 保真、回滚实验和验收证据。
 - [P0-07 已跟踪检查与清理提示实验](development/implementation/P0-07_已跟踪检查与清理提示实验.md)：只读 Git、清理决策与持久日志的准入、实验及验收证据。
+- [Phase 0 阶段状态](development/review/ThinWorkspace_Phase0阶段状态_v1.0.md)：小阶段收口、阶段门禁、独立审核和人工放行的唯一状态页；不定义设计或任务规则。
 - `development/implementation/`：P0 实验报告、任务实施记录、故障注入结果和小阶段收口证据；
 - `development/review/`：审核记录、待处理问题和人工阶段放行材料。
 

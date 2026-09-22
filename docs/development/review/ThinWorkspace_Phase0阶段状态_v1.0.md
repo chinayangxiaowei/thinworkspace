@@ -34,7 +34,7 @@
 | 门禁 | 实际结果 |
 |---|---|
 | 格式、静态检查、仓库 helper | 根/fuzz rustfmt、根/fuzz Clippy、20 项 CI helper 测试均退出 0；测试补丁后再次执行两 workspace rustfmt/Clippy，均退出 0 |
-| Debug/Release 与真实平台 | release workspace build 退出 0；Debug/Release 全 workspace `--include-ignored` 均退出 0；真实同卷、跨卷和子挂载场景均执行，临时镜像已卸载并清理。测试补丁后普通全 targets 为 260 passed、7 ignored，新增断言及改名用例的 release 精确测试均退出 0；补充变异的未变异基线再次执行全部 ignored Debug 场景并通过 |
+| Debug/Release 与真实平台 | release workspace build 退出 0；Debug/Release 全 workspace `--include-ignored` 均退出 0；真实同卷、跨卷和子挂载场景均执行，临时镜像已卸载并清理。测试补丁后普通全 targets 为 260 passed、7 ignored，新增断言及改名用例的 release 精确测试均退出 0；补充变异的未变异基线再次执行本次选择的 Cleanup/Probe ignored Debug 场景并通过 |
 | 供应链 | 根/fuzz `cargo deny` 退出 0，仅有允许项未命中警告。RustSec 缓存以普通 Git 快进至上游 `17af77682cecd2afa72b217ad7c6c30585d5003f`（2026-09-22），根/fuzz `cargo audit --no-fetch --deny warnings` 均载入 1261 条公告并退出 0；`cargo-audit` 内置刷新本次静止后被终止，不把该失败尝试冒充成功 |
 | 长预算 fuzz | 固定 nightly `nightly-2026-08-14`、`cargo-fuzz 0.12.0`；三个目标各 `-max_total_time=600 -timeout=5 -max_len=4096`，均运行 602 秒并退出 0，artifact 均为 0。Probe 6,003,717 次，Materialize 37,770,320 次，Git status 3,673,820 次；原始日志位于忽略目录 `target/p0-stage-fuzz.ULlkPP/` |
 | 文档与公开契约 | 26 份 Markdown、137 个真实本地链接、2 个 JSON 示例、围栏和 `git diff --check` 均通过；Phase 0 不发布产品 CLI，实验 CLI 契约测试在当前 Debug/Release 门禁通过 |

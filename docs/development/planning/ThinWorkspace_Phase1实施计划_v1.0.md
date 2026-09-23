@@ -125,11 +125,13 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Backlog |
+| P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | In Progress |
 | P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Backlog |
 | P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
+
+当前领取：P1-01 由主 Agent 于 2026-09-23 领取，基线 `e547742`，任务分支 `task/p1-01-core-foundation`，工作区 `/Volumes/data/code/worktree`。本任务修改根 workspace、`thinws-core`、依赖方向检查、名称 fuzz harness 和既有 CI 入口；验收类型化 ID、名称语法、结构化错误、禁止依赖边及其自动测试。无状态、SQLite、Git、文件系统或公开 CLI 副作用，不创建空 Port/Adapter/Application/CLI crate，不改变既有 ADR。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

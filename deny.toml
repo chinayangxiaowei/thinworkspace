@@ -22,8 +22,13 @@ version = "=0.0.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [[licenses.exceptions]]
-name = "thinws-p0-probe-fuzz"
+name = "thinws-fuzz"
 version = "=0.0.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-core"
+version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [bans]

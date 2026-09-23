@@ -1,4 +1,4 @@
-name: P0 experiments
+name: P0/P1 quality
 
 on:
   push:
@@ -47,8 +47,11 @@ jobs:
       - name: Test CI helpers
         run: >-
           python3 -B -m unittest
+          tools/test_check_crate_dependencies.py
           tools/test_ci_detach_image.py
           tools/test_ci_mutation.py
+      - name: Check crate dependency direction
+        run: python3 -B tools/check_crate_dependencies.py
       - name: Lint
         run: |
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -110,6 +113,8 @@ jobs:
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialize_layout_policy -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Git status and cleanup policy fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_git_status -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Workspace name fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_workspace_name -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: >-

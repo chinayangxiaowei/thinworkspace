@@ -126,7 +126,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Done |
-| P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | In Progress |
+| P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Done |
 | P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
@@ -145,7 +145,16 @@ P1-01 完成记录（2026-09-23）：
 
 当前领取：P1-02 由主 Agent 于 2026-09-23 领取，基线 `4fd9dd7`，任务分支 `task/p1-02-bootstrap-store`，继续使用维护者指定的唯一持久 checkout `/Volumes/data/code/worktree`。先由 ADR-0004 冻结 bootstrap/root marker、SQLite schema v1 与双 scope 锁协议，再实现实际 Port、Adapter、迁移和并发/未完成状态测试；P1-03 的 init/doctor、Workspace 物化、Ready Receipt、目录删除和公开 CLI 均在本任务范围外。风险 R4，文档候选须经规定模型审核后才进入代码。
 
-P1-02 变异执行记录（进行中）：冻结实现候选为 `8437e8a5358caba5bb72b7c4c73ee17c89eff80c`，执行负责人为主 Agent。范围是 12 个直接新增或修改的生产模块：Core 的 diagnostic/installation/path/time/volume/workspace、Ports 的 error、SQLite store，以及 macOS Adapter 的 document/filesystem/lock/store，共 381 个 mutant；不运行全 workspace 变异。环境为 macOS 15.7.2 arm64、Rust 1.97.1、cargo-mutants 27.1.0，并挂载独立 APFS 镜像以满足既有 `--include-ignored` 真实跨卷测试。固定参数为 2 jobs、单 mutant 60 秒、全 workspace 测试，结果目录为 `target/mutants.out/`。执行于 2026-09-23 08:34:41 -0700 启动，首次主动查看时间按无可比历史的暂定值设为不早于 09:34:41 -0700；完成后在本记录补充终态计数、实际耗时和证据摘要。
+P1-02 完成记录（2026-09-23）：
+
+- 设计 commit 为 `4f93f1f`，实现及收口 commit 为 `8437e8a`、`7599a2b`、`94926ed`、`01fc5f0`、`0d89d09`。最终候选 `0d89d0948f9f55f408d955819c2a5206415b2821` 交付版本化 bootstrap/root marker、持有父目录与 marker 身份的单向 Ready 发布、SQLite schema v1、事务迁移、并发唯一性、未完成状态、bootstrap/data-root 双 scope 有界锁及对应 Port/Adapter；未实现 P1-03 CLI、物化、Receipt Ready 用例、删除或中断恢复。
+- 审核修正关闭三类阻断缺口：Ready 证明现在绑定创建时 data root 的打开 FD/身份；空库判断用字面 `sqlite_` 前缀，不会漏算 `sqliteX` 等合法用户表；四张表使用 `STRICT, WITHOUT ROWID` 并以 insert-once trigger 拒绝 `INSERT OR REPLACE` 绕过不可变、状态、Receipt 和 tombstone 约束。三项均有先失败后通过的真实回归。
+- 普通门禁在 macOS 15.7.2 arm64、Rust 1.97.1 上通过：根 workspace 与 fuzz workspace 的 fmt、Clippy 全目标/全 feature、workspace rustdoc、28 项仓库工具测试、实际 crate 依赖检查、debug/release 全 workspace 测试、`cargo-deny` 及离线 `cargo-audit --no-fetch` 均成功；deny 仅报告既有未命中 allowance/exception 警告。最终 `WITHOUT ROWID` 差异另行重跑 SQLite debug/release 全套 2＋10 项测试和 Clippy，全部通过。
+- 真实文件系统验证使用维护者确认的 `/Volumes/data` APFS 卷（Volume UUID `1a42c888-32e3-489c-9bfa-67fd640a94e8`）及一次性独立 APFS 验证卷；bootstrap 发布、目录/marker 替换、锁竞争、普通/Release 与既有适用跨卷用例均通过。一次性卷已卸载，临时根已移入废纸篓；没有触碰真实用户 bootstrap 或 data root。
+- 首次 381 个 mutant 全量批次用于诊断，结果为 198 caught、92 unviable、91 missed、0 timeout，约 20 分 36 秒；它不是通过结果。修正后只对变化和原存活所在范围重新枚举并逐轮收敛：79 个为 60 caught＋6 unviable＋13 missed，24 个为 19 caught＋4 unviable＋1 missed，6 个为 4 caught＋2 unviable＋0 missed，审核修正后的 7 个为 6 caught＋1 unviable＋0 missed/timeout。最后一批 `outcomes.json`/`mutants.json` SHA-256 分别为 `15a20d439cbf579054a10218d2f8e9b14bdc85c7902dffbfb57d34c7a15df136`、`ced46d389ef97425b545604595f42b7fab6149bd81ccbeea4d9d93edb4d24c49`；四个剩余 OR/XOR、路径组件 guard 和版本 guard 变异均由规定 Reviewer 接受为等价，不存在未处置存活变异。后续相同 7 项范围可按本次实际 22 秒重新估算等待，不再固定等待一小时。
+- `thinws_workspace_state` 与 `thinws_bootstrap_document` 使用固定 cargo-fuzz/nightly 各运行 61 秒，分别完成 15,327,490 与 1,723,157 次执行，无 crash/hang，未产生需要保留的回归样本。后续审核修正未改变两个 harness 可达的状态/文档解析代码，按《任务流程》复用该证据。
+- ADR 设计候选由 GPT-6 Astra（`gpt-6-astra` / `xhigh`）独立只读审核为 Approve。实现终审先后识别父目录身份、空库判断和 REPLACE/rowid 绕过并退回修正；同一规定模型对最终完整范围 `4fd9dd7..0d89d09` 审核为 Approve，Critical/High/Normal/Low 均为 0，结论绑定精确 commit `0d89d0948f9f55f408d955819c2a5206415b2821`。
+- 未执行线上 CI、线上 PR 或 push，符合当前本地流程；供应链审计使用本地 1261 条 advisory 数据，未联网刷新。极端创建权限被 umask 削减或首次文件校验失败时可能留下未发布的零字节临时项，它不会发布 marker/config 或冒报成功，属于 ADR 已允许报告并显式清理的未发布残留，不扩展为自动恢复。`/Volumes/data/code/worktree` 是维护者指定的持久 checkout，不删除。P1-02 Done 不表示 P1.a 小阶段或 Phase 1 放行；P1-03 仍是小阶段剩余任务。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

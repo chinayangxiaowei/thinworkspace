@@ -59,7 +59,9 @@ data root 的 `.thinws-root.toml` 保存匹配的实例、路径、卷和 `initi
 ```text
 thinws-data/
 ├── .thinws-root.toml
-├── metadata/state.db
+├── metadata/
+│   ├── state.db
+│   └── lifecycle.lock
 ├── logs/operations.jsonl
 ├── workspaces/<workspace-id>/.state/incomplete
 ├── workspaces/<workspace-id>/root/
@@ -81,6 +83,8 @@ SQLite 维护版本、活跃 Workspace、最终物化 Receipt 及最小删除 to
 - 未完成状态不能因目录存在或进程重启而自动转为 Ready；
 - 删除活跃记录与写 tombstone 在同一事务完成；
 - 不在数据库事务中等待文件物化、Git 检查或子进程。
+
+bootstrap/root marker 的精确字段、SQLite schema/trigger/migration 和双 scope 锁文件协议只由 [ADR-0004](../architecture/adr/ADR-0004_Phase1持久化Schema与双Scope锁.md) 维护；本文只定义它们在生命周期中的职责与顺序。
 
 源目录后续消失不影响已创建副本的普通使用或清理。没有文件系统和 SQLite 的跨系统事务；不提供中断操作重放。
 

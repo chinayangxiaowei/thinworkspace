@@ -126,12 +126,12 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Done |
-| P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Backlog |
+| P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | In Progress |
 | P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
 
-当前领取：P1-01 由主 Agent 于 2026-09-23 领取，基线 `e547742`，任务分支 `task/p1-01-core-foundation`，工作区 `/Volumes/data/code/worktree`。本任务修改根 workspace、`thinws-core`、依赖方向检查、名称 fuzz harness 和既有 CI 入口；验收类型化 ID、名称语法、结构化错误、禁止依赖边及其自动测试。无状态、SQLite、Git、文件系统或公开 CLI 副作用，不创建空 Port/Adapter/Application/CLI crate，不改变既有 ADR。
+P1-01 领取记录：P1-01 由主 Agent 于 2026-09-23 领取，基线 `e547742`，任务分支 `task/p1-01-core-foundation`，工作区 `/Volumes/data/code/worktree`。本任务修改根 workspace、`thinws-core`、依赖方向检查、名称 fuzz harness 和既有 CI 入口；验收类型化 ID、名称语法、结构化错误、禁止依赖边及其自动测试。无状态、SQLite、Git、文件系统或公开 CLI 副作用，不创建空 Port/Adapter/Application/CLI crate，不改变既有 ADR。
 
 P1-01 完成记录（2026-09-23）：
 
@@ -142,6 +142,8 @@ P1-01 完成记录（2026-09-23）：
 - 名称解析 fuzz 使用 `cargo-fuzz 0.12.0`、`nightly-2026-08-14` 和 60 秒预算，完成 30,032,981 次运行，无 crash/hang，未新增 artifact；后续修正未改变名称解析、harness、依赖、工具或配置，证据按《任务流程》§18.1 复用。
 - GPT-6 Astra（`gpt-6-astra`）/ `xhigh` 对完整候选 `26ec2186aef7558ffe8b8cda4326fbd61863469e` 独立只读复审，结论 Approve，Critical/High/Normal/Low 均为 0；随后 release Verification 的 Core 5 项测试、1 项 rustdoc、6 项依赖检查器测试及实际依赖检查再次通过。
 - 未执行线上 CI、线上 PR、push、真实 APFS/Git/SQLite/CLI 验收：前两项不属于当前本地流程，后四项没有 P1-01 运行时副作用。`/Volumes/data/code/worktree` 是维护者指定的唯一持久项目 checkout，不是可删除的临时 worktree；本地快进合并后继续作为 `main` 集成目录保留，任务分支随即删除。该任务完成不表示 P1.a 小阶段或 Phase 1 放行。
+
+当前领取：P1-02 由主 Agent 于 2026-09-23 领取，基线 `4fd9dd7`，任务分支 `task/p1-02-bootstrap-store`，继续使用维护者指定的唯一持久 checkout `/Volumes/data/code/worktree`。先由 ADR-0004 冻结 bootstrap/root marker、SQLite schema v1 与双 scope 锁协议，再实现实际 Port、Adapter、迁移和并发/未完成状态测试；P1-03 的 init/doctor、Workspace 物化、Ready Receipt、目录删除和公开 CLI 均在本任务范围外。风险 R4，文档候选须经规定模型审核后才进入代码。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

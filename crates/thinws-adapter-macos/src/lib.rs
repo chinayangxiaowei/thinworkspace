@@ -8,7 +8,10 @@ mod document;
 mod ffi;
 mod filesystem;
 mod lock;
+mod materializer;
+mod probe;
 mod store;
+mod volume;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +20,7 @@ pub use document::{
     DocumentError, MAX_DOCUMENT_BYTES, decode_bootstrap_config, decode_root_marker,
 };
 pub use lock::MacOsLockGuard;
+pub use materializer::ApfsCloneMaterializer;
 pub use store::{MacOsDataRootLayout, MacOsInitializingProof, MacOsPreparedDataRoot};
 use thinws_ports::{PortError, PortErrorKind};
 

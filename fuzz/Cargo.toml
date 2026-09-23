@@ -66,6 +66,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "thinws_materialization_path"
+path = "fuzz_targets/materialization_path.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 

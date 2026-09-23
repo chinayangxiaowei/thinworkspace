@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 use std::fs::File;
-use std::str::FromStr;
 
 use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId};
 use thinws_ports::{
@@ -19,6 +18,7 @@ use crate::filesystem::{
     require_empty_directory, revalidate_directory, sync_directory, unlink_entry,
     validate_file_entry,
 };
+use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
 const CONFIG_NAME: &str = "config.toml";
@@ -456,39 +456,6 @@ fn volume_id_for_directory(directory: &ValidatedDirectory) -> Result<VolumeId, P
     let bytes = crate::ffi::volume_uuid(&directory.fd)
         .map_err(|error| io_error("read APFS volume UUID", error))?;
     decode_volume_id(bytes)
-}
-
-fn decode_volume_id(bytes: Option<[u8; 16]>) -> Result<VolumeId, PortError> {
-    let bytes = bytes
-        .filter(|bytes| bytes.iter().any(|byte| *byte != 0))
-        .ok_or_else(|| {
-            PortError::new(
-                PortErrorKind::CapabilityUnavailable,
-                "require APFS volume UUID",
-            )
-        })?;
-    let encoded = format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15],
-    );
-    VolumeId::from_str(&encoded).map_err(|error| {
-        PortError::new(PortErrorKind::InvalidData, "decode APFS volume UUID").with_source(error)
-    })
 }
 
 impl MacOsHostAdapter {

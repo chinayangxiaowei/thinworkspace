@@ -5,6 +5,7 @@
 
 mod bootstrap;
 mod error;
+mod materialization;
 mod metadata;
 
 pub use bootstrap::{
@@ -12,4 +13,7 @@ pub use bootstrap::{
     PreparedDataRootEvidence, PublishResult,
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
+pub use materialization::{
+    MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, WorkspaceMaterializer,
+};
 pub use metadata::{MetadataSnapshot, MetadataStore, MetadataStoreFactory};

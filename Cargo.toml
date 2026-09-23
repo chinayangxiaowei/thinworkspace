@@ -19,6 +19,7 @@ license = "PolyForm-Noncommercial-1.0.0"
 rust-version = "1.97.1"
 
 [workspace.dependencies]
+blake3 = "1.8.7"
 clap = { version = "4.5.58", features = ["derive"] }
 directories = "6.0.0"
 libc = "0.2"

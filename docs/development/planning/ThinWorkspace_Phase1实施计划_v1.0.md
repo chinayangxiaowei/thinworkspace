@@ -127,7 +127,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 |---|---|---|---|---|
 | P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Done |
 | P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Done |
-| P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R4 | In Progress |
+| P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R4 | Done |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
 
@@ -157,6 +157,19 @@ P1-02 完成记录（2026-09-23）：
 - 未执行线上 CI、线上 PR 或 push，符合当前本地流程；供应链审计使用本地 1261 条 advisory 数据，未联网刷新。极端创建权限被 umask 削减或首次文件校验失败时可能留下未发布的零字节临时项，它不会发布 marker/config 或冒报成功，属于 ADR 已允许报告并显式清理的未发布残留，不扩展为自动恢复。`/Volumes/data/code/worktree` 是维护者指定的持久 checkout，不删除。P1-02 Done 不表示 P1.a 小阶段或 Phase 1 放行；P1-03 仍是小阶段剩余任务。
 
 当前领取：P1-03 由主 Agent 于 2026-09-23 领取，基线 `dfa345b`，任务分支 `task/p1-03-init-doctor`，继续使用 `/Volumes/data/code/worktree`。范围内是现有 BootstrapStore/MetadataStore Port 的初始化构造边界、macOS 私有目录与 APFS Volume ID、Application init/doctor 编排，以及首批 `thinws init|doctor` 人类/JSON 契约；范围外是 Workspace 物化、GitInspector、修复/恢复、删除、GC 和其余 CLI。因引入最小 macOS Volume UUID FFI，风险从原 R3 调整为 R4；先审核本段及对应设计/ADR/公开契约，再进入代码。
+
+P1-03 完成记录（2026-09-23）：
+
+- 设计 commit 为 `2a6a564`、`06a7ce0`，实现及审核修正 commit 为 `6a77f22`、`81a5448`、`c956cce`、`354ab26`。最终候选交付 `thinws init --data-root`、只读 `thinws doctor`、人类/JSON 统一输出、macOS APFS Volume UUID 探测、私有目录布局、SQLite 初始化工厂和 Application 编排；Workspace 物化、Git 检查、修复/恢复、删除、GC 仍在后续任务，CLI 不包装用户命令。
+- 审核修正均有针对性回归：每个受控目录 FD 复验实际 APFS Volume UUID，prepared root 在发布 marker 前再次核验为空；目录类型、符号链接、权限、配置/marker 替换及持有数据库 FD 后目录项被替换均按稳定错误分类拒绝；布局错误不会被 SQLite 或通用文件系统错误覆盖；Clap 人类模式参数错误统一为 `E_USAGE`。这些行为从预期失败转为通过后才进入收口。
+- 普通门禁在 macOS arm64、Rust 1.97.1 上通过：根 workspace 的 fmt、Clippy 全目标/全 feature、debug/release 全 workspace 测试和 rustdoc，29 项仓库工具测试、实际 crate 依赖检查、`cargo-deny` 及离线 `cargo-audit --no-fetch` 均成功；deny 只报告既有未命中 allowance/exception 警告，审计使用本地 1261 条 advisory 数据。
+- 真实平台验证使用维护者确认的 `/Volumes/data` APFS 卷（Volume UUID `1a42c888-32e3-489c-9bfa-67fd640a94e8`），显式设置受控跨卷根后，系统临时卷与该卷之间的逐目录 FD Volume UUID 不一致路径通过。尝试用 `hdiutil attach` 创建子挂载点时被本机权限拒绝，因此“受控目录树内部出现实际子挂载”的端到端场景标为未执行；这不影响已通过的同一底层跨卷拒绝入口，也不扩写为已验证场景。
+- 变异门禁按最终受影响生产范围组合：九个主要模块共 366 个 mutant，结果为 274 caught＋92 unviable，0 missed/timeout，耗时约 15 分 03 秒，`outcomes.json`/`mutants.json` SHA-256 分别为 `13e7c7aa01a2a04916279ce0dae828234e64cd77b31a1f996a7e35d8626f8bb7`、`cbd968d78148bb2e3cd2860d2e8383696fea7ba1f3cf2baae90d39a7fc43d8cd`；随后对唯一漏枚举的 Adapter 入口补跑 1 个 unviable mutant，0 missed/timeout，两个文件哈希分别为 `09eb6abddc542ef1f5c60f46fb79238c1848b04e80b513fd9e4844ca86704453`、`7da25b0e06d9fe53850cf745b35a1e001dfba0f04474e6881c9e1e166b954110`。合计 367＝274 caught＋93 unviable，0 missed/timeout；两个仅重导出或声明的 Port 文件枚举为 0 mutant。首次因 cargo-mutants 临时副本使跨卷测试失去异卷条件而在 unmutated baseline 退出的批次执行 0 个 mutant，不计为通过证据。
+- `thinws_init_request` 与 `thinws_bootstrap_document` 使用固定 nightly/cargo-fuzz 各运行 61 秒，分别完成 18,530,874 和 1,644,355 次执行，无 crash/hang。后续审核修正没有改变两个 harness 可达的请求转换、文档解码函数或 fuzz 配置，证据按《任务流程》§18.1 复用。
+- GPT-6 Astra（`gpt-6-astra` / `xhigh`）先后指出目录卷身份、发布前竞态、布局错误分类和 CLI usage 契约缺口；修正后对完整范围复审为 Approve。最终测试专用 commit `354ab26e4ce8fdd64e8d1795a869aaa972815867` 只为跨卷测试显式绑定维护者提供的 APFS 根，Reviewer 复核后仍为 Approve，Critical/High/Normal/Low 均为 0。
+- 未执行线上 CI、线上 PR 或 push，符合当前本地流程；除上述权限受限的实际子挂载外，没有把未执行项写成通过。P1-03 Done 使 P1.a 的三项任务和既定退出断言全部完成，但不表示整个 Phase 1 放行。
+
+P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组合证明全新、幂等和冲突初始化已有自动测试；非空或未完成残留不会被自动接管；未验证、身份变化或布局不合法的 data root 不会被发布为 Ready。小阶段门禁与受影响范围的变异、fuzz、真实 APFS/跨卷及规定审核均已收口，以上未执行边界继续保留。P1.a 完成只解除后续任务依赖，不代表 Phase 1 阶段放行、发布可用或维护者签字。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

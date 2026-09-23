@@ -88,46 +88,36 @@ fn workspace_names_follow_the_frozen_ascii_grammar_without_normalization() {
 }
 
 #[test]
-fn error_codes_preserve_the_frozen_names_and_exit_statuses() {
+fn error_codes_preserve_the_frozen_symbolic_names() {
     let expected = [
-        (ErrorCode::Usage, "E_USAGE", 2),
-        (ErrorCode::NotInitialized, "E_NOT_INITIALIZED", 10),
-        (
-            ErrorCode::CapabilityUnavailable,
-            "E_CAPABILITY_UNAVAILABLE",
-            11,
-        ),
-        (ErrorCode::CowUnavailable, "E_COW_UNAVAILABLE", 12),
-        (ErrorCode::NameConflict, "E_NAME_CONFLICT", 15),
+        (ErrorCode::Usage, "E_USAGE"),
+        (ErrorCode::NotInitialized, "E_NOT_INITIALIZED"),
+        (ErrorCode::CapabilityUnavailable, "E_CAPABILITY_UNAVAILABLE"),
+        (ErrorCode::CowUnavailable, "E_COW_UNAVAILABLE"),
+        (ErrorCode::NameConflict, "E_NAME_CONFLICT"),
         (
             ErrorCode::DataRootChangeUnsupported,
             "E_DATA_ROOT_CHANGE_UNSUPPORTED",
-            16,
         ),
-        (ErrorCode::WorkspaceNotFound, "E_WORKSPACE_NOT_FOUND", 20),
-        (ErrorCode::WorkspaceNotReady, "E_WORKSPACE_NOT_READY", 21),
-        (ErrorCode::WorkspaceDirty, "E_WORKSPACE_DIRTY", 22),
-        (ErrorCode::WorkspaceBusy, "E_WORKSPACE_BUSY", 23),
-        (ErrorCode::GitCheckIncomplete, "E_GIT_CHECK_INCOMPLETE", 25),
-        (ErrorCode::Git, "E_GIT", 30),
-        (ErrorCode::Filesystem, "E_FILESYSTEM", 31),
-        (
-            ErrorCode::DataRootUnavailable,
-            "E_DATA_ROOT_UNAVAILABLE",
-            32,
-        ),
-        (ErrorCode::DataRootLayout, "E_DATA_ROOT_LAYOUT", 33),
-        (ErrorCode::Metadata, "E_METADATA", 35),
-        (ErrorCode::DataRootNotEmpty, "E_DATA_ROOT_NOT_EMPTY", 36),
-        (ErrorCode::WorkspaceIncomplete, "E_WORKSPACE_INCOMPLETE", 40),
-        (ErrorCode::LockTimeout, "E_LOCK_TIMEOUT", 41),
+        (ErrorCode::WorkspaceNotFound, "E_WORKSPACE_NOT_FOUND"),
+        (ErrorCode::WorkspaceNotReady, "E_WORKSPACE_NOT_READY"),
+        (ErrorCode::WorkspaceDirty, "E_WORKSPACE_DIRTY"),
+        (ErrorCode::WorkspaceBusy, "E_WORKSPACE_BUSY"),
+        (ErrorCode::GitCheckIncomplete, "E_GIT_CHECK_INCOMPLETE"),
+        (ErrorCode::Git, "E_GIT"),
+        (ErrorCode::Filesystem, "E_FILESYSTEM"),
+        (ErrorCode::DataRootUnavailable, "E_DATA_ROOT_UNAVAILABLE"),
+        (ErrorCode::DataRootLayout, "E_DATA_ROOT_LAYOUT"),
+        (ErrorCode::Metadata, "E_METADATA"),
+        (ErrorCode::DataRootNotEmpty, "E_DATA_ROOT_NOT_EMPTY"),
+        (ErrorCode::WorkspaceIncomplete, "E_WORKSPACE_INCOMPLETE"),
+        (ErrorCode::LockTimeout, "E_LOCK_TIMEOUT"),
     ];
 
     assert_eq!(ErrorCode::ALL.len(), expected.len());
     for (actual, expected) in ErrorCode::ALL.iter().copied().zip(expected) {
         assert_eq!(actual, expected.0);
         assert_eq!(actual.as_str(), expected.1);
-        assert_eq!(actual.exit_status(), expected.2);
         assert_eq!(actual.to_string(), expected.1);
     }
 }

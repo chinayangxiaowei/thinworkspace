@@ -1,52 +1,60 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Stable machine-readable error codes and their process exit statuses.
+/// Stable machine-readable error codes, independent of CLI process exit mapping.
+///
+/// Exit status selection belongs to the CLI boundary and is deliberately absent
+/// from Core:
+///
+/// ```compile_fail
+/// use thinws_core::ErrorCode;
+///
+/// let _ = ErrorCode::Usage.exit_status();
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[repr(u8)]
 pub enum ErrorCode {
     /// Command or parameter usage error.
-    Usage = 2,
+    Usage,
     /// ThinWorkspace has not been initialized.
-    NotInitialized = 10,
+    NotInitialized,
     /// A required platform capability is unavailable.
-    CapabilityUnavailable = 11,
+    CapabilityUnavailable,
     /// CoW is unavailable and explicit full copy was not allowed.
-    CowUnavailable = 12,
+    CowUnavailable,
     /// An active Workspace already uses the requested name with other inputs.
-    NameConflict = 15,
+    NameConflict,
     /// Changing an initialized data root is unsupported.
-    DataRootChangeUnsupported = 16,
+    DataRootChangeUnsupported,
     /// The requested Workspace does not exist.
-    WorkspaceNotFound = 20,
+    WorkspaceNotFound,
     /// The requested operation requires a Ready Workspace.
-    WorkspaceNotReady = 21,
+    WorkspaceNotReady,
     /// Tracked changes prevent normal cleanup.
-    WorkspaceDirty = 22,
+    WorkspaceDirty,
     /// Confirmed external process use prevents cleanup.
-    WorkspaceBusy = 23,
+    WorkspaceBusy,
     /// The read-only Git check could not establish a complete result.
-    GitCheckIncomplete = 25,
+    GitCheckIncomplete,
     /// A Git failure could not be mapped more specifically.
-    Git = 30,
+    Git,
     /// A filesystem or materialization operation failed.
-    Filesystem = 31,
+    Filesystem,
     /// The registered data root or volume is unavailable.
-    DataRootUnavailable = 32,
+    DataRootUnavailable,
     /// Source, target, volume, or controlled path layout is invalid.
-    DataRootLayout = 33,
+    DataRootLayout,
     /// SQLite, schema, or metadata persistence failed.
-    Metadata = 35,
+    Metadata,
     /// A non-empty data root has no valid ThinWorkspace ownership marker.
-    DataRootNotEmpty = 36,
+    DataRootNotEmpty,
     /// Workspace creation or cleanup is incomplete.
-    WorkspaceIncomplete = 40,
+    WorkspaceIncomplete,
     /// A lifecycle lock was not acquired within the public timeout.
-    LockTimeout = 41,
+    LockTimeout,
 }
 
 impl ErrorCode {
-    /// Every currently assigned public error code in stable numeric order.
+    /// Every currently assigned public error code in documented order.
     pub const ALL: [Self; 19] = [
         Self::Usage,
         Self::NotInitialized,
@@ -93,12 +101,6 @@ impl ErrorCode {
             Self::WorkspaceIncomplete => "E_WORKSPACE_INCOMPLETE",
             Self::LockTimeout => "E_LOCK_TIMEOUT",
         }
-    }
-
-    /// Returns the frozen process exit status for this error code.
-    #[must_use]
-    pub const fn exit_status(self) -> u8 {
-        self as u8
     }
 }
 

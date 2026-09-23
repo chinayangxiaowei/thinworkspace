@@ -19,17 +19,29 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-metadata-sqlite": frozenset({"thinws-core", "thinws-ports"}),
 }
 
+# P1-01 freezes Core's complete direct dependency surface. Other product
+# crates add their external allowlist when their own implementation task begins.
+STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "thinws-core": frozenset({"thiserror", "uuid"}),
+}
+
 
 def validate_dependency_graph(graph: dict[str, set[str]]) -> list[str]:
-    """Return stable diagnostics for every unapproved product-crate edge."""
+    """Return stable diagnostics for every currently enforceable dependency edge."""
     violations: list[str] = []
     for package in sorted(graph):
-        allowed = ALLOWED_LOCAL_DEPENDENCIES.get(package)
-        if allowed is None:
+        allowed_local = ALLOWED_LOCAL_DEPENDENCIES.get(package)
+        if allowed_local is None:
             violations.append(f"{package} has no approved dependency rule")
             continue
-        for dependency in sorted(graph[package] - allowed):
-            violations.append(f"{package} must not depend on {dependency}")
+        allowed_external = STRICT_EXTERNAL_DEPENDENCIES.get(package)
+        for dependency in sorted(graph[package]):
+            if dependency in allowed_local:
+                continue
+            if allowed_external is not None and dependency in allowed_external:
+                continue
+            if allowed_external is not None or dependency.startswith("thinws-"):
+                violations.append(f"{package} must not depend on {dependency}")
     return violations
 
 
@@ -62,12 +74,7 @@ def load_product_graph(repository: Path) -> dict[str, set[str]]:
         if _is_product_path(repository, package["manifest_path"])
     }
     return {
-        package["name"]: {
-            dependency["name"]
-            for dependency in package["dependencies"]
-            if dependency.get("path")
-            and _is_product_path(repository, dependency["path"])
-        }
+        package["name"]: {dependency["name"] for dependency in package["dependencies"]}
         for package in product_packages.values()
     }
 

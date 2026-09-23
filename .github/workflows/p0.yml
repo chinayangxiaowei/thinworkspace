@@ -64,6 +64,8 @@ jobs:
           hdiutil attach -nobrowse -owners on -mountpoint "$THINWS_P0_CROSS_VOLUME_ROOT" "$THINWS_P0_IMAGE"
       - name: Tests on actual macOS filesystem
         run: cargo test --locked --workspace --all-targets -- --include-ignored --nocapture
+      - name: Documentation architecture contracts
+        run: cargo test --locked --workspace --doc
       - name: Release tests
         run: cargo test --locked --release --workspace --all-targets -- --include-ignored --nocapture
       - name: Load pinned quality tools

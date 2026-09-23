@@ -281,8 +281,13 @@ fn unsupported_source_entry_is_rejected_before_the_first_target_write() {
     // longer temporary worktrees created by cargo-mutants.
     let temp = Builder::new()
         .prefix("tw-p106-special-")
+        .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in("/private/tmp")
         .unwrap();
+    assert_eq!(
+        temp.path().metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     let source = temp.path().join("source");
     let target = temp.path().join("target");
     let staging = temp.path().join("staging");

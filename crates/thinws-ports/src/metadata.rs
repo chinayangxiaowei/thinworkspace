@@ -1,9 +1,60 @@
+use std::time::Duration;
+
 use thinws_core::{
-    DeletionTombstone, ErrorCode, InstanceId, RemovalMode, UnixMillis, WorkspaceId,
-    WorkspaceRecord, WorkspaceReservation, WorkspaceState,
+    DeletionTombstone, ErrorCode, InstallationRecord, InstanceId, RemovalMode, UnixMillis,
+    WorkspaceId, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 
-use crate::PortError;
+use crate::{DataRootLayoutEvidence, PortError};
+
+/// Product-state snapshot returned by a read-only metadata inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataSnapshot {
+    installation: InstallationRecord,
+    workspaces: Vec<WorkspaceRecord>,
+}
+
+impl MetadataSnapshot {
+    /// Creates a snapshot from an already validated installation and stable Workspace list.
+    #[must_use]
+    pub const fn new(installation: InstallationRecord, workspaces: Vec<WorkspaceRecord>) -> Self {
+        Self {
+            installation,
+            workspaces,
+        }
+    }
+
+    /// Returns the installation row observed by the read-only connection.
+    #[must_use]
+    pub const fn installation(&self) -> &InstallationRecord {
+        &self.installation
+    }
+
+    /// Returns active Workspaces in stable Workspace-ID order.
+    #[must_use]
+    pub fn workspaces(&self) -> &[WorkspaceRecord] {
+        &self.workspaces
+    }
+}
+
+/// Construction and inspection companion for the MetadataStore boundary.
+pub trait MetadataStoreFactory<L: DataRootLayoutEvidence> {
+    /// Initializes or validates schema v1 using an already prepared database file.
+    fn initialize(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<InstallationRecord, PortError>;
+
+    /// Opens existing metadata read-only and returns a validated product snapshot.
+    fn inspect(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<MetadataSnapshot, PortError>;
+}
 
 /// Durable Phase 1 Workspace metadata operations exposed to Application.
 pub trait MetadataStore {

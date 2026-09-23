@@ -1,24 +1,29 @@
 use std::ffi::OsStr;
 use std::fs::File;
+use std::str::FromStr;
 
-use thinws_core::{InstallationIdentity, RootMarker, RootMarkerState};
+use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId};
 use thinws_ports::{
-    BootstrapStore, LifecycleLockGuard, LifecycleScope, PortConflict, PortError, PortErrorKind,
-    PublishResult,
+    BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
+    PortError, PortErrorKind, PreparedDataRootEvidence, PublishResult,
 };
 
 use crate::document::{
     DocumentError, decode_bootstrap_config, decode_root_marker, encode_config, encode_marker,
 };
 use crate::filesystem::{
-    FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, entry_identity,
-    open_private_directory, open_private_directory_optional, path_from_absolute, read_private_file,
+    FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, create_private_child_directory,
+    create_private_file, duplicate_validated_directory, entry_identity, io_error,
+    open_private_child_directory, open_private_directory, open_private_directory_optional,
+    open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
     revalidate_directory, sync_directory, unlink_entry, validate_file_entry,
 };
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
 const CONFIG_NAME: &str = "config.toml";
 const MARKER_NAME: &str = ".thinws-root.toml";
+const STATE_DATABASE_NAME: &str = "state.db";
+const CONTROLLED_DIRECTORIES: [&str; 5] = ["metadata", "logs", "workspaces", "staging", "trash"];
 
 /// Non-copyable proof that this process published one exact initializing marker.
 pub struct MacOsInitializingProof {
@@ -28,9 +33,84 @@ pub struct MacOsInitializingProof {
     marker: RootMarker,
 }
 
+/// Descriptor-backed evidence for one prepared APFS data root.
+pub struct MacOsPreparedDataRoot {
+    data_root: AbsolutePath,
+    volume_id: VolumeId,
+    directory: ValidatedDirectory,
+}
+
+impl PreparedDataRootEvidence for MacOsPreparedDataRoot {
+    fn data_root(&self) -> &AbsolutePath {
+        &self.data_root
+    }
+
+    fn volume_id(&self) -> VolumeId {
+        self.volume_id
+    }
+}
+
+/// Descriptor-backed evidence for one controlled data-root layout.
+pub struct MacOsDataRootLayout {
+    data_root: ValidatedDirectory,
+    controlled_directories: Vec<ValidatedDirectory>,
+    database_file: File,
+    database_identity: FileIdentity,
+    database_path: AbsolutePath,
+    volume_id: VolumeId,
+}
+
+impl DataRootLayoutEvidence for MacOsDataRootLayout {
+    fn database_path(&self) -> &AbsolutePath {
+        &self.database_path
+    }
+
+    fn revalidate(&self) -> Result<(), PortError> {
+        revalidate_directory(&self.data_root)?;
+        if volume_id_for_directory(&self.data_root)? != self.volume_id {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "revalidate data-root volume identity",
+            ));
+        }
+        for directory in &self.controlled_directories {
+            revalidate_directory(directory)?;
+        }
+        let metadata = self
+            .controlled_directories
+            .first()
+            .expect("layout always contains metadata first");
+        validate_file_entry(
+            &metadata.fd,
+            OsStr::new(STATE_DATABASE_NAME),
+            &self.database_file,
+            self.database_identity,
+        )
+    }
+}
+
 impl BootstrapStore for MacOsHostAdapter {
     type LockGuard = MacOsLockGuard;
+    type PreparedDataRoot = MacOsPreparedDataRoot;
     type InitializingProof = MacOsInitializingProof;
+    type DataRootLayout = MacOsDataRootLayout;
+
+    fn prepare_bootstrap(&self) -> Result<(), PortError> {
+        prepare_private_directory(&self.bootstrap_dir, false).map(|_| ())
+    }
+
+    fn prepare_data_root(
+        &self,
+        data_root: &AbsolutePath,
+    ) -> Result<Self::PreparedDataRoot, PortError> {
+        let directory = prepare_private_directory(&path_from_absolute(data_root), true)?;
+        let volume_id = volume_id_for_directory(&directory)?;
+        Ok(MacOsPreparedDataRoot {
+            data_root: data_root.clone(),
+            volume_id,
+            directory,
+        })
+    }
 
     fn read_config(&self) -> Result<Option<InstallationIdentity>, PortError> {
         let Some(directory) = open_private_directory_optional(&self.bootstrap_dir)? else {
@@ -53,10 +133,26 @@ impl BootstrapStore for MacOsHostAdapter {
     fn create_initializing(
         &self,
         lock: &Self::LockGuard,
+        prepared: Self::PreparedDataRoot,
         identity: &InstallationIdentity,
     ) -> Result<Self::InitializingProof, PortError> {
         self.validate_bootstrap_lock(lock)?;
-        let directory = open_private_directory(&path_from_absolute(identity.data_root()))?;
+        if prepared.data_root() != identity.data_root()
+            || prepared.volume_id() != identity.volume_id()
+        {
+            return Err(PortError::conflict(
+                "validate prepared data root",
+                PortConflict::InstallationIdentity,
+            ));
+        }
+        let directory = prepared.directory;
+        revalidate_directory(&directory)?;
+        if volume_id_for_directory(&directory)? != identity.volume_id() {
+            return Err(PortError::conflict(
+                "revalidate prepared data-root volume",
+                PortConflict::InstallationIdentity,
+            ));
+        }
         let marker = RootMarker::new(identity.clone(), RootMarkerState::Initializing);
         let bytes = encode_marker(&marker).map_err(document_error)?;
         let temporary = PrivateTemp::create(&directory.fd, "root-marker", &bytes)?;
@@ -92,6 +188,96 @@ impl BootstrapStore for MacOsHostAdapter {
             }
             Err(NoReplaceError::Other(error)) => Err(error),
         }
+    }
+
+    fn initialize_layout(
+        &self,
+        lock: &Self::LockGuard,
+        proof: &Self::InitializingProof,
+    ) -> Result<Self::DataRootLayout, PortError> {
+        self.validate_bootstrap_lock(lock)?;
+        revalidate_directory(&proof.data_root)?;
+        if volume_id_for_directory(&proof.data_root)? != proof.marker.identity().volume_id() {
+            return Err(PortError::conflict(
+                "revalidate initializing data-root volume",
+                PortConflict::InstallationIdentity,
+            ));
+        }
+
+        let mut controlled_directories = Vec::with_capacity(CONTROLLED_DIRECTORIES.len());
+        for name in CONTROLLED_DIRECTORIES {
+            controlled_directories.push(create_private_child_directory(
+                &proof.data_root,
+                OsStr::new(name),
+            )?);
+        }
+        let metadata = controlled_directories
+            .first()
+            .expect("controlled directory list always begins with metadata");
+        let (database_file, database_identity) =
+            create_private_file(metadata, OsStr::new(STATE_DATABASE_NAME))?;
+        let database_path =
+            crate::filesystem::absolute_from_path(&metadata.path.join(STATE_DATABASE_NAME))
+                .map_err(|error| {
+                    PortError::new(PortErrorKind::InvalidData, "derive metadata database path")
+                        .with_source(error)
+                })?;
+        let layout = MacOsDataRootLayout {
+            data_root: duplicate_validated_directory(&proof.data_root)?,
+            controlled_directories,
+            database_file,
+            database_identity,
+            database_path,
+            volume_id: proof.marker.identity().volume_id(),
+        };
+        layout.revalidate()?;
+        Ok(layout)
+    }
+
+    fn validate_layout(
+        &self,
+        identity: &InstallationIdentity,
+    ) -> Result<Self::DataRootLayout, PortError> {
+        let Some(data_root) =
+            open_private_directory_optional(&path_from_absolute(identity.data_root()))?
+        else {
+            return Err(PortError::new(
+                PortErrorKind::Unavailable,
+                "open registered data root",
+            ));
+        };
+        if volume_id_for_directory(&data_root)? != identity.volume_id() {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "validate registered data-root volume",
+            ));
+        }
+        let mut controlled_directories = Vec::with_capacity(CONTROLLED_DIRECTORIES.len());
+        for name in CONTROLLED_DIRECTORIES {
+            controlled_directories
+                .push(open_private_child_directory(&data_root, OsStr::new(name))?);
+        }
+        let metadata = controlled_directories
+            .first()
+            .expect("controlled directory list always begins with metadata");
+        let (database_file, database_identity) =
+            open_private_file(metadata, OsStr::new(STATE_DATABASE_NAME))?;
+        let database_path =
+            crate::filesystem::absolute_from_path(&metadata.path.join(STATE_DATABASE_NAME))
+                .map_err(|error| {
+                    PortError::new(PortErrorKind::InvalidData, "derive metadata database path")
+                        .with_source(error)
+                })?;
+        let layout = MacOsDataRootLayout {
+            data_root,
+            controlled_directories,
+            database_file,
+            database_identity,
+            database_path,
+            volume_id: identity.volume_id(),
+        };
+        layout.revalidate()?;
+        Ok(layout)
     }
 
     fn publish_ready(
@@ -243,6 +429,53 @@ impl BootstrapStore for MacOsHostAdapter {
     }
 }
 
+fn volume_id_for_directory(directory: &ValidatedDirectory) -> Result<VolumeId, PortError> {
+    let filesystem = crate::ffi::file_system_type(&directory.fd)
+        .map_err(|error| io_error("inspect data-root filesystem", error))?;
+    if filesystem != "apfs" {
+        return Err(PortError::new(
+            PortErrorKind::CapabilityUnavailable,
+            "require APFS data root",
+        ));
+    }
+    let bytes = crate::ffi::volume_uuid(&directory.fd)
+        .map_err(|error| io_error("read APFS volume UUID", error))?;
+    decode_volume_id(bytes)
+}
+
+fn decode_volume_id(bytes: Option<[u8; 16]>) -> Result<VolumeId, PortError> {
+    let bytes = bytes
+        .filter(|bytes| bytes.iter().any(|byte| *byte != 0))
+        .ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::CapabilityUnavailable,
+                "require APFS volume UUID",
+            )
+        })?;
+    let encoded = format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    );
+    VolumeId::from_str(&encoded).map_err(|error| {
+        PortError::new(PortErrorKind::InvalidData, "decode APFS volume UUID").with_source(error)
+    })
+}
+
 impl MacOsHostAdapter {
     fn validate_bootstrap_lock(&self, lock: &MacOsLockGuard) -> Result<(), PortError> {
         if lock.scope() != LifecycleScope::Bootstrap || !lock.belongs_to(self) {
@@ -378,5 +611,26 @@ mod tests {
         assert!(config_is_current(Some(&requested), &requested));
         assert!(!config_is_current(Some(&conflicting), &requested));
         assert!(!config_is_current(None, &requested));
+    }
+
+    #[test]
+    fn volume_uuid_bytes_require_a_nonzero_value_and_use_canonical_lowercase() {
+        assert_eq!(
+            decode_volume_id(None).unwrap_err().kind(),
+            PortErrorKind::CapabilityUnavailable
+        );
+        assert_eq!(
+            decode_volume_id(Some([0; 16])).unwrap_err().kind(),
+            PortErrorKind::CapabilityUnavailable
+        );
+        assert_eq!(
+            decode_volume_id(Some([
+                0x1a, 0x42, 0xc8, 0x88, 0x32, 0xe3, 0x48, 0x9c, 0x9b, 0xfa, 0x67, 0xfd, 0x64, 0x0a,
+                0x94, 0xe8,
+            ]))
+            .unwrap()
+            .to_string(),
+            "1a42c888-32e3-489c-9bfa-67fd640a94e8"
+        );
     }
 }

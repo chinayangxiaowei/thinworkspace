@@ -13,7 +13,13 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-core": frozenset(),
     "thinws-ports": frozenset({"thinws-core"}),
     "thinws-application": frozenset({"thinws-core", "thinws-ports"}),
-    "thinws-cli": frozenset({"thinws-application"}),
+    "thinws-cli": frozenset(
+        {
+            "thinws-adapter-macos",
+            "thinws-application",
+            "thinws-metadata-sqlite",
+        }
+    ),
     "thinws-adapter-git-cli": frozenset({"thinws-core", "thinws-ports"}),
     "thinws-adapter-macos": frozenset({"thinws-core", "thinws-ports"}),
     "thinws-metadata-sqlite": frozenset({"thinws-core", "thinws-ports"}),
@@ -22,7 +28,9 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
 # P1-01 freezes Core's complete direct dependency surface. Other product
 # crates add their external allowlist when their own implementation task begins.
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
-    "thinws-adapter-macos": frozenset({"rustix", "serde", "tempfile", "toml"}),
+    "thinws-adapter-macos": frozenset({"libc", "rustix", "serde", "tempfile", "toml"}),
+    "thinws-application": frozenset(),
+    "thinws-cli": frozenset({"clap", "directories", "serde_json", "tempfile"}),
     "thinws-core": frozenset({"thiserror", "uuid"}),
     "thinws-metadata-sqlite": frozenset({"rusqlite", "tempfile"}),
     "thinws-ports": frozenset(),

@@ -3,7 +3,10 @@
 
 //! SQLite implementation of the Phase 1 MetadataStore boundary.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -15,7 +18,10 @@ use thinws_core::{
     InstanceId, RemovalMode, UnixMillis, VolumeId, WorkspaceEvent, WorkspaceId, WorkspaceName,
     WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
-use thinws_ports::{MetadataStore, PortConflict, PortError, PortErrorKind};
+use thinws_ports::{
+    DataRootLayoutEvidence, MetadataSnapshot, MetadataStore, MetadataStoreFactory, PortConflict,
+    PortError, PortErrorKind,
+};
 
 /// SQLite application ID for ASCII `THWS`.
 pub const APPLICATION_ID: i32 = 1_414_027_091;
@@ -25,6 +31,12 @@ pub const SCHEMA_VERSION: i32 = 1;
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
 const DATABASE_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_CREATE)
+    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
+const DATABASE_EXISTING_WRITE_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
+const DATABASE_READ_ONLY_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_ONLY
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
     .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
 
@@ -47,6 +59,55 @@ pub struct SqliteMetadataStore {
     installation: InstallationRecord,
 }
 
+/// Stateless constructor and read-only inspector for SQLite metadata.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SqliteMetadataStoreFactory;
+
+impl<L: DataRootLayoutEvidence> MetadataStoreFactory<L> for SqliteMetadataStoreFactory {
+    fn initialize(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<InstallationRecord, PortError> {
+        layout.revalidate()?;
+        let path = database_path(layout.database_path());
+        let mut connection = Connection::open_with_flags(path, DATABASE_EXISTING_WRITE_FLAGS)
+            .map_err(|error| storage_error("open prepared metadata database", error))?;
+        layout.revalidate()?;
+        let installation = open_or_initialize(&mut connection, expected, busy_timeout)?;
+        layout.revalidate()?;
+        Ok(installation)
+    }
+
+    fn inspect(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<MetadataSnapshot, PortError> {
+        layout.revalidate()?;
+        let path = database_path(layout.database_path());
+        let mut connection = Connection::open_with_flags(path, DATABASE_READ_ONLY_FLAGS)
+            .map_err(|error| storage_error("open metadata database read-only", error))?;
+        connection
+            .busy_timeout(busy_timeout)
+            .map_err(|error| storage_error("set read-only SQLite busy timeout", error))?;
+        layout.revalidate()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|error| storage_error("begin read-only metadata snapshot", error))?;
+        validate_existing_database(&transaction, expected)?;
+        let installation = read_installation(&transaction)?;
+        let workspaces = read_workspaces_by_workspace_id(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| storage_error("finish read-only metadata snapshot", error))?;
+        layout.revalidate()?;
+        Ok(MetadataSnapshot::new(installation, workspaces))
+    }
+}
+
 impl SqliteMetadataStore {
     /// Opens or transactionally initializes a v1 database.
     ///
@@ -59,54 +120,7 @@ impl SqliteMetadataStore {
     ) -> Result<Self, PortError> {
         let mut connection = Connection::open_with_flags(path, DATABASE_OPEN_FLAGS)
             .map_err(|error| storage_error("open metadata database", error))?;
-        let application_id = pragma_i32(&connection, "application_id")?;
-        let user_version = pragma_i32(&connection, "user_version")?;
-        let user_table_count = user_table_count(&connection)?;
-
-        let initialize = match (application_id, user_version, user_table_count) {
-            (0, 0, 0) => true,
-            (APPLICATION_ID, SCHEMA_VERSION, _) => false,
-            (APPLICATION_ID, version, _) if version > SCHEMA_VERSION => {
-                return Err(PortError::new(
-                    PortErrorKind::UnsupportedVersion,
-                    "open future metadata schema",
-                ));
-            }
-            (0, _, _) => {
-                return Err(PortError::new(
-                    PortErrorKind::UnsupportedVersion,
-                    "refuse unowned metadata database",
-                ));
-            }
-            (APPLICATION_ID, _, _) => {
-                return Err(PortError::new(
-                    PortErrorKind::InvalidData,
-                    "validate metadata schema version",
-                ));
-            }
-            _ => {
-                return Err(PortError::new(
-                    PortErrorKind::UnsupportedVersion,
-                    "refuse foreign metadata database",
-                ));
-            }
-        };
-
-        let actual = if initialize {
-            configure_connection(&connection, busy_timeout)?;
-            migrate_v0(&mut connection, installation, SCHEMA_V1)?;
-            read_installation(&connection)?
-        } else {
-            let actual = read_installation(&connection)?;
-            if actual.identity() != installation.identity() {
-                return Err(PortError::conflict(
-                    "validate installation identity",
-                    PortConflict::InstallationIdentity,
-                ));
-            }
-            configure_connection(&connection, busy_timeout)?;
-            actual
-        };
+        let actual = open_or_initialize(&mut connection, installation, busy_timeout)?;
 
         Ok(Self {
             connection,
@@ -118,6 +132,131 @@ impl SqliteMetadataStore {
     pub fn connection_settings(&self) -> Result<ConnectionSettings, PortError> {
         read_connection_settings(&self.connection)
     }
+}
+
+fn open_or_initialize(
+    connection: &mut Connection,
+    installation: &InstallationRecord,
+    busy_timeout: Duration,
+) -> Result<InstallationRecord, PortError> {
+    let application_id = pragma_i32(connection, "application_id")?;
+    let user_version = pragma_i32(connection, "user_version")?;
+    let user_table_count = user_table_count(connection)?;
+
+    let initialize = match (application_id, user_version, user_table_count) {
+        (0, 0, 0) => true,
+        (APPLICATION_ID, SCHEMA_VERSION, _) => false,
+        (APPLICATION_ID, version, _) if version > SCHEMA_VERSION => {
+            return Err(PortError::new(
+                PortErrorKind::UnsupportedVersion,
+                "open future metadata schema",
+            ));
+        }
+        (0, _, _) => {
+            return Err(PortError::new(
+                PortErrorKind::UnsupportedVersion,
+                "refuse unowned metadata database",
+            ));
+        }
+        (APPLICATION_ID, _, _) => {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "validate metadata schema version",
+            ));
+        }
+        _ => {
+            return Err(PortError::new(
+                PortErrorKind::UnsupportedVersion,
+                "refuse foreign metadata database",
+            ));
+        }
+    };
+
+    let actual = if initialize {
+        configure_connection(connection, busy_timeout)?;
+        migrate_v0(connection, installation, SCHEMA_V1)?;
+        read_installation(connection)?
+    } else {
+        validate_existing_database(connection, installation)?;
+        configure_connection(connection, busy_timeout)?;
+        read_installation(connection)?
+    };
+    if actual.identity() != installation.identity() {
+        return Err(PortError::conflict(
+            "validate installation identity",
+            PortConflict::InstallationIdentity,
+        ));
+    }
+    Ok(actual)
+}
+
+fn validate_existing_database(
+    connection: &Connection,
+    expected: &InstallationRecord,
+) -> Result<(), PortError> {
+    let application_id = pragma_i32(connection, "application_id")?;
+    let user_version = pragma_i32(connection, "user_version")?;
+    if application_id != APPLICATION_ID {
+        return Err(PortError::new(
+            PortErrorKind::UnsupportedVersion,
+            "validate SQLite application ID",
+        ));
+    }
+    if user_version != SCHEMA_VERSION {
+        let kind = if user_version > SCHEMA_VERSION {
+            PortErrorKind::UnsupportedVersion
+        } else {
+            PortErrorKind::InvalidData
+        };
+        return Err(PortError::new(kind, "validate SQLite schema version"));
+    }
+    validate_schema_catalog(connection)?;
+    let actual = read_installation(connection)?;
+    if actual.identity() != expected.identity() {
+        return Err(PortError::conflict(
+            "validate installation identity",
+            PortConflict::InstallationIdentity,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_schema_catalog(connection: &Connection) -> Result<(), PortError> {
+    let expected = Connection::open_in_memory()
+        .map_err(|error| storage_error("open expected schema database", error))?;
+    expected
+        .execute_batch(SCHEMA_V1)
+        .map_err(|error| storage_error("build expected schema catalog", error))?;
+    if schema_catalog(connection)? != schema_catalog(&expected)? {
+        return Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "validate SQLite schema catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn schema_catalog(
+    connection: &Connection,
+) -> Result<Vec<(String, String, String, String)>, PortError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, coalesce(sql, '') FROM sqlite_schema
+             WHERE name NOT GLOB 'sqlite_*'
+             ORDER BY type, name, tbl_name",
+        )
+        .map_err(|error| storage_error("prepare SQLite schema catalog", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|error| storage_error("query SQLite schema catalog", error))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| storage_error("read SQLite schema catalog", error))
+}
+
+fn database_path(path: &AbsolutePath) -> PathBuf {
+    PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()))
 }
 
 impl MetadataStore for SqliteMetadataStore {
@@ -179,22 +318,7 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     fn workspaces(&self) -> Result<Vec<WorkspaceRecord>, PortError> {
-        let sql = format!(
-            "SELECT {WORKSPACE_COLUMNS} FROM workspaces \
-             ORDER BY name COLLATE BINARY, workspace_id"
-        );
-        let mut statement = self
-            .connection
-            .prepare(&sql)
-            .map_err(|error| storage_error("prepare Workspace list", error))?;
-        let rows = statement
-            .query_map([], RawWorkspace::from_row)
-            .map_err(|error| storage_error("query Workspace list", error))?;
-        rows.map(|row| {
-            row.map_err(|error| storage_error("read Workspace row", error))?
-                .into_record()
-        })
-        .collect()
+        read_workspaces(&self.connection)
     }
 
     fn record_failure(
@@ -492,6 +616,44 @@ fn read_workspace(
         .map_err(|error| storage_error("read Workspace", error))?
         .map(RawWorkspace::into_record)
         .transpose()
+}
+
+fn read_workspaces(connection: &Connection) -> Result<Vec<WorkspaceRecord>, PortError> {
+    let sql = format!(
+        "SELECT {WORKSPACE_COLUMNS} FROM workspaces \
+         ORDER BY name COLLATE BINARY, workspace_id"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| storage_error("prepare Workspace list", error))?;
+    let rows = statement
+        .query_map([], RawWorkspace::from_row)
+        .map_err(|error| storage_error("query Workspace list", error))?;
+    rows.map(|row| {
+        row.map_err(|error| storage_error("read Workspace row", error))?
+            .into_record()
+    })
+    .collect()
+}
+
+fn read_workspaces_by_workspace_id(
+    connection: &Connection,
+) -> Result<Vec<WorkspaceRecord>, PortError> {
+    let sql = format!(
+        "SELECT {WORKSPACE_COLUMNS} FROM workspaces \
+         ORDER BY workspace_id"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| storage_error("prepare Workspace snapshot", error))?;
+    let rows = statement
+        .query_map([], RawWorkspace::from_row)
+        .map_err(|error| storage_error("query Workspace snapshot", error))?;
+    rows.map(|row| {
+        row.map_err(|error| storage_error("read Workspace snapshot row", error))?
+            .into_record()
+    })
+    .collect()
 }
 
 fn configure_connection(connection: &Connection, timeout: Duration) -> Result<(), PortError> {

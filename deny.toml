@@ -3,7 +3,7 @@ all-features = true
 
 [licenses]
 include-dev = true
-allow = ["MIT", "Apache-2.0", "Unicode-3.0", "NCSA"]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "NCSA", "MPL-2.0"]
 
 # Only repository-owned crates use the project's noncommercial license.
 [[licenses.exceptions]]
@@ -33,6 +33,16 @@ allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [[licenses.exceptions]]
 name = "thinws-adapter-macos"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-application"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-cli"
 version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 

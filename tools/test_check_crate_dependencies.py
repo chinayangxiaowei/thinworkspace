@@ -12,7 +12,15 @@ class CrateDependencyDirectionTests(unittest.TestCase):
             "thinws-core": {"thiserror", "uuid"},
             "thinws-ports": {"thinws-core"},
             "thinws-application": {"thinws-core", "thinws-ports"},
-            "thinws-cli": {"thinws-application"},
+            "thinws-cli": {
+                "clap",
+                "directories",
+                "serde_json",
+                "tempfile",
+                "thinws-adapter-macos",
+                "thinws-application",
+                "thinws-metadata-sqlite",
+            },
             "thinws-adapter-git-cli": {"thinws-core", "thinws-ports"},
             "thinws-adapter-macos": {"thinws-core", "thinws-ports"},
             "thinws-metadata-sqlite": {"thinws-core", "thinws-ports"},
@@ -55,6 +63,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
             validate_dependency_graph(
                 {
                     "thinws-adapter-macos": {
+                        "libc",
                         "thinws-core",
                         "thinws-ports",
                         "rustix",
@@ -69,6 +78,31 @@ class CrateDependencyDirectionTests(unittest.TestCase):
         self.assertEqual(
             validate_dependency_graph({"thinws-adapter-macos": {"rusqlite"}}),
             ["thinws-adapter-macos must not depend on rusqlite"],
+        )
+
+    def test_cli_can_wire_adapters_but_not_depend_on_core_or_sqlite_api(self) -> None:
+        self.assertEqual(
+            validate_dependency_graph(
+                {
+                    "thinws-cli": {
+                        "clap",
+                        "directories",
+                        "serde_json",
+                        "tempfile",
+                        "thinws-adapter-macos",
+                        "thinws-application",
+                        "thinws-metadata-sqlite",
+                    }
+                }
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_dependency_graph({"thinws-cli": {"thinws-core", "rusqlite"}}),
+            [
+                "thinws-cli must not depend on rusqlite",
+                "thinws-cli must not depend on thinws-core",
+            ],
         )
 
     def test_core_cannot_depend_on_an_adapter(self) -> None:

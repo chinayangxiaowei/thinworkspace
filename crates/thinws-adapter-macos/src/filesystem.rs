@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -172,6 +172,169 @@ pub(crate) fn path_from_absolute(path: &AbsolutePath) -> PathBuf {
 pub(crate) fn open_private_directory(path: &Path) -> Result<ValidatedDirectory, PortError> {
     open_private_directory_optional(path)?
         .ok_or_else(|| PortError::new(PortErrorKind::NotFound, "open private directory"))
+}
+
+pub(crate) fn prepare_private_directory(
+    path: &Path,
+    require_empty: bool,
+) -> Result<ValidatedDirectory, PortError> {
+    let mut current = rustix::fs::open(Path::new("/"), DIRECTORY_OPEN_FLAGS, Mode::empty())
+        .map_err(|error| io_error("open filesystem root", error))?;
+    let mut saw_root = false;
+    let mut components = path.components().peekable();
+    let mut current_path = PathBuf::from("/");
+    let mut final_existed = true;
+
+    while let Some(component) = components.next() {
+        let name = match component {
+            Component::RootDir if !saw_root => {
+                saw_root = true;
+                continue;
+            }
+            Component::Normal(name) if saw_root => name,
+            _ => return Err(validation_error("private directory path is not canonical")),
+        };
+        let is_final = components.peek().is_none();
+        let next = match rustix::fs::openat(&current, name, DIRECTORY_OPEN_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                rustix::fs::mkdirat(&current, name, Mode::from_bits_retain(0o700))
+                    .map_err(|error| io_error("create private directory component", error))?;
+                sync_directory(&current)?;
+                let fd = rustix::fs::openat(&current, name, DIRECTORY_OPEN_FLAGS, Mode::empty())
+                    .map_err(|error| io_error("open created private directory", error))?;
+                let stat = rustix::fs::fstat(&fd)
+                    .map_err(|error| io_error("inspect created private directory", error))?;
+                validate_directory_stat(&stat)?;
+                if is_final {
+                    final_existed = false;
+                }
+                fd
+            }
+            Err(error) => return Err(io_error("open private directory component", error)),
+        };
+        current_path.push(name);
+        current = next;
+    }
+
+    if !saw_root || current_path == Path::new("/") {
+        return Err(validation_error("private directory path is not canonical"));
+    }
+    let stat = rustix::fs::fstat(&current)
+        .map_err(|error| io_error("inspect private directory", error))?;
+    validate_directory_stat(&stat)?;
+    let directory = ValidatedDirectory {
+        identity: identity(&stat),
+        fd: current,
+        path: current_path,
+    };
+    if require_empty && final_existed && !directory_is_empty(&directory)? {
+        return Err(PortError::new(
+            PortErrorKind::NotEmpty,
+            "require empty private directory",
+        ));
+    }
+    Ok(directory)
+}
+
+pub(crate) fn create_private_child_directory(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<ValidatedDirectory, PortError> {
+    rustix::fs::mkdirat(&parent.fd, name, Mode::from_bits_retain(0o700))
+        .map_err(|error| io_error("create controlled directory", error))?;
+    sync_directory(&parent.fd)?;
+    open_private_child_directory(parent, name)
+}
+
+pub(crate) fn open_private_child_directory(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<ValidatedDirectory, PortError> {
+    let fd = rustix::fs::openat(&parent.fd, name, DIRECTORY_OPEN_FLAGS, Mode::empty()).map_err(
+        |error| {
+            let kind = if error == rustix::io::Errno::NOENT {
+                PortErrorKind::InvalidData
+            } else {
+                PortErrorKind::Io
+            };
+            PortError::new(kind, "open controlled directory").with_source(error)
+        },
+    )?;
+    let stat =
+        rustix::fs::fstat(&fd).map_err(|error| io_error("inspect controlled directory", error))?;
+    validate_directory_stat(&stat)?;
+    Ok(ValidatedDirectory {
+        fd,
+        identity: identity(&stat),
+        path: parent.path.join(name),
+    })
+}
+
+pub(crate) fn duplicate_validated_directory(
+    directory: &ValidatedDirectory,
+) -> Result<ValidatedDirectory, PortError> {
+    let fd = rustix::io::dup(&directory.fd)
+        .map_err(|error| io_error("duplicate validated directory", error))?;
+    Ok(ValidatedDirectory {
+        fd,
+        identity: directory.identity,
+        path: directory.path.clone(),
+    })
+}
+
+pub(crate) fn create_private_file(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<(File, FileIdentity), PortError> {
+    let fd = rustix::fs::openat(
+        &parent.fd,
+        name,
+        OFlags::CREATE
+            .union(OFlags::EXCL)
+            .union(OFlags::RDWR)
+            .union(OFlags::CLOEXEC)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::NONBLOCK),
+        Mode::from_bits_retain(0o600),
+    )
+    .map_err(|error| io_error("create controlled file", error))?;
+    let file = File::from(fd);
+    let identity = validate_private_file(&file, "validate controlled file")?;
+    file.sync_all()
+        .map_err(|error| io_error("sync controlled file", error))?;
+    sync_directory(&parent.fd)?;
+    Ok((file, identity))
+}
+
+pub(crate) fn open_private_file(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<(File, FileIdentity), PortError> {
+    let fd = rustix::fs::openat(parent.fd.as_fd(), name, PRIVATE_READ_FLAGS, Mode::empty())
+        .map_err(|error| {
+            let kind = if error == rustix::io::Errno::NOENT {
+                PortErrorKind::InvalidData
+            } else {
+                PortErrorKind::Io
+            };
+            PortError::new(kind, "open controlled file").with_source(error)
+        })?;
+    let file = File::from(fd);
+    let identity = validate_private_file(&file, "validate controlled file")?;
+    Ok((file, identity))
+}
+
+fn directory_is_empty(directory: &ValidatedDirectory) -> Result<bool, PortError> {
+    let mut entries = rustix::fs::Dir::read_from(&directory.fd)
+        .map_err(|error| io_error("read private directory", error))?;
+    for entry in &mut entries {
+        let entry = entry.map_err(|error| io_error("read private directory entry", error))?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn open_private_directory_optional(

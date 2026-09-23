@@ -300,11 +300,20 @@ dependencies = [
 name = "thinws-adapter-macos"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rustix",
  "serde",
  "thinws-core",
  "thinws-ports",
  "toml",
+]
+
+[[package]]
+name = "thinws-application"
+version = "0.1.0"
+dependencies = [
+ "thinws-core",
+ "thinws-ports",
 ]
 
 [[package]]
@@ -322,6 +331,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde_json",
  "thinws-adapter-macos",
+ "thinws-application",
  "thinws-core",
  "thinws-p0-cleanup",
  "thinws-p0-probe",

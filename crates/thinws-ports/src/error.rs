@@ -12,6 +12,12 @@ pub enum PortErrorKind {
     InvalidData,
     /// The durable format is newer, foreign, or otherwise unsupported.
     UnsupportedVersion,
+    /// The host filesystem or another required platform feature is unavailable.
+    CapabilityUnavailable,
+    /// A target that must be new or empty contains unowned entries.
+    NotEmpty,
+    /// A previously registered path or volume cannot currently be reached.
+    Unavailable,
     /// An advisory lock was not acquired within its bounded wait.
     Timeout,
     /// A filesystem operation failed.

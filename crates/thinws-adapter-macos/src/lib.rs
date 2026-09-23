@@ -1,9 +1,11 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 //! macOS bootstrap document and lifecycle-lock Adapter.
 
 mod document;
+#[allow(unsafe_code)]
+mod ffi;
 mod filesystem;
 mod lock;
 mod store;
@@ -15,7 +17,7 @@ pub use document::{
     DocumentError, MAX_DOCUMENT_BYTES, decode_bootstrap_config, decode_root_marker,
 };
 pub use lock::MacOsLockGuard;
-pub use store::MacOsInitializingProof;
+pub use store::{MacOsDataRootLayout, MacOsInitializingProof, MacOsPreparedDataRoot};
 use thinws_ports::{PortError, PortErrorKind};
 
 /// macOS implementation shared by BootstrapStore and LifecycleLock.

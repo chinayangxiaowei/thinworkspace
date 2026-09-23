@@ -8,7 +8,8 @@ mod error;
 mod metadata;
 
 pub use bootstrap::{
-    BootstrapStore, LifecycleLock, LifecycleLockGuard, LifecycleScope, PublishResult,
+    BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
+    PreparedDataRootEvidence, PublishResult,
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
-pub use metadata::MetadataStore;
+pub use metadata::{MetadataSnapshot, MetadataStore, MetadataStoreFactory};

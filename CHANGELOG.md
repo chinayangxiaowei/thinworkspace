@@ -21,6 +21,7 @@
 - 增加商业授权申请说明和公开联系渠道。
 - 增加只读 Host/Path Probe 技术实验及固定 Rust/质量工具链，验证 APFS 卷身份、路径重验和候选后端预检；仅为 Phase 0 实验，不是已发布的 `thinws` 产品能力。
 - 增加 APFS 物化技术实验、真实双卷与失败回滚测试，以及布局策略 fuzz：验证同卷 clone、跨卷拒绝、独立 Full Copy 和显式降级的证据边界；仍为 Phase 0 实验，不提供 Phase 1 CLI。
+- 增加首批 Phase 1 单机 CLI：`thinws init` 在 APFS 上建立或幂等验证私有 data root，`thinws doctor` 以只读产品状态检查实例、受控布局、SQLite 元数据和未完成工作区数量，并提供稳定的人类/JSON 输出及退出码。
 
 ### Changed
 

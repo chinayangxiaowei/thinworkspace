@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -6,14 +7,19 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::{Builder, TempDir};
 use thinws_core::{
     AbsolutePath, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId, RemovalMode,
     UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceReservation, WorkspaceState,
 };
-use thinws_metadata_sqlite::{APPLICATION_ID, SCHEMA_VERSION, SqliteMetadataStore};
-use thinws_ports::{MetadataStore, PortConflict, PortErrorKind};
+use thinws_metadata_sqlite::{
+    APPLICATION_ID, SCHEMA_VERSION, SqliteMetadataStore, SqliteMetadataStoreFactory,
+};
+use thinws_ports::{
+    DataRootLayoutEvidence, MetadataStore, MetadataStoreFactory, PortConflict, PortError,
+    PortErrorKind,
+};
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
 const OTHER_INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f34";
@@ -29,6 +35,30 @@ const WORKSPACE_IDS: [&str; 8] = [
     "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f46",
     "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f47",
 ];
+
+struct TestLayout {
+    database_path: AbsolutePath,
+}
+
+impl TestLayout {
+    fn new(path: &std::path::Path) -> Self {
+        let path = fs::canonicalize(path).unwrap();
+        Self {
+            database_path: AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec())
+                .unwrap(),
+        }
+    }
+}
+
+impl DataRootLayoutEvidence for TestLayout {
+    fn database_path(&self) -> &AbsolutePath {
+        &self.database_path
+    }
+
+    fn revalidate(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+}
 
 fn controlled_tempdir() -> TempDir {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-02-sqlite-tests");
@@ -48,6 +78,147 @@ fn installation() -> InstallationRecord {
         ),
         UnixMillis::new(1_700_000_000_000).unwrap(),
     )
+}
+
+#[test]
+fn p1_03_factory_initializes_precreated_file_and_inspects_read_only() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let layout = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+
+    let actual = factory
+        .initialize(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(actual, expected);
+    let main_database_before = fs::read(&database).unwrap();
+    let snapshot = factory
+        .inspect(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(snapshot.installation(), &expected);
+    assert!(snapshot.workspaces().is_empty());
+    assert_eq!(fs::read(&database).unwrap(), main_database_before);
+}
+
+#[test]
+fn p1_03_inspection_orders_the_snapshot_by_workspace_id() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let layout = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+    factory
+        .initialize(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+
+    let mut writer = open(&database);
+    writer
+        .reserve_workspace(&reservation(
+            1,
+            "alpha",
+            "/Volumes/data/thinws/workspaces/alpha",
+        ))
+        .unwrap();
+    writer
+        .reserve_workspace(&reservation(
+            0,
+            "zulu",
+            "/Volumes/data/thinws/workspaces/zulu",
+        ))
+        .unwrap();
+    drop(writer);
+
+    let snapshot = factory
+        .inspect(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    let ids = snapshot
+        .workspaces()
+        .iter()
+        .map(|record| record.reservation().workspace_id().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, WORKSPACE_IDS[..2]);
+}
+
+#[test]
+fn p1_03_read_only_inspection_observes_committed_wal_and_ignores_uncommitted_change() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let layout = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+    factory
+        .initialize(&layout, &expected, Duration::from_millis(100))
+        .unwrap();
+
+    let mut writer =
+        SqliteMetadataStore::open(&database, &expected, Duration::from_millis(100)).unwrap();
+    let value = reservation(
+        0,
+        "wal-visible",
+        "/Volumes/data/thinws/workspaces/wal-visible",
+    );
+    writer.reserve_workspace(&value).unwrap();
+    let mut concurrent = Connection::open(&database).unwrap();
+    concurrent.busy_timeout(Duration::from_millis(100)).unwrap();
+    let transaction = concurrent
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE workspaces
+             SET state='error', last_error_code='E_FILESYSTEM', updated_at_unix_ms=?1
+             WHERE workspace_id=?2",
+            params![
+                UnixMillis::new(1_700_000_000_999).unwrap().get(),
+                value.workspace_id().to_string()
+            ],
+        )
+        .unwrap();
+
+    let snapshot = factory
+        .inspect(&layout, &expected, Duration::from_millis(100))
+        .unwrap();
+    assert_eq!(snapshot.workspaces().len(), 1);
+    assert_eq!(snapshot.workspaces()[0].state(), WorkspaceState::Creating);
+    drop(transaction);
+    drop(writer);
+}
+
+#[test]
+fn p1_03_inspection_rejects_schema_drift_without_repairing_it() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let layout = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+    factory
+        .initialize(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch("CREATE TABLE unexpected(value INTEGER) STRICT;")
+        .unwrap();
+
+    let error = factory
+        .inspect(&layout, &expected, Duration::from_millis(50))
+        .unwrap_err();
+    assert_eq!(error.kind(), PortErrorKind::InvalidData);
+    assert_eq!(error.operation(), "validate SQLite schema catalog");
+    assert!(
+        Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='unexpected'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok()
+    );
 }
 
 fn reservation(index: usize, name: &str, target: &str) -> WorkspaceReservation {
@@ -991,6 +1162,7 @@ fn failed_delete_rolls_back_tombstone_and_active_row_together() {
     );
     drop(store);
 
+    let mut store = open(&path);
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
@@ -1000,7 +1172,6 @@ fn failed_delete_rolls_back_tombstone_and_active_row_together() {
         .unwrap();
     drop(connection);
 
-    let mut store = open(&path);
     assert!(
         store
             .complete_deletion(

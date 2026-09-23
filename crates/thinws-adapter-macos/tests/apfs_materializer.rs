@@ -276,7 +276,13 @@ fn nonempty_target_is_rejected_without_modifying_its_contents() {
 
 #[test]
 fn unsupported_source_entry_is_rejected_before_the_first_target_write() {
-    let temp = controlled_root("special-");
+    // Unix-domain socket paths are bounded by `sockaddr_un::sun_path`. Keep
+    // this fixture independent of the checkout path so it also runs from the
+    // longer temporary worktrees created by cargo-mutants.
+    let temp = Builder::new()
+        .prefix("tw-p106-special-")
+        .tempdir_in("/private/tmp")
+        .unwrap();
     let source = temp.path().join("source");
     let target = temp.path().join("target");
     let staging = temp.path().join("staging");

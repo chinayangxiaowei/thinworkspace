@@ -184,12 +184,16 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Backlog |
+| P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | In Progress |
 | P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-03、P0-06 | R4 | Backlog |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
 
 小阶段退出：非 Git 来源、原样目录范围、默认 CoW、显式复制、路径竞态和 partial rollback 通过；未完成目录不被误报 Ready，Ready 不要求 Git clean。
+
+当前领取：P1-06 由主 Agent 于 2026-09-23 领取，基线 `50617e9`，任务分支 `task/p1-06-apfs-materializer`，继续使用唯一持久 checkout `/Volumes/data/code/worktree`。风险 R4，主要写入区为 `thinws-core`、`thinws-ports` 和 `thinws-adapter-macos`；P0 Probe/物化实验只作为证据输入，不成为生产依赖。范围内是共同物化值、APFS 路径 Probe、`ApfsCloneMaterializer`、真实同卷 CoW、清单/保真校验、源变化检测、partial receipt 和身份约束回滚；范围外是 Full Copy/fallback、公开 CLI、SQLite 生命周期编排、Workspace Ready、删除/GC、Git 和后续平台。
+
+验收断言：同卷真实 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、非 UTF-8 名称、普通文件/目录/符号链接及约定权限和 mtime 均按设计物化，普通文件写入与源隔离，Receipt 的 clone 数和 CoW 事实准确；空树与仅目录/链接树成功但不冒充 CoW confirmed。跨卷、路径/卷/挂载或源身份变化、包含关系、非空目标、特殊文件和子挂载在错误边界停止；部分创建按已登记身份逆序回滚，替换对象或无法确认回滚时保留 partial receipt 且不扩大删除。Probe 的 supported/unsupported/unknown、缺失目标父目录和四类实际路径组合有自动及真实平台证据。P1-06 不调用 Full Copy、不写产品 SQLite、不发布 Ready，也不增加 `workspace create` 命令。
 
 ### 4.4 P1.d 查询与路径交付
 

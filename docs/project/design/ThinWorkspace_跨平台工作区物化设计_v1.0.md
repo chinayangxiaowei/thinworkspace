@@ -63,7 +63,7 @@ trait WorkspaceMaterializer {
         &self,
         request: &MaterializeRequest,
         plan: &MaterializationPlan,
-    ) -> Result<MaterializationReceipt>;
+    ) -> Result<MaterializationReceipt, MaterializationFailure>;
     fn measure_usage(&self, workspace: &WorkspacePath) -> Result<UsageReport>;
     fn destroy_materialization(
         &self,
@@ -74,9 +74,17 @@ trait WorkspaceMaterializer {
 
 Materializer 从原始目录物化计划指定的文件项；它不调用 Git、不按 `.gitignore` 或 Git 跟踪状态过滤、不识别开发语言，也不制定构建目录或缓存策略。目标必须不存在或是本操作已验证的空目录；没有预建 `.git` 控制项。来源 `.git` 与其他名称同样处理，不保留 Git 特判。
 
-`materialize` 的失败可携带 partial receipt。`destroy_materialization` 在 Application 授权后，以 dirfd-relative/no-follow 方式清理已验证副本 `root/` 内的全部内容，包括 `.git`、未跟踪文件和后来生成的文件；不跟随链接清理外部目标。Application 随后删除同一 WorkspaceId 下的 `.state` 和空容器目录；data root 日志不属于删除范围。返回本次删除、原本不存在和仍未清理的对象，供失败诊断；不承诺中断后自动续做。
+`MaterializationFailure` 必须同时保留结构化失败分类和本次尝试的 partial receipt；即使写入前失败，partial receipt 也要明确记录没有创建对象及回滚无需执行，不能把部分外部状态藏进普通字符串错误。`destroy_materialization` 在 Application 授权后，以 dirfd-relative/no-follow 方式清理已验证副本 `root/` 内的全部内容，包括 `.git`、未跟踪文件和后来生成的文件；不跟随链接清理外部目标。Application 随后删除同一 WorkspaceId 下的 `.state` 和空容器目录；data root 日志不属于删除范围。返回本次删除、原本不存在和仍未清理的对象，供失败诊断；不承诺中断后自动续做。
 
-### 3.3 输入内容与保证范围
+### 3.3 Phase 1 实现边界
+
+Core 拥有支持性、请求/有效/实际模式、fallback、执行结果、CoW、回滚、路径身份摘要、Plan 和 Receipt 等跨平台值；Ports 只声明上述两个边界及其结构化失败；macOS Adapter 拥有目录 FD、errno 和系统调用细节。生产 Adapter 不依赖 `experiments/p0/` crate，P0 实验只能作为待重新审核的算法和测试输入。
+
+P1-06 交付 APFS 路径 Probe、共同数据模型和 `ApfsCloneMaterializer`。Probe 必须能观察不存在目标的最近存在父目录，供后续 dry-run 使用；真正执行 P1-06 时，target root 必须已经由调用者在受控 Workspace 容器中建立为空目录并绑定到 Plan，Materializer 不创建任意目标根或 Workspace 容器。P1-06 只执行 `cow-clone`，不实现 Full Copy 或 fallback；P1-07 在同一 Port 上增加 Full Copy 和获准降级，不能修改 APFS 已冻结的成功、失败或回滚语义。P1-09 才负责 lifecycle lock、Creating/Ready/Error 持久化和公开 `workspace create`，不得提前塞进 Adapter。
+
+执行输入由 source、target、staging、trash 四个规范绝对路径和冻结 Plan 组成。Plan 必须绑定这四类路径的身份/Volume 证据摘要、请求与有效模式、选中 Adapter 和 fallback policy；Adapter 在任何写入前重新 Probe 并逐项核对，不能接受调用者只填一个 Volume ID。成功 Receipt 必须来自执行后的源/目标清单核对，并记录普通文件数、实际成功 clone 数、已创建对象、源/目标卷、CoW、回滚、耗时与可用空间估算；空树或仅目录/链接树的成功 Receipt 仍为 `cow=not-used`。失败 Receipt 保留按创建顺序登记的对象、失败点、执行后源/目标观察和回滚结果；不能只返回“复制失败”。
+
+### 3.4 输入内容与保证范围
 
 源是本次观察到的磁盘目录，不是 Git 提交，也不具有天然不可变性。支持目录、普通文件和符号链接；特殊文件、子挂载或无法表示的名称明确失败，不静默跳过。硬链接的每个普通文件目录项分别创建独立副本，不保留硬链接拓扑，不使用硬链接共享可写源。
 

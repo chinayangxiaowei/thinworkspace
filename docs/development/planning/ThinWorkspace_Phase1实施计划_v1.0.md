@@ -193,7 +193,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 
 当前领取：P1-06 由主 Agent 于 2026-09-23 领取，基线 `50617e9`，任务分支 `task/p1-06-apfs-materializer`，继续使用唯一持久 checkout `/Volumes/data/code/worktree`。风险 R4，主要写入区为 `thinws-core`、`thinws-ports` 和 `thinws-adapter-macos`；P0 Probe/物化实验只作为证据输入，不成为生产依赖。范围内是共同物化值、APFS 路径 Probe、`ApfsCloneMaterializer`、真实同卷 CoW、清单/保真校验、源变化检测、partial receipt 和身份约束回滚；范围外是 Full Copy/fallback、公开 CLI、SQLite 生命周期编排、Workspace Ready、删除/GC、Git 和后续平台。
 
-验收断言：同卷真实 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、非 UTF-8 名称、普通文件/目录/符号链接及约定权限和 mtime 均按设计物化，普通文件写入与源隔离，Receipt 的 clone 数和 CoW 事实准确；空树与仅目录/链接树成功但不冒充 CoW confirmed。跨卷、路径/卷/挂载或源身份变化、包含关系、非空目标、特殊文件和子挂载在错误边界停止；部分创建按已登记身份逆序回滚，替换对象或无法确认回滚时保留 partial receipt 且不扩大删除。Probe 的 supported/unsupported/unknown、缺失目标父目录和四类实际路径组合有自动及真实平台证据。P1-06 不调用 Full Copy、不写产品 SQLite、不发布 Ready，也不增加 `workspace create` 命令。
+验收断言：同卷真实 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、系统可表示的原始名称、普通文件/目录/符号链接及约定权限和 mtime 均按设计物化，普通文件写入与源隔离，Receipt 的 clone 数和 CoW 事实准确；任意非 UTF-8 字节只在不接触文件系统的路径证据编码/解析测试中验证无损，APFS 以 `EILSEQ` 拒绝的名称不冒充可创建。空树与仅目录/链接树成功但不冒充 CoW confirmed。跨卷、路径/卷/挂载或源身份变化、包含关系、非空目标、特殊文件和子挂载在错误边界停止；部分创建按已登记身份逆序回滚，替换对象或无法确认回滚时保留 partial receipt 且不扩大删除。Probe 的 supported/unsupported/unknown、缺失目标父目录和四类实际路径组合有自动及真实平台证据。P1-06 不调用 Full Copy、不写产品 SQLite、不发布 Ready，也不增加 `workspace create` 命令。
 
 ### 4.4 P1.d 查询与路径交付
 

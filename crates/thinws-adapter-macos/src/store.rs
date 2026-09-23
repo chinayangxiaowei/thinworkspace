@@ -690,10 +690,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires repository and system temporary directories on different APFS volumes"]
+    #[ignore = "requires THINWS_P1_CROSS_VOLUME_ROOT on an APFS volume distinct from system temp"]
     fn layout_revalidation_rejects_a_real_different_apfs_volume() {
-        let repository_root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-03-volume-tests");
+        let Some(repository_root) = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT") else {
+            eprintln!("skipped: THINWS_P1_CROSS_VOLUME_ROOT is not set");
+            return;
+        };
+        let repository_root = PathBuf::from(repository_root);
         fs::create_dir_all(&repository_root).unwrap();
         let data_root = Builder::new()
             .prefix("registered-root-")

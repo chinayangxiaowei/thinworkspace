@@ -185,7 +185,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | In Progress |
-| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-03、P0-06 | R4 | Backlog |
+| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Backlog |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
 
@@ -234,7 +234,7 @@ P0-01 → P0-02 → P0-06 → P0-07
               └→ P0-05
 
 P0 当前未取消任务与阶段条件 → P1-01 → P1-02 → P1-03
-P1-03、P0-06 → P1-06 / P1-07 → P1-09
+P1-03、P0-06 → P1-06 → P1-07 → P1-09
 P1-03、P0-07 → P1-16
 P1-09、P1-16 → P1-10
 P1-09、P1-16 → P1-12 → P1-13

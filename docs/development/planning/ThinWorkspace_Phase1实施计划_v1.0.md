@@ -127,7 +127,7 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 |---|---|---|---|---|
 | P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Done |
 | P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Done |
-| P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
+| P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R4 | In Progress |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
 
@@ -155,6 +155,8 @@ P1-02 完成记录（2026-09-23）：
 - `thinws_workspace_state` 与 `thinws_bootstrap_document` 使用固定 cargo-fuzz/nightly 各运行 61 秒，分别完成 15,327,490 与 1,723,157 次执行，无 crash/hang，未产生需要保留的回归样本。后续审核修正未改变两个 harness 可达的状态/文档解析代码，按《任务流程》复用该证据。
 - ADR 设计候选由 GPT-6 Astra（`gpt-6-astra` / `xhigh`）独立只读审核为 Approve。实现终审先后识别父目录身份、空库判断和 REPLACE/rowid 绕过并退回修正；同一规定模型对最终完整范围 `4fd9dd7..0d89d09` 审核为 Approve，Critical/High/Normal/Low 均为 0，结论绑定精确 commit `0d89d0948f9f55f408d955819c2a5206415b2821`。
 - 未执行线上 CI、线上 PR 或 push，符合当前本地流程；供应链审计使用本地 1261 条 advisory 数据，未联网刷新。极端创建权限被 umask 削减或首次文件校验失败时可能留下未发布的零字节临时项，它不会发布 marker/config 或冒报成功，属于 ADR 已允许报告并显式清理的未发布残留，不扩展为自动恢复。`/Volumes/data/code/worktree` 是维护者指定的持久 checkout，不删除。P1-02 Done 不表示 P1.a 小阶段或 Phase 1 放行；P1-03 仍是小阶段剩余任务。
+
+当前领取：P1-03 由主 Agent 于 2026-09-23 领取，基线 `dfa345b`，任务分支 `task/p1-03-init-doctor`，继续使用 `/Volumes/data/code/worktree`。范围内是现有 BootstrapStore/MetadataStore Port 的初始化构造边界、macOS 私有目录与 APFS Volume ID、Application init/doctor 编排，以及首批 `thinws init|doctor` 人类/JSON 契约；范围外是 Workspace 物化、GitInspector、修复/恢复、删除、GC 和其余 CLI。因引入最小 macOS Volume UUID FFI，风险从原 R3 调整为 R4；先审核本段及对应设计/ADR/公开契约，再进入代码。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

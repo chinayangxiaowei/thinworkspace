@@ -22,12 +22,12 @@ Core/Application 不直接调用 OS、Git CLI 或 SQLite。Phase 1 只有以下�
 
 | Port | 唯一职责 |
 |---|---|
-| BootstrapStore | 读取、校验和发布实例配置与 data root 标记 |
+| BootstrapStore | 准备/校验 bootstrap 与 data root 布局，读取并发布实例配置与 root 标记 |
 | PlatformProbe | 报告实际路径与候选后端能力 |
 | WorkspaceMaterializer | 目录物化、空间测量及获准的范围内清理 |
 | GitInspector | 发现工作区内仓库并只读报告已跟踪变更；不写 refs/index/config、不提交、不联网 |
 | ProcessProbe | 尽力报告当前用户可见的外部进程占用，不托管或终止进程 |
-| MetadataStore | Workspace 状态、最终物化 Receipt 和删除结果的持久化 |
+| MetadataStore | 初始化/只读打开 SQLite，并持久化 Workspace 状态、最终物化 Receipt 和删除结果 |
 | LifecycleLock | bootstrap 与 data root 生命周期的有界互斥 |
 
 不保留旧 GitBackend 的 attach/detach/fetch/commit 等方法，不新增 AuditService 或交付编排 Port。普通持久日志使用既有日志设施。
@@ -50,7 +50,15 @@ data root 的 `.thinws-root.toml` 保存匹配的实例、路径、卷和 `initi
 
 ### 3.2 初始化
 
-取得 bootstrap lock → 验证最近存在父目录 → 创建/验证私有 data root → 写 initializing 标记 → 建立受控目录和 SQLite → 原子发布 ready 标记 → 最后发布 bootstrap config。
+初始化使用既有七个 Port，不新增平行的目录或数据库初始化 Port。`BootstrapStore` 先创建/验证固定 bootstrap 目录，Application 再取得 bootstrap lock；CLI 只在 composition root 注入具体 Adapter，不直接编排文件系统或 SQLite。
+
+持锁后的首次初始化顺序固定为：读取 config → 验证最近存在父目录并逐层 no-follow 创建/验证私有 data root → 从最终目录打开 FD 取得实际 APFS Volume UUID → 写 `initializing` 标记并持有本次证明 → 以该证明建立受控子目录 → 通过 `MetadataStore` 的 factory 边界事务化初始化 SQLite → 原子发布 `ready` 标记 → 最后发布 bootstrap config。Application 生成 InstanceId 并提供非负 Unix 毫秒时间；Adapter 不替代 Application 决定幂等、冲突或错误码。
+
+data root 已存在时必须是当前用户拥有、模式精确为 `0700` 的真实空目录；不自动改权限，不接管链接或非空目录。路径缺失后缀以 `mkdirat`/等价 dirfd-relative 方式逐层创建为 `0700` 并同步父目录；中途失败允许留下尚无 marker 的空目录，但不冒报初始化成功。root marker 建立后，`metadata`、`logs`、`workspaces`、`staging`、`trash` 只能在同一持有目录下 create-new 为 `0700`；日志文件和 lifecycle lock 在各自首次使用时建立，不作为 init 成功的空占位物。
+
+已有 config 时，Application 先将本次 `--data-root` 的规范路径字节与登记值比较；不同立即返回 `E_DATA_ROOT_CHANGE_UNSUPPORTED`，不得访问或创建新路径。相同时，重复 init 只在 Ready marker、当前 data-root Volume ID、受控子目录和 SQLite installation 全部一致时返回 `already-initialized`；它不重写文件、不补建缺失布局。
+
+doctor 使用相同校验的只读路径和 SQLite 只读打开，不取得 lifecycle lock、不创建目录/WAL/配置、不修复任何对象。MetadataStore 的只读快照返回 installation 和按 WorkspaceId 稳定排序的活动 Workspace；doctor 只统计其中非 Ready 项并报告数量，数量大于零本身不是根布局损坏，也不改变 `status=ready`。root marker 仍为 `initializing` 则属于未完成实例初始化并返回 `E_DATA_ROOT_LAYOUT`。P1-03 只报告 Git 检查尚未启用；P1-16 接入 GitInspector 后再改变该能力事实，不在 doctor 内直接启动 Git。
 
 只接管新目录或空目录；已完整初始化且身份一致时幂等返回。初始化中断留下的非空目录不自动接管，需用户确认后在平台之外显式清理，再重新初始化。没有 reset/migrate。细化的错误行为由手册管理。
 

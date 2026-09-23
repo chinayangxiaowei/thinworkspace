@@ -224,6 +224,14 @@ data-root scope: <data-root>/metadata/lifecycle.lock
 
 查询命令不取得 lifecycle lock，也不写 SQLite。测试可注入 bootstrap 目录、data root 和较短时限；生产位置不能由隐藏环境变量覆盖。
 
+### 4.7 P1-03 初始化调用边界
+
+P1-03 不增加第八个概念 Port。`BootstrapStore` 在 P1-02 文档发布能力之外增加四个同职责调用：`prepare_bootstrap` 准备固定 bootstrap 目录；`prepare_data_root` 逐段准备并返回绑定已打开 data root 与实际 Volume ID 的证明；`initialize_layout` 只接受本次 `InitializingProof` 并建立受控布局；`validate_layout` 只读验证既有布局与登记身份。后两者返回 `DataRootLayout`，其中包含由受控 data root 推导的版本化数据库规范绝对路径；不能把任意调用方路径下传给 SQLite Adapter。
+
+`MetadataStoreFactory` 是 MetadataStore Port 的构造边界，不是新的存储模型。它只允许两类显式操作：`initialize` 接受 `DataRootLayout` 推导的数据库路径与期望 installation，在读写事务中初始化或核对并返回实际 installation；`inspect` 以只读方式接受同一路径与期望 installation，验证现有 `application_id`、`user_version`、schema 和 installation，并返回 installation 及按 WorkspaceId 稳定排序的活动 Workspace 快照。`inspect` 不创建数据库、不执行 migration、不改变 journal mode；两者都不向 Application 泄漏 SQLite 连接。
+
+CLI crate 是 composition root：业务调用和 renderer 只面向 Application，但生产装配可以直接依赖 macOS/SQLite Adapter 以构造 Port 实现。该依赖只做 wiring，不能在 CLI 复制初始化顺序、身份判断或错误策略。
+
 ## 五、备选方案
 
 ### 5.1 只使用 SQLite 锁

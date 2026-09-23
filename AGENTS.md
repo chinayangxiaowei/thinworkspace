@@ -142,7 +142,7 @@
 - P1 交付可直接使用的普通工作区路径，不包装用户命令，不接管语言工具链、构建目录重定向或缓存共享策略；职责收缩依据见 [ADR-0001](docs/project/architecture/adr/ADR-0001_Phase1普通目录与无执行包装.md)。
 - P1 直接镜像原始目录，创建不依赖 Git，不实现托管 Repository/Base 或自动分支/提交/PR。清理提示只针对已跟踪变更，允许显式强制并持久记日志；commit 交付由任务流程 §13.1 和主管 Agent 验收，不设为底层不可绕过的释放条件。依据见 [ADR-0002](docs/project/architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)。
 - P0/P1 中断恢复已取消，未完成目录不自动续做或修复；仅允许用户显式清理受控残留。依据见 [ADR-0003](docs/project/architecture/adr/ADR-0003_Phase1不实现中断恢复.md)。
-- 依赖方向固定为 `cli → application → core/ports`，Adapter 实现 Port；Core/Application 不直接调用具体 OS、Git CLI 或 SQLite API。
+- 业务依赖方向固定为 `cli → application → core/ports`，Adapter 实现 Port；Core/Application 不直接调用具体 OS、Git CLI 或 SQLite API。CLI 的 composition root 可直接依赖具体 Adapter 以构造并注入 Port，但不得在装配层复制业务判断或初始化顺序。
 - Port 的完整名单和语义以 Phase 1 详细设计为准；未先更新该设计和相关 ADR，不得新增平行抽象。
 
 ### 4.2 数据安全与失败边界

@@ -42,6 +42,45 @@ init 只接管新目录或空目录；已完整初始化且身份一致时重复
 
 doctor 只读，报告主机、数据根、未完成工作区与 Git 检查是否可用。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 
+init 的人类输出固定为以下字段；重复初始化只改变 `Result`：
+
+```text
+ThinWorkspace initialized
+Result:      initialized
+Data root:   /Volumes/data/thinws-data
+Volume ID:   550e8400-e29b-41d4-a716-446655440000
+```
+
+`Result` 只能是 `initialized|already-initialized`。成功 JSON 为：
+
+```json
+{
+  "schema_version": 1,
+  "ok": true,
+  "data": {
+    "command": "init",
+    "result": "initialized",
+    "instance_id": "01890a5d-ac96-774b-bd5b-55c7b8d09f33",
+    "data_root": "/Volumes/data/thinws-data",
+    "data_root_hex": "2f566f6c756d65732f646174612f7468696e77732d64617461",
+    "volume_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+`data_root` 是供人阅读的显示值，`data_root_hex` 才是无损路径字节。doctor 仅在 config、Ready marker、当前卷、受控布局和 SQLite installation 全部一致时成功；P1-03 的成功输出为：
+
+```text
+ThinWorkspace doctor
+Status:              ready
+Host:                macos/aarch64
+Data root:           /Volumes/data/thinws-data
+Incomplete workspaces: 0
+Git check:           unavailable (not implemented)
+```
+
+doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`host.platform`、`host.architecture`、`instance_id`、`data_root`、`data_root_hex`、`volume_id`、`incomplete_workspaces`，以及 `git_check={"available":false,"reason":"not-implemented"}`。`incomplete_workspaces` 统计已登记但非 Ready 的活动 Workspace；大于零是诊断事实，不使本次只读 doctor 失败。P1-16 接入 GitInspector 前不得把 `git_check` 写成可用；接入后只改变能力事实，不改变字段类型。未初始化返回 E_NOT_INITIALIZED；既有 config 指向另一 data root 时 init 返回 E_DATA_ROOT_CHANGE_UNSUPPORTED；非 APFS/无 Volume UUID 返回 E_CAPABILITY_UNAVAILABLE；非空未归属目录返回 E_DATA_ROOT_NOT_EMPTY；已登记 data root 缺失返回 E_DATA_ROOT_UNAVAILABLE；实例身份、权限、受控布局或 root marker 仍处于 initializing 返回 E_DATA_ROOT_LAYOUT；SQLite/schema 失败返回 E_METADATA；锁等待仍为 E_LOCK_TIMEOUT。
+
 ## 四、原始目录镜像
 
 ### 4.1 创建与计划

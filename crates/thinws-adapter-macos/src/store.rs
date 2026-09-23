@@ -107,8 +107,8 @@ impl BootstrapStore for MacOsHostAdapter {
             proof.marker_identity,
         )?;
         let current = read_marker_at(&directory, OsStr::new(MARKER_NAME))?;
-        if current.as_ref() != Some(&proof.marker)
-            || proof.marker.state() != RootMarkerState::Initializing
+        if (current.as_ref(), proof.marker.state())
+            != (Some(&proof.marker), RootMarkerState::Initializing)
         {
             return Err(PortError::conflict(
                 "validate initializing root marker",
@@ -122,9 +122,11 @@ impl BootstrapStore for MacOsHostAdapter {
         temporary.exchange_with(OsStr::new(MARKER_NAME))?;
 
         let verification = (|| {
-            if entry_identity(&directory.fd, OsStr::new(MARKER_NAME))? != temporary.identity()
-                || entry_identity(&directory.fd, temporary.name())? != proof.marker_identity
-            {
+            let observed_identities = (
+                entry_identity(&directory.fd, OsStr::new(MARKER_NAME))?,
+                entry_identity(&directory.fd, temporary.name())?,
+            );
+            if observed_identities != (temporary.identity(), proof.marker_identity) {
                 return Err(PortError::new(
                     PortErrorKind::InvalidData,
                     "verify exchanged root marker identities",
@@ -136,9 +138,11 @@ impl BootstrapStore for MacOsHostAdapter {
                 &proof.marker_file,
                 proof.marker_identity,
             )?;
-            if read_marker_at(&directory, OsStr::new(MARKER_NAME))?.as_ref() != Some(&ready)
-                || read_marker_at(&directory, temporary.name())?.as_ref() != Some(&proof.marker)
-            {
+            let observed_markers = (
+                read_marker_at(&directory, OsStr::new(MARKER_NAME))?,
+                read_marker_at(&directory, temporary.name())?,
+            );
+            if observed_markers != (Some(ready.clone()), Some(proof.marker.clone())) {
                 return Err(PortError::new(
                     PortErrorKind::InvalidData,
                     "verify exchanged root marker content",
@@ -149,10 +153,13 @@ impl BootstrapStore for MacOsHostAdapter {
         })();
 
         if let Err(error) = verification {
-            let can_restore = entry_identity(&directory.fd, OsStr::new(MARKER_NAME)).ok()
-                == Some(temporary.identity())
-                && entry_identity(&directory.fd, temporary.name()).ok()
-                    == Some(proof.marker_identity);
+            let can_restore = exchanged_pair_matches(
+                (
+                    entry_identity(&directory.fd, OsStr::new(MARKER_NAME)).ok(),
+                    entry_identity(&directory.fd, temporary.name()).ok(),
+                ),
+                (temporary.identity(), proof.marker_identity),
+            );
             if can_restore {
                 // Both names still identify the exact exchanged pair, so a
                 // second atomic swap restores the previous marker safely.
@@ -190,7 +197,7 @@ impl BootstrapStore for MacOsHostAdapter {
             ));
         }
         if let Some(current) = read_config_at(&directory)? {
-            return if current == *identity {
+            return if config_is_current(Some(&current), identity) {
                 Ok(PublishResult::AlreadyCurrent)
             } else {
                 Err(PortError::conflict(
@@ -218,13 +225,17 @@ impl BootstrapStore for MacOsHostAdapter {
                 }
                 Ok(PublishResult::Published)
             }
-            Err(NoReplaceError::Exists) => match read_config_at(&directory)? {
-                Some(current) if current == *identity => Ok(PublishResult::AlreadyCurrent),
-                _ => Err(PortError::conflict(
-                    "publish bootstrap config",
-                    PortConflict::InstallationIdentity,
-                )),
-            },
+            Err(NoReplaceError::Exists) => {
+                let current = read_config_at(&directory)?;
+                if config_is_current(current.as_ref(), identity) {
+                    Ok(PublishResult::AlreadyCurrent)
+                } else {
+                    Err(PortError::conflict(
+                        "publish bootstrap config",
+                        PortConflict::InstallationIdentity,
+                    ))
+                }
+            }
             Err(NoReplaceError::Other(error)) => Err(error),
         }
     }
@@ -274,6 +285,20 @@ fn remove_exact_entry(
     }
 }
 
+fn exchanged_pair_matches(
+    observed: (Option<FileIdentity>, Option<FileIdentity>),
+    expected: (FileIdentity, FileIdentity),
+) -> bool {
+    observed == (Some(expected.0), Some(expected.1))
+}
+
+fn config_is_current(
+    current: Option<&InstallationIdentity>,
+    requested: &InstallationIdentity,
+) -> bool {
+    current == Some(requested)
+}
+
 fn document_error(error: DocumentError) -> PortError {
     let kind = if error == DocumentError::UnsupportedVersion {
         PortErrorKind::UnsupportedVersion
@@ -281,4 +306,75 @@ fn document_error(error: DocumentError) -> PortError {
         PortErrorKind::InvalidData
     };
     PortError::new(kind, "decode bootstrap document").with_source(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    use tempfile::Builder;
+    use thinws_core::{AbsolutePath, InstanceId, VolumeId};
+
+    use super::*;
+
+    #[test]
+    fn exact_entry_cleanup_and_document_error_mapping_are_observable() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-02-macos-tests");
+        fs::create_dir_all(&root).unwrap();
+        let temp = Builder::new()
+            .prefix("exact-entry-cleanup-")
+            .tempdir_in(fs::canonicalize(root).unwrap())
+            .unwrap();
+        let directory_path = temp.path().join("private");
+        fs::create_dir(&directory_path).unwrap();
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_private_directory(&directory_path).unwrap();
+        for name in ["target", "other"] {
+            fs::write(directory_path.join(name), name.as_bytes()).unwrap();
+            fs::set_permissions(directory_path.join(name), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let target_identity = entry_identity(&directory.fd, OsStr::new("target")).unwrap();
+        let other_identity = entry_identity(&directory.fd, OsStr::new("other")).unwrap();
+
+        assert!(exchanged_pair_matches(
+            (Some(target_identity), Some(other_identity)),
+            (target_identity, other_identity)
+        ));
+        assert!(!exchanged_pair_matches(
+            (Some(other_identity), Some(target_identity)),
+            (target_identity, other_identity)
+        ));
+
+        remove_exact_entry(&directory, OsStr::new("target"), other_identity);
+        assert!(directory_path.join("target").exists());
+        remove_exact_entry(&directory, OsStr::new("target"), target_identity);
+        assert!(!directory_path.join("target").exists());
+
+        assert_eq!(
+            document_error(DocumentError::UnsupportedVersion).kind(),
+            PortErrorKind::UnsupportedVersion
+        );
+        assert_eq!(
+            document_error(DocumentError::InvalidToml).kind(),
+            PortErrorKind::InvalidData
+        );
+
+        let requested = InstallationIdentity::new(
+            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
+            AbsolutePath::try_from_bytes(b"/Volumes/data/thinws".to_vec()).unwrap(),
+            VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        let conflicting = InstallationIdentity::new(
+            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap(),
+            AbsolutePath::try_from_bytes(b"/Volumes/data/thinws".to_vec()).unwrap(),
+            VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        assert!(config_is_current(Some(&requested), &requested));
+        assert!(!config_is_current(Some(&conflicting), &requested));
+        assert!(!config_is_current(None, &requested));
+    }
 }

@@ -73,6 +73,9 @@ fn workspace_state_machine_accepts_only_the_detailed_design_edges() {
     }
 
     let all_states = [Creating, Ready, Deleting, Error];
+    for state in all_states {
+        assert_eq!(WorkspaceState::from_str(state.as_str()).unwrap(), state);
+    }
     let all_events = [
         Materialized,
         Failed,

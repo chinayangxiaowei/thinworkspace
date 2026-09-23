@@ -16,6 +16,12 @@ use crate::filesystem::{
     revalidate_directory, validate_file_entry, validate_private_file,
 };
 
+const LOCK_OPEN_FLAGS: OFlags = OFlags::CREATE
+    .union(OFlags::RDWR)
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK);
+
 /// Held macOS advisory lock; dropping it closes the locked file descriptor.
 pub struct MacOsLockGuard {
     scope: LifecycleScope,
@@ -86,7 +92,7 @@ fn acquire(
     let fd = rustix::fs::openat(
         &parent.fd,
         &name,
-        OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        LOCK_OPEN_FLAGS,
         Mode::from_bits_retain(0o600),
     )
     .map_err(|error| io_error("open lifecycle lock", error))?;
@@ -94,11 +100,12 @@ fn acquire(
     let identity = validate_private_file(&file, "validate lifecycle lock")?;
     let started = Instant::now();
     loop {
-        match rustix::fs::flock(file.as_fd(), FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => break,
-            Err(error)
-                if error == rustix::io::Errno::AGAIN || error == rustix::io::Errno::WOULDBLOCK =>
-            {
+        match classify_lock_attempt(rustix::fs::flock(
+            file.as_fd(),
+            FlockOperation::NonBlockingLockExclusive,
+        )) {
+            Ok(LockAttempt::Acquired) => break,
+            Ok(LockAttempt::Contended) => {
                 let elapsed = started.elapsed();
                 if elapsed >= timeout {
                     return Err(PortError::new(
@@ -106,7 +113,7 @@ fn acquire(
                         "acquire lifecycle lock",
                     ));
                 }
-                thread::sleep((timeout - elapsed).min(Duration::from_millis(5)));
+                thread::sleep(retry_delay(timeout, elapsed));
             }
             Err(error) => return Err(io_error("acquire lifecycle lock", error)),
         }
@@ -133,4 +140,93 @@ fn acquire(
         identity,
         token: Arc::clone(&adapter.token),
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LockAttempt {
+    Acquired,
+    Contended,
+}
+
+fn classify_lock_attempt(
+    result: Result<(), rustix::io::Errno>,
+) -> Result<LockAttempt, rustix::io::Errno> {
+    match result {
+        Ok(()) => Ok(LockAttempt::Acquired),
+        // On macOS EAGAIN and EWOULDBLOCK are the same errno value.
+        Err(rustix::io::Errno::AGAIN) => Ok(LockAttempt::Contended),
+        Err(error) => Err(error),
+    }
+}
+
+fn retry_delay(timeout: Duration, elapsed: Duration) -> Duration {
+    timeout
+        .saturating_sub(elapsed)
+        .min(Duration::from_millis(5))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    use tempfile::Builder;
+
+    use super::*;
+
+    #[test]
+    fn contention_classification_and_retry_delay_are_exact() {
+        assert_eq!(classify_lock_attempt(Ok(())), Ok(LockAttempt::Acquired));
+        assert_eq!(
+            classify_lock_attempt(Err(rustix::io::Errno::AGAIN)),
+            Ok(LockAttempt::Contended)
+        );
+        assert_eq!(
+            classify_lock_attempt(Err(rustix::io::Errno::INVAL)),
+            Err(rustix::io::Errno::INVAL)
+        );
+        assert_eq!(
+            retry_delay(Duration::from_millis(10), Duration::from_millis(2)),
+            Duration::from_millis(5)
+        );
+        assert_eq!(
+            retry_delay(Duration::from_millis(10), Duration::from_millis(8)),
+            Duration::from_millis(2)
+        );
+    }
+
+    #[test]
+    fn lock_flags_and_parent_identity_are_both_enforced() {
+        assert_eq!(
+            LOCK_OPEN_FLAGS,
+            OFlags::CREATE
+                .union(OFlags::RDWR)
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::NONBLOCK)
+        );
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-02-macos-tests");
+        fs::create_dir_all(&root).unwrap();
+        let temp = Builder::new()
+            .prefix("lock-parent-")
+            .tempdir_in(fs::canonicalize(root).unwrap())
+            .unwrap();
+        let bootstrap = temp.path().join("bootstrap");
+        fs::create_dir(&bootstrap).unwrap();
+        fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o700)).unwrap();
+        let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+        assert_eq!(adapter.bootstrap_dir(), bootstrap.as_path());
+        let guard = adapter
+            .acquire_bootstrap(Duration::from_millis(100))
+            .unwrap();
+
+        let displaced = temp.path().join("displaced-bootstrap");
+        fs::rename(&bootstrap, &displaced).unwrap();
+        fs::create_dir(&bootstrap).unwrap();
+        fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o700)).unwrap();
+        let replacement = open_private_directory(&bootstrap).unwrap();
+        assert!(!guard.protects_directory(&replacement));
+    }
 }

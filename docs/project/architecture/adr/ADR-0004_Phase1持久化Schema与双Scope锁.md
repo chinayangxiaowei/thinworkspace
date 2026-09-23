@@ -58,7 +58,7 @@ config.toml
 3. bootstrap config 最后发布。已有完全相同的 config 幂等；任一字段冲突都拒绝覆盖。
 4. 每次发布先在同一目录 create-new 私有临时普通文件并写完、`fsync`。首次 `initializing` marker 与 bootstrap config 必须使用原子 no-replace 发布；目标在发布前出现时操作失败并读取/分类现有项，绝不使用普通覆盖 rename。
 5. `ready` 是唯一获准替换。实现须使用原子 exchange/等价的 compare-and-replace 协议，把交换出的旧 marker 与本次初始化证明再次比对；只有身份和字段完全一致才删除旧 marker并确认发布。比对失败时不得发布 bootstrap config；只有在能证明目标仍是本次新文件、交换出的项仍是刚才旧项时才可交换回去，否则保留可解释残留并返回未完成，不能覆盖第三方新对象。
-6. 成功发布后 `fsync` 父目录。文件模式为 `0600`，管理目录和 data root 模式为 `0700`。所有目标项均以 no-follow 方式打开和校验；进程崩溃可能留下本次未发布的临时文件或没有 bootstrap config 的未完成 data root，P1 不跨进程续做或自动接管。
+6. 成功发布后 `fsync` 父目录。文件模式为 `0600`，管理目录和 data root 模式为 `0700`。所有目标项均以 no-follow 方式打开和校验；进程崩溃可能留下本次未发布的临时文件或没有 bootstrap config 的未完成 data root，Phase 1 不跨进程续做或自动接管。
 
 bootstrap config、ready root marker 和 SQLite `installation` 单例必须逐字段一致；任何缺失、schema 不支持或身份冲突均安全失败。
 

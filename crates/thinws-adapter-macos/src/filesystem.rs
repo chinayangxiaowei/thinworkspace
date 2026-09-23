@@ -16,6 +16,22 @@ use crate::document::MAX_DOCUMENT_BYTES;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+const PRIVATE_TEMP_OPEN_FLAGS: OFlags = OFlags::CREATE
+    .union(OFlags::EXCL)
+    .union(OFlags::RDWR)
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK);
+const DIRECTORY_OPEN_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK);
+const PRIVATE_READ_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FileIdentity {
     device: u64,
@@ -52,12 +68,7 @@ impl PrivateTemp {
             match rustix::fs::openat(
                 &parent_copy,
                 &name,
-                OFlags::CREATE
-                    | OFlags::EXCL
-                    | OFlags::RDWR
-                    | OFlags::CLOEXEC
-                    | OFlags::NOFOLLOW
-                    | OFlags::NONBLOCK,
+                PRIVATE_TEMP_OPEN_FLAGS,
                 Mode::from_bits_retain(0o600),
             ) {
                 Ok(fd) => {
@@ -144,7 +155,7 @@ impl PrivateTemp {
 
 impl Drop for PrivateTemp {
     fn drop(&mut self) {
-        if self.active {
+        if self.active && entry_identity(&self.parent, &self.name).ok() == Some(self.identity) {
             let _ = rustix::fs::unlinkat(&self.parent, &self.name, AtFlags::empty());
         }
     }
@@ -180,12 +191,8 @@ pub(crate) fn open_private_directory_optional(
 }
 
 fn open_absolute_directory_nofollow(path: &Path) -> Result<Option<OwnedFd>, PortError> {
-    let mut current = rustix::fs::open(
-        Path::new("/"),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(|error| io_error("open filesystem root", error))?;
+    let mut current = rustix::fs::open(Path::new("/"), DIRECTORY_OPEN_FLAGS, Mode::empty())
+        .map_err(|error| io_error("open filesystem root", error))?;
     let mut saw_root = false;
     let mut saw_normal = false;
     for component in path.components() {
@@ -200,12 +207,7 @@ fn open_absolute_directory_nofollow(path: &Path) -> Result<Option<OwnedFd>, Port
             }
             _ => return Err(validation_error("private directory path is not canonical")),
         };
-        current = match rustix::fs::openat(
-            &current,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        ) {
+        current = match rustix::fs::openat(&current, name, DIRECTORY_OPEN_FLAGS, Mode::empty()) {
             Ok(fd) => fd,
             Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(error) => return Err(io_error("open private directory component", error)),
@@ -221,12 +223,7 @@ pub(crate) fn read_private_file(
     directory: &OwnedFd,
     name: &OsStr,
 ) -> Result<Option<Vec<u8>>, PortError> {
-    let fd = match rustix::fs::openat(
-        directory,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-    ) {
+    let fd = match rustix::fs::openat(directory, name, PRIVATE_READ_FLAGS, Mode::empty()) {
         Ok(fd) => fd,
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(error) => return Err(io_error("open private document", error)),
@@ -347,3 +344,189 @@ impl fmt::Display for FilesystemValidationError {
 }
 
 impl Error for FilesystemValidationError {}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use tempfile::{Builder, TempDir};
+
+    use super::*;
+
+    fn controlled_directory(prefix: &str) -> (TempDir, PathBuf, ValidatedDirectory) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-02-macos-tests");
+        fs::create_dir_all(&root).unwrap();
+        let temp = Builder::new()
+            .prefix(prefix)
+            .tempdir_in(fs::canonicalize(root).unwrap())
+            .unwrap();
+        let directory_path = temp.path().join("private");
+        fs::create_dir(&directory_path).unwrap();
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_private_directory(&directory_path).unwrap();
+        (temp, directory_path, directory)
+    }
+
+    #[test]
+    fn dropping_a_displaced_private_temp_preserves_its_replacement() {
+        let (_temp, directory_path, directory) = controlled_directory("private-temp-");
+        let temporary = PrivateTemp::create(&directory.fd, "document", b"original").unwrap();
+        let original_name = directory_path.join(temporary.name());
+        let displaced = directory_path.join("displaced");
+
+        fs::rename(&original_name, &displaced).unwrap();
+        fs::write(&original_name, b"replacement").unwrap();
+        fs::set_permissions(&original_name, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(temporary);
+
+        assert_eq!(fs::read(&original_name).unwrap(), b"replacement");
+        assert_eq!(fs::read(&displaced).unwrap(), b"original");
+    }
+
+    #[test]
+    fn dropping_an_owned_private_temp_removes_its_entry() {
+        let (_temp, directory_path, directory) = controlled_directory("private-temp-cleanup-");
+        let temporary = PrivateTemp::create(&directory.fd, "document", b"temporary").unwrap();
+        let temporary_path = directory_path.join(temporary.name());
+
+        drop(temporary);
+
+        assert!(!temporary_path.exists());
+    }
+
+    #[test]
+    fn security_sensitive_open_flag_sets_are_exact() {
+        assert_eq!(
+            PRIVATE_TEMP_OPEN_FLAGS,
+            OFlags::CREATE
+                .union(OFlags::EXCL)
+                .union(OFlags::RDWR)
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::NONBLOCK)
+        );
+        assert_eq!(
+            DIRECTORY_OPEN_FLAGS,
+            OFlags::RDONLY
+                .union(OFlags::DIRECTORY)
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::NONBLOCK)
+        );
+        assert_eq!(
+            PRIVATE_READ_FLAGS,
+            OFlags::RDONLY
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::NONBLOCK)
+        );
+    }
+
+    #[test]
+    fn path_walker_rejects_relative_and_root_only_inputs() {
+        assert!(open_absolute_directory_nofollow(Path::new("relative")).is_err());
+        assert!(open_absolute_directory_nofollow(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn private_reader_enforces_the_exact_document_size_limit() {
+        let (_temp, directory_path, directory) = controlled_directory("private-read-size-");
+        let document = directory_path.join("document");
+        fs::write(&document, vec![b'a'; MAX_DOCUMENT_BYTES]).unwrap();
+        fs::set_permissions(&document, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_private_file(&directory.fd, OsStr::new("document"))
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_DOCUMENT_BYTES
+        );
+
+        fs::write(&document, vec![b'a'; MAX_DOCUMENT_BYTES + 1]).unwrap();
+        assert_eq!(
+            read_private_file(&directory.fd, OsStr::new("document"))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn filesystem_helpers_expose_failure_and_identity_boundaries() {
+        let (_temp, directory_path, directory) = controlled_directory("filesystem-helpers-");
+        let removable = directory_path.join("removable");
+        fs::write(&removable, b"remove").unwrap();
+        unlink_entry(&directory.fd, OsStr::new("removable")).unwrap();
+        assert!(!removable.exists());
+
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let socket: OwnedFd = socket.into();
+        assert!(sync_directory(&socket).is_err());
+
+        let displaced = directory_path.with_extension("displaced");
+        fs::rename(&directory_path, &displaced).unwrap();
+        fs::create_dir(&directory_path).unwrap();
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            revalidate_directory(&directory).unwrap_err().kind(),
+            PortErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn metadata_validators_reject_each_isolated_unsafe_shape() {
+        let (_temp, directory_path, directory) = controlled_directory("metadata-validators-");
+
+        let hardlinked = directory_path.join("hardlinked");
+        fs::write(&hardlinked, b"content").unwrap();
+        fs::set_permissions(&hardlinked, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::hard_link(&hardlinked, directory_path.join("second-link")).unwrap();
+        let file = File::open(&hardlinked).unwrap();
+        assert!(validate_private_file(&file, "validate hard link").is_err());
+
+        assert!(
+            Command::new("/usr/bin/mkfifo")
+                .arg(directory_path.join("fifo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::set_permissions(
+            directory_path.join("fifo"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let fifo = rustix::fs::openat(
+            &directory.fd,
+            "fifo",
+            OFlags::RDONLY
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW)
+                .union(OFlags::NONBLOCK),
+            Mode::empty(),
+        )
+        .unwrap();
+        let fifo = File::from(fifo);
+        assert!(validate_private_file(&fifo, "validate FIFO").is_err());
+
+        let regular = directory_path.join("not-a-directory");
+        fs::write(&regular, b"content").unwrap();
+        fs::set_permissions(&regular, fs::Permissions::from_mode(0o700)).unwrap();
+        let stat = rustix::fs::stat(&regular).unwrap();
+        assert!(validate_directory_stat(&stat).is_err());
+
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let stat = rustix::fs::fstat(&directory.fd).unwrap();
+        assert!(validate_directory_stat(&stat).is_err());
+
+        let diagnostic = validation_error("filesystem diagnostic");
+        assert_eq!(
+            diagnostic.source().unwrap().to_string(),
+            "filesystem diagnostic"
+        );
+    }
+}

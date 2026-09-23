@@ -16,7 +16,9 @@ use thinws_metadata_sqlite::{APPLICATION_ID, SCHEMA_VERSION, SqliteMetadataStore
 use thinws_ports::{MetadataStore, PortConflict, PortErrorKind};
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
+const OTHER_INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f34";
 const VOLUME_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const OTHER_VOLUME_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
 const WORKSPACE_IDS: [&str; 8] = [
     "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40",
     "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41",
@@ -49,14 +51,25 @@ fn installation() -> InstallationRecord {
 }
 
 fn reservation(index: usize, name: &str, target: &str) -> WorkspaceReservation {
+    reservation_with_identity(index, name, target, INSTANCE_ID, VOLUME_ID, VOLUME_ID)
+}
+
+fn reservation_with_identity(
+    index: usize,
+    name: &str,
+    target: &str,
+    instance_id: &str,
+    source_volume_id: &str,
+    data_volume_id: &str,
+) -> WorkspaceReservation {
     WorkspaceReservation::new(
         WorkspaceId::from_str(WORKSPACE_IDS[index]).unwrap(),
-        InstanceId::from_str(INSTANCE_ID).unwrap(),
+        InstanceId::from_str(instance_id).unwrap(),
         WorkspaceName::from_str(name).unwrap(),
         AbsolutePath::try_from_bytes(format!("/Volumes/data/source-{index}").into_bytes()).unwrap(),
         AbsolutePath::try_from_bytes(target.as_bytes().to_vec()).unwrap(),
-        VolumeId::from_str(VOLUME_ID).unwrap(),
-        VolumeId::from_str(VOLUME_ID).unwrap(),
+        VolumeId::from_str(source_volume_id).unwrap(),
+        VolumeId::from_str(data_volume_id).unwrap(),
         index.is_multiple_of(2),
         UnixMillis::new(1_700_000_000_100 + index as i64).unwrap(),
     )
@@ -94,8 +107,13 @@ fn empty_database_is_migrated_atomically_and_reopens_with_required_settings() {
     );
     drop(raw);
 
-    SqliteMetadataStore::open(&path, &expected, Duration::from_millis(500))
+    let later_request = InstallationRecord::new(
+        expected.identity().clone(),
+        UnixMillis::new(expected.created_at().get() + 99).unwrap(),
+    );
+    let reopened = SqliteMetadataStore::open(&path, &later_request, Duration::from_millis(500))
         .expect("the same identity reopens schema v1");
+    assert_eq!(reopened.installation(), &expected);
 }
 
 #[test]
@@ -113,6 +131,7 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
             .err()
             .expect("foreign database must be rejected");
     assert_eq!(error.kind(), PortErrorKind::UnsupportedVersion);
+    assert_eq!(error.operation(), "refuse foreign metadata database");
     assert_eq!(
         Connection::open(&foreign_path)
             .unwrap()
@@ -132,6 +151,7 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
             .err()
             .expect("an application_id=0 database with user tables is not empty");
     assert_eq!(error.kind(), PortErrorKind::UnsupportedVersion);
+    assert_eq!(error.operation(), "refuse unowned metadata database");
     assert_eq!(
         Connection::open(&unowned_path)
             .unwrap()
@@ -152,12 +172,24 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
         .err()
         .expect("a future schema must be rejected");
     assert_eq!(error.kind(), PortErrorKind::UnsupportedVersion);
+    assert_eq!(error.operation(), "open future metadata schema");
+
+    let old_path = temp.path().join("old.db");
+    let old = Connection::open(&old_path).unwrap();
+    old.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    drop(old);
+    let error = SqliteMetadataStore::open(&old_path, &installation(), Duration::from_millis(10))
+        .err()
+        .expect("an unsupported old schema must not be treated as foreign");
+    assert_eq!(error.kind(), PortErrorKind::InvalidData);
+    assert_eq!(error.operation(), "validate metadata schema version");
 
     let identity_path = temp.path().join("identity.db");
     drop(open(&identity_path));
     let conflicting = InstallationRecord::new(
         InstallationIdentity::new(
-            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap(),
+            InstanceId::from_str(OTHER_INSTANCE_ID).unwrap(),
             AbsolutePath::try_from_bytes(b"/Volumes/data/thinws".to_vec()).unwrap(),
             VolumeId::from_str(VOLUME_ID).unwrap(),
         ),
@@ -170,6 +202,46 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
     assert_eq!(
         error.conflict_kind(),
         Some(PortConflict::InstallationIdentity)
+    );
+}
+
+#[test]
+fn identity_conflict_does_not_change_an_existing_database_journal_mode() {
+    let temp = controlled_tempdir();
+    let path = temp.path().join("identity-before-configuration.db");
+    drop(open(&path));
+    let raw = Connection::open(&path).unwrap();
+    raw.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    assert_eq!(
+        raw.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap()
+            .to_ascii_lowercase(),
+        "delete"
+    );
+    drop(raw);
+
+    let conflicting = InstallationRecord::new(
+        InstallationIdentity::new(
+            InstanceId::from_str(OTHER_INSTANCE_ID).unwrap(),
+            AbsolutePath::try_from_bytes(b"/Volumes/data/thinws".to_vec()).unwrap(),
+            VolumeId::from_str(VOLUME_ID).unwrap(),
+        ),
+        UnixMillis::new(9).unwrap(),
+    );
+    let error = SqliteMetadataStore::open(&path, &conflicting, Duration::from_millis(10))
+        .err()
+        .expect("identity conflict must be rejected");
+    assert_eq!(
+        error.conflict_kind(),
+        Some(PortConflict::InstallationIdentity)
+    );
+
+    let raw = Connection::open(&path).unwrap();
+    assert_eq!(
+        raw.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap()
+            .to_ascii_lowercase(),
+        "delete"
     );
 }
 
@@ -207,6 +279,8 @@ fn store_transitions_preserve_unfinished_state_and_tombstone_identity() {
     let listed = store.workspaces().unwrap();
     assert_eq!(listed[0].reservation().name().as_str(), "alpha");
     assert_eq!(listed[1].reservation().name().as_str(), "beta");
+    assert!(listed[0].reservation().allow_full_copy());
+    assert!(!listed[1].reservation().allow_full_copy());
 
     let failed = store
         .record_failure(
@@ -239,6 +313,24 @@ fn store_transitions_preserve_unfinished_state_and_tombstone_identity() {
             .kind(),
         PortErrorKind::InvalidData
     );
+
+    drop(store);
+    let mut store = open(&path);
+    let persisted_error = store.workspace(alpha.workspace_id()).unwrap().unwrap();
+    assert_eq!(persisted_error.state(), WorkspaceState::Error);
+    assert_eq!(
+        persisted_error.last_error_code(),
+        Some(ErrorCode::Filesystem)
+    );
+    assert_eq!(
+        store
+            .workspace(beta.workspace_id())
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkspaceState::Creating
+    );
+
     let deleting = store
         .begin_removal(
             alpha.workspace_id(),
@@ -359,6 +451,89 @@ fn name_and_target_uniqueness_are_decided_by_sqlite_across_connections() {
 }
 
 #[test]
+fn public_store_rejects_each_identity_mismatch_and_stale_reaffirmation() {
+    let temp = controlled_tempdir();
+    let path = temp.path().join("identity-boundaries.db");
+    let mut store = open(&path);
+    for value in [
+        reservation_with_identity(
+            2,
+            "wrong-instance",
+            "/Volumes/data/thinws/workspaces/wrong-instance",
+            OTHER_INSTANCE_ID,
+            VOLUME_ID,
+            VOLUME_ID,
+        ),
+        reservation_with_identity(
+            3,
+            "wrong-source-volume",
+            "/Volumes/data/thinws/workspaces/wrong-source-volume",
+            INSTANCE_ID,
+            OTHER_VOLUME_ID,
+            VOLUME_ID,
+        ),
+        reservation_with_identity(
+            4,
+            "wrong-data-volume",
+            "/Volumes/data/thinws/workspaces/wrong-data-volume",
+            INSTANCE_ID,
+            VOLUME_ID,
+            OTHER_VOLUME_ID,
+        ),
+    ] {
+        let error = store.reserve_workspace(&value).unwrap_err();
+        assert_eq!(
+            error.conflict_kind(),
+            Some(PortConflict::InstallationIdentity)
+        );
+    }
+
+    let value = reservation(
+        5,
+        "stale-reaffirmation",
+        "/Volumes/data/thinws/workspaces/stale-reaffirmation",
+    );
+    store.reserve_workspace(&value).unwrap();
+    let error = store
+        .begin_removal(
+            value.workspace_id(),
+            WorkspaceState::Deleting,
+            RemovalMode::Force,
+            UnixMillis::new(1_700_000_001_000).unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(error.conflict_kind(), Some(PortConflict::ExpectedState));
+    assert_eq!(
+        store
+            .workspace(value.workspace_id())
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkspaceState::Creating
+    );
+}
+
+#[test]
+fn a_non_constraint_reservation_failure_remains_a_storage_error() {
+    let temp = controlled_tempdir();
+    let path = temp.path().join("storage-error.db");
+    let mut store = open(&path);
+    let raw = Connection::open(&path).unwrap();
+    raw.execute_batch("DROP TABLE workspaces;").unwrap();
+    drop(raw);
+
+    let value = reservation(
+        6,
+        "missing-table",
+        "/Volumes/data/thinws/workspaces/missing-table",
+    );
+    assert_eq!(
+        store.reserve_workspace(&value).unwrap_err().kind(),
+        PortErrorKind::Storage
+    );
+}
+
+#[test]
 fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     let temp = controlled_tempdir();
     let identity_checks = Connection::open(temp.path().join("identity-checks.db")).unwrap();
@@ -381,6 +556,25 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
             )
             .is_err()
     );
+    identity_checks
+        .execute(
+            "INSERT INTO installation VALUES (1, ?1, ?2, ?3, 1)",
+            params![INSTANCE_ID, b"/data", VOLUME_ID],
+        )
+        .unwrap();
+    assert!(
+        identity_checks
+            .execute(
+                "UPDATE installation SET created_at_unix_ms=2 WHERE singleton=1",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        identity_checks
+            .execute("DELETE FROM installation WHERE singleton=1", [])
+            .is_err()
+    );
     drop(identity_checks);
 
     let path = temp.path().join("constraints.db");
@@ -391,12 +585,61 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
         "/Volumes/data/thinws/workspaces/constraints",
     );
     store.reserve_workspace(&value).unwrap();
+    let noncreating = reservation(
+        7,
+        "noncreating-receipt",
+        "/Volumes/data/thinws/workspaces/noncreating-receipt",
+    );
+    store.reserve_workspace(&noncreating).unwrap();
+    store
+        .begin_removal(
+            noncreating.workspace_id(),
+            WorkspaceState::Creating,
+            RemovalMode::Force,
+            UnixMillis::new(1_700_000_001_100).unwrap(),
+        )
+        .unwrap();
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
     connection
         .pragma_update(None, "foreign_keys", true)
         .unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE workspaces SET name='changed' WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE workspaces SET updated_at_unix_ms=created_at_unix_ms-1 WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO deletion_tombstones VALUES (?1, ?2, 10)",
+                params![
+                    value.workspace_id().to_string(),
+                    value.instance_id().to_string()
+                ],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO materialization_receipts VALUES (?1, 1, '{}', 1)",
+                [noncreating.workspace_id().to_string()],
+            )
+            .is_err()
+    );
     assert!(connection.execute(
         "UPDATE workspaces SET state='ready', updated_at_unix_ms=updated_at_unix_ms+1 WHERE workspace_id=?1",
         [value.workspace_id().to_string()],
@@ -427,6 +670,14 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
             [value.workspace_id().to_string()],
         )
         .unwrap();
+    assert!(
+        connection
+            .execute(
+                "UPDATE materialization_receipts SET receipt_json='{}' WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
     assert!(
         connection
             .execute(
@@ -483,6 +734,14 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     assert!(
         connection
             .execute(
+                "UPDATE deletion_tombstones SET deleted_at_unix_ms=11 WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
                 "DELETE FROM deletion_tombstones WHERE workspace_id=?1",
                 [value.workspace_id().to_string()],
             )
@@ -521,6 +780,20 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
             valid_id.to_owned(),
             "valid".to_owned(),
             VOLUME_ID.to_owned(),
+            "ready",
+            None,
+        ),
+        (
+            valid_id.to_owned(),
+            "valid".to_owned(),
+            OTHER_VOLUME_ID.to_owned(),
+            "creating",
+            None,
+        ),
+        (
+            valid_id.to_owned(),
+            "valid".to_owned(),
+            VOLUME_ID.to_owned(),
             "error",
             None,
         ),
@@ -550,6 +823,23 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
                 .is_err()
         );
     }
+    assert!(
+        connection
+            .execute(
+                insert_sql,
+                params![
+                    valid_id,
+                    OTHER_INSTANCE_ID,
+                    "valid",
+                    b"/source",
+                    b"/target-unique",
+                    VOLUME_ID,
+                    "creating",
+                    Option::<String>::None
+                ],
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -567,6 +857,26 @@ fn failed_delete_rolls_back_tombstone_and_active_row_together() {
             UnixMillis::new(1_700_000_001_000).unwrap(),
         )
         .unwrap();
+    let wrong_instance = InstanceId::from_str(OTHER_INSTANCE_ID).unwrap();
+    let error = store
+        .complete_deletion(
+            value.workspace_id(),
+            wrong_instance,
+            UnixMillis::new(1_700_000_001_001).unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.conflict_kind(),
+        Some(PortConflict::InstallationIdentity)
+    );
+    assert_eq!(
+        store
+            .workspace(value.workspace_id())
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkspaceState::Deleting
+    );
     drop(store);
 
     let connection = Connection::open(&path).unwrap();

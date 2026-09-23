@@ -48,6 +48,7 @@ fn lock_scopes_are_independent_timeout_is_bounded_and_release_allows_reacquire()
         .acquire_bootstrap(Duration::from_millis(100))
         .unwrap();
     assert_eq!(bootstrap_guard.scope(), LifecycleScope::Bootstrap);
+    let diagnostic_before = fs::read(bootstrap.join("init.lock")).unwrap();
     let started = Instant::now();
     let error = adapter
         .acquire_bootstrap(Duration::from_millis(40))
@@ -55,6 +56,10 @@ fn lock_scopes_are_independent_timeout_is_bounded_and_release_allows_reacquire()
         .expect("same-scope contender must time out");
     assert_eq!(error.kind(), PortErrorKind::Timeout);
     assert!(started.elapsed() >= Duration::from_millis(35));
+    assert_eq!(
+        fs::read(bootstrap.join("init.lock")).unwrap(),
+        diagnostic_before
+    );
 
     let data_guard = adapter
         .acquire_data_root(&absolute(&data_root), Duration::from_millis(100))
@@ -75,6 +80,7 @@ fn lock_symlink_and_post_acquisition_replacement_are_rejected() {
     private_dir(&bootstrap);
     let victim = temp.path().join("victim");
     fs::write(&victim, b"victim").unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
     symlink(&victim, bootstrap.join("init.lock")).unwrap();
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     assert!(

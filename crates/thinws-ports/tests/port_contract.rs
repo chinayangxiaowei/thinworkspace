@@ -23,6 +23,11 @@ fn port_error_keeps_typed_classification_and_source_without_leaking_it() {
     assert_eq!(error.operation(), "reserve workspace");
     assert_eq!(error.conflict_kind(), Some(PortConflict::WorkspaceName));
     assert!(error.source().is_some());
-    assert!(!error.to_string().contains("/Users"));
-    assert!(!format!("{error:?}").contains("/Users"));
+    assert_eq!(error.to_string(), "reserve workspace failed (Conflict)");
+    let debug = format!("{error:?}");
+    assert!(debug.contains("PortError"));
+    assert!(debug.contains("reserve workspace"));
+    assert!(debug.contains("WorkspaceName"));
+    assert!(debug.contains("has_source: true"));
+    assert!(!debug.contains("/Users"));
 }

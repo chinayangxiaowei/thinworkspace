@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run explicitly scoped mutation testing for the P0 workflow."""
+"""Run explicitly scoped mutation testing for the P0/P1 workflow."""
 
 from __future__ import annotations
 

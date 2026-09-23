@@ -26,7 +26,7 @@ crate、环境变量、Git ref 和内部文件等技术标识由 `thinws` 派生
 
 - AI Agent 的强制入口与按需加载规则：[AGENTS.md](AGENTS.md)
 - 项目文档与开发过程文档索引：[docs/README.md](docs/README.md)
-- P0/P1 当前实施顺序：[Phase 1 实施计划](docs/development/planning/ThinWorkspace_Phase1实施计划_v1.0.md)
+- Phase 0 / Phase 1 当前实施顺序：[Phase 1 实施计划](docs/development/planning/ThinWorkspace_Phase1实施计划_v1.0.md)
 - 版本显著变更：[CHANGELOG.md](CHANGELOG.md)
 - 源码许可与商业授权：[LICENSING.md](LICENSING.md)、[商业授权申请说明](COMMERCIAL-LICENSING.md)及[正式许可证](LICENSE.md)
 

@@ -60,6 +60,10 @@ fn marker_parser_rejects_unknown_versions_fields_states_and_ambiguous_path_hex()
 
 #[test]
 fn parser_enforces_size_utf8_and_typed_ids_before_toml_values_escape() {
+    assert_eq!(MAX_DOCUMENT_BYTES, 65_536);
+    let mut exact = format!("{PREFIX}data_root_hex = \"2f746d70\"\n{SUFFIX}").into_bytes();
+    exact.resize(MAX_DOCUMENT_BYTES, b' ');
+    assert!(decode_bootstrap_config(&exact).is_ok());
     assert_eq!(
         decode_bootstrap_config(&vec![b'a'; MAX_DOCUMENT_BYTES + 1]).unwrap_err(),
         DocumentError::TooLarge
@@ -81,5 +85,9 @@ fn parser_enforces_size_utf8_and_typed_ids_before_toml_values_escape() {
     assert_eq!(
         decode_bootstrap_config(trailing_volume.as_bytes()).unwrap_err(),
         DocumentError::InvalidIdentity
+    );
+    assert_eq!(
+        DocumentError::InvalidToml.to_string(),
+        "invalid bootstrap document (InvalidToml)"
     );
 }

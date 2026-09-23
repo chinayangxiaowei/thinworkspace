@@ -179,3 +179,40 @@ fn encode_hex(bytes: &[u8]) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
+    const VOLUME_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn identity_with_path_length(length: usize) -> InstallationIdentity {
+        assert!(length >= 1);
+        let mut path = vec![b'a'; length];
+        path[0] = b'/';
+        InstallationIdentity::new(
+            InstanceId::from_str(INSTANCE_ID).unwrap(),
+            AbsolutePath::try_from_bytes(path).unwrap(),
+            VolumeId::from_str(VOLUME_ID).unwrap(),
+        )
+    }
+
+    #[test]
+    fn config_encoder_accepts_the_exact_limit_and_rejects_the_next_path_size() {
+        let base = encode_config(&identity_with_path_length(1)).unwrap().len() - 2;
+        assert_eq!((MAX_DOCUMENT_BYTES - base) % 2, 0);
+        let exact_path_length = (MAX_DOCUMENT_BYTES - base) / 2;
+
+        assert_eq!(
+            encode_config(&identity_with_path_length(exact_path_length))
+                .unwrap()
+                .len(),
+            MAX_DOCUMENT_BYTES
+        );
+        assert_eq!(
+            encode_config(&identity_with_path_length(exact_path_length + 1)).unwrap_err(),
+            DocumentError::TooLarge
+        );
+    }
+}

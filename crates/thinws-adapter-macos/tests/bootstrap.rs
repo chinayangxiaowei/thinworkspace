@@ -174,6 +174,65 @@ fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
 }
 
 #[test]
+fn an_in_place_modified_initializing_marker_cannot_be_promoted() {
+    let temp = controlled_tempdir();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data");
+    private_dir(&bootstrap);
+    private_dir(&data_root);
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let expected = identity(&data_root, INSTANCE_ID);
+    let proof = adapter.create_initializing(&lock, &expected).unwrap();
+    let marker_path = data_root.join(".thinws-root.toml");
+    let replacement = encoded_marker(&expected, "ready");
+    write_private(&marker_path, &replacement);
+
+    let error = adapter.publish_ready(&lock, proof).unwrap_err();
+    assert_eq!(
+        error.conflict_kind(),
+        Some(PortConflict::InstallationIdentity)
+    );
+    assert_eq!(fs::read(marker_path).unwrap(), replacement);
+}
+
+#[test]
+fn an_existing_config_conflicts_even_when_the_requested_root_marker_is_ready() {
+    let temp = controlled_tempdir();
+    let bootstrap = temp.path().join("bootstrap");
+    let first_root = temp.path().join("first");
+    let second_root = temp.path().join("second");
+    private_dir(&bootstrap);
+    private_dir(&first_root);
+    private_dir(&second_root);
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+
+    let first = identity(&first_root, INSTANCE_ID);
+    let first_proof = adapter.create_initializing(&lock, &first).unwrap();
+    adapter.publish_ready(&lock, first_proof).unwrap();
+    adapter.publish_config(&lock, &first).unwrap();
+
+    let second = identity(&second_root, OTHER_INSTANCE_ID);
+    let second_proof = adapter.create_initializing(&lock, &second).unwrap();
+    adapter.publish_ready(&lock, second_proof).unwrap();
+    let first_config = fs::read(bootstrap.join("config.toml")).unwrap();
+    let error = adapter.publish_config(&lock, &second).unwrap_err();
+    assert_eq!(
+        error.conflict_kind(),
+        Some(PortConflict::InstallationIdentity)
+    );
+    assert_eq!(
+        fs::read(bootstrap.join("config.toml")).unwrap(),
+        first_config
+    );
+}
+
+#[test]
 fn leaf_symlinks_and_a_guard_from_another_adapter_fail_without_touching_targets() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");

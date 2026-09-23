@@ -23,6 +23,10 @@ pub const APPLICATION_ID: i32 = 1_414_027_091;
 pub const SCHEMA_VERSION: i32 = 1;
 
 const SCHEMA_V1: &str = include_str!("schema_v1.sql");
+const DATABASE_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    .union(OpenFlags::SQLITE_OPEN_CREATE)
+    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
 
 /// Verified settings on the concrete SQLite connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,11 +57,7 @@ impl SqliteMetadataStore {
         installation: &InstallationRecord,
         busy_timeout: Duration,
     ) -> Result<Self, PortError> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let mut connection = Connection::open_with_flags(path, flags)
+        let mut connection = Connection::open_with_flags(path, DATABASE_OPEN_FLAGS)
             .map_err(|error| storage_error("open metadata database", error))?;
         let application_id = pragma_i32(&connection, "application_id")?;
         let user_version = pragma_i32(&connection, "user_version")?;
@@ -92,18 +92,21 @@ impl SqliteMetadataStore {
             }
         };
 
-        configure_connection(&connection, busy_timeout)?;
-        if initialize {
+        let actual = if initialize {
+            configure_connection(&connection, busy_timeout)?;
             migrate_v0(&mut connection, installation, SCHEMA_V1)?;
-        }
-
-        let actual = read_installation(&connection)?;
-        if actual.identity() != installation.identity() {
-            return Err(PortError::conflict(
-                "validate installation identity",
-                PortConflict::InstallationIdentity,
-            ));
-        }
+            read_installation(&connection)?
+        } else {
+            let actual = read_installation(&connection)?;
+            if actual.identity() != installation.identity() {
+                return Err(PortError::conflict(
+                    "validate installation identity",
+                    PortConflict::InstallationIdentity,
+                ));
+            }
+            configure_connection(&connection, busy_timeout)?;
+            actual
+        };
 
         Ok(Self {
             connection,
@@ -126,10 +129,15 @@ impl MetadataStore for SqliteMetadataStore {
         &mut self,
         reservation: &WorkspaceReservation,
     ) -> Result<WorkspaceRecord, PortError> {
-        if reservation.instance_id() != self.installation.identity().instance_id()
-            || reservation.source_volume_id() != self.installation.identity().volume_id()
-            || reservation.data_volume_id() != self.installation.identity().volume_id()
-        {
+        if (
+            reservation.instance_id(),
+            reservation.source_volume_id(),
+            reservation.data_volume_id(),
+        ) != (
+            self.installation.identity().instance_id(),
+            self.installation.identity().volume_id(),
+            self.installation.identity().volume_id(),
+        ) {
             return Err(PortError::conflict(
                 "reserve workspace",
                 PortConflict::InstallationIdentity,
@@ -502,11 +510,20 @@ fn configure_connection(connection: &Connection, timeout: Duration) -> Result<()
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| storage_error("enable SQLite foreign keys", error))?;
     let settings = read_connection_settings(connection)?;
-    if settings.journal_mode != "wal"
-        || settings.synchronous != 2
-        || !settings.foreign_keys
-        || settings.busy_timeout_ms != timeout_ms
-    {
+    verify_connection_settings(settings, timeout_ms)
+}
+
+fn verify_connection_settings(
+    settings: ConnectionSettings,
+    timeout_ms: i64,
+) -> Result<(), PortError> {
+    let required = ConnectionSettings {
+        journal_mode: "wal".to_owned(),
+        synchronous: 2,
+        foreign_keys: true,
+        busy_timeout_ms: timeout_ms,
+    };
+    if settings != required {
         return Err(PortError::new(
             PortErrorKind::Storage,
             "verify SQLite connection settings",
@@ -685,5 +702,46 @@ mod tests {
         assert_eq!(user_table_count(&connection).unwrap(), 0);
         assert_eq!(pragma_i32(&connection, "application_id").unwrap(), 0);
         assert_eq!(pragma_i32(&connection, "user_version").unwrap(), 0);
+    }
+
+    #[test]
+    fn database_flags_and_each_required_connection_setting_are_exact() {
+        assert_eq!(
+            DATABASE_OPEN_FLAGS,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                .union(OpenFlags::SQLITE_OPEN_CREATE)
+                .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                .union(OpenFlags::SQLITE_OPEN_NOFOLLOW)
+        );
+        let expected = ConnectionSettings {
+            journal_mode: "wal".to_owned(),
+            synchronous: 2,
+            foreign_keys: true,
+            busy_timeout_ms: 50,
+        };
+        verify_connection_settings(expected.clone(), 50).unwrap();
+        for changed in [
+            ConnectionSettings {
+                journal_mode: "delete".to_owned(),
+                ..expected.clone()
+            },
+            ConnectionSettings {
+                synchronous: 1,
+                ..expected.clone()
+            },
+            ConnectionSettings {
+                foreign_keys: false,
+                ..expected.clone()
+            },
+            ConnectionSettings {
+                busy_timeout_ms: 49,
+                ..expected.clone()
+            },
+        ] {
+            assert_eq!(
+                verify_connection_settings(changed, 50).unwrap_err().kind(),
+                PortErrorKind::Storage
+            );
+        }
     }
 }

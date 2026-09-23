@@ -22,7 +22,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "thinws-metadata-sqlite",
             },
             "thinws-adapter-git-cli": {"thinws-core", "thinws-ports"},
-            "thinws-adapter-macos": {"thinws-core", "thinws-ports"},
+            "thinws-adapter-macos": {"blake3", "thinws-core", "thinws-ports"},
             "thinws-metadata-sqlite": {"thinws-core", "thinws-ports"},
         }
 
@@ -63,6 +63,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
             validate_dependency_graph(
                 {
                     "thinws-adapter-macos": {
+                        "blake3",
                         "libc",
                         "thinws-core",
                         "thinws-ports",

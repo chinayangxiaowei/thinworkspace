@@ -114,7 +114,7 @@ CREATE TABLE installation (
             AND replace(volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
         ),
     created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE workspaces (
     workspace_id TEXT PRIMARY KEY
@@ -163,7 +163,7 @@ CREATE TABLE workspaces (
         )
         OR (state <> 'error' AND last_error_code IS NULL)
     )
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX workspaces_state_name ON workspaces(state, name);
 
@@ -174,7 +174,7 @@ CREATE TABLE materialization_receipts (
     recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= 0),
     FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id)
         ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE deletion_tombstones (
     workspace_id TEXT PRIMARY KEY,
@@ -182,10 +182,10 @@ CREATE TABLE deletion_tombstones (
     deleted_at_unix_ms INTEGER NOT NULL CHECK (deleted_at_unix_ms >= 0),
     FOREIGN KEY (instance_id) REFERENCES installation(instance_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
+) STRICT, WITHOUT ROWID;
 ```
 
-v1 同时建立以下触发器；触发器错误是数据库不变量失败，不替代 Core/Application 的业务判断：
+四张表均为 `WITHOUT ROWID`，业务主键是唯一的行身份，不保留可被 `INSERT OR REPLACE` 单独命中的隐藏 rowid。v1 同时建立以下触发器；触发器错误是数据库不变量失败，不替代 Core/Application 的业务判断：
 
 - `installation` 单例只能首次插入，禁止更新、删除或用 `INSERT OR REPLACE` 替换；切换 data root 不以数据库更新实现。
 - Workspace 只能以 `creating` 插入；其 ID、名称、目标路径的任何唯一冲突均拒绝 `INSERT OR REPLACE`，其余实例、路径、卷、copy 许可和创建时间随后不可变。

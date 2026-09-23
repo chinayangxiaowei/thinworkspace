@@ -576,6 +576,19 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     identity_checks
         .execute_batch(include_str!("../src/schema_v1.sql"))
         .unwrap();
+    for table in [
+        "installation",
+        "workspaces",
+        "materialization_receipts",
+        "deletion_tombstones",
+    ] {
+        assert!(
+            identity_checks
+                .prepare(&format!("SELECT rowid FROM {table}"))
+                .is_err(),
+            "{table} must not expose a hidden rowid replacement key"
+        );
+    }
     assert!(
         identity_checks
             .execute(

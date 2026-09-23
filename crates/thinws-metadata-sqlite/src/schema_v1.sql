@@ -26,7 +26,7 @@ CREATE TABLE installation (
             AND replace(volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
         ),
     created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE workspaces (
     workspace_id TEXT PRIMARY KEY
@@ -72,7 +72,7 @@ CREATE TABLE workspaces (
         )
         OR (state <> 'error' AND last_error_code IS NULL)
     )
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE INDEX workspaces_state_name ON workspaces(state, name);
 
@@ -83,7 +83,7 @@ CREATE TABLE materialization_receipts (
     recorded_at_unix_ms INTEGER NOT NULL CHECK (recorded_at_unix_ms >= 0),
     FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id)
         ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE deletion_tombstones (
     workspace_id TEXT PRIMARY KEY,
@@ -91,7 +91,7 @@ CREATE TABLE deletion_tombstones (
     deleted_at_unix_ms INTEGER NOT NULL CHECK (deleted_at_unix_ms >= 0),
     FOREIGN KEY (instance_id) REFERENCES installation(instance_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
+) STRICT, WITHOUT ROWID;
 
 CREATE TRIGGER installation_insert_once
 BEFORE INSERT ON installation

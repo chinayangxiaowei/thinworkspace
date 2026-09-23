@@ -30,6 +30,47 @@ class CrateDependencyDirectionTests(unittest.TestCase):
             ["thinws-core must not depend on rusqlite"],
         )
 
+    def test_activated_persistence_crates_have_exact_external_surfaces(self) -> None:
+        self.assertEqual(
+            validate_dependency_graph(
+                {
+                    "thinws-ports": {"thinws-core"},
+                    "thinws-metadata-sqlite": {
+                        "thinws-core",
+                        "thinws-ports",
+                        "rusqlite",
+                        "tempfile",
+                    },
+                }
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_dependency_graph({"thinws-metadata-sqlite": {"serde"}}),
+            ["thinws-metadata-sqlite must not depend on serde"],
+        )
+
+    def test_macos_adapter_has_only_reviewed_platform_dependencies(self) -> None:
+        self.assertEqual(
+            validate_dependency_graph(
+                {
+                    "thinws-adapter-macos": {
+                        "thinws-core",
+                        "thinws-ports",
+                        "rustix",
+                        "serde",
+                        "tempfile",
+                        "toml",
+                    }
+                }
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_dependency_graph({"thinws-adapter-macos": {"rusqlite"}}),
+            ["thinws-adapter-macos must not depend on rusqlite"],
+        )
+
     def test_core_cannot_depend_on_an_adapter(self) -> None:
         violations = validate_dependency_graph(
             {"thinws-core": {"thinws-adapter-macos"}}

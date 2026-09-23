@@ -31,6 +31,21 @@ name = "thinws-core"
 version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 
+[[licenses.exceptions]]
+name = "thinws-adapter-macos"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-metadata-sqlite"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-ports"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
 [bans]
 multiple-versions = "deny"
 multiple-versions-include-dev = true

@@ -22,7 +22,10 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
 # P1-01 freezes Core's complete direct dependency surface. Other product
 # crates add their external allowlist when their own implementation task begins.
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "thinws-adapter-macos": frozenset({"rustix", "serde", "tempfile", "toml"}),
     "thinws-core": frozenset({"thiserror", "uuid"}),
+    "thinws-metadata-sqlite": frozenset({"rusqlite", "tempfile"}),
+    "thinws-ports": frozenset(),
 }
 
 

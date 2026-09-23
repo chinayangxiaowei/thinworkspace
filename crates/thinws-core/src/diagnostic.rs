@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
+
+use thiserror::Error;
 
 /// Stable machine-readable error codes, independent of CLI process exit mapping.
 ///
@@ -103,6 +106,23 @@ impl ErrorCode {
         }
     }
 }
+
+impl FromStr for ErrorCode {
+    type Err = ErrorCodeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|code| code.as_str() == value)
+            .ok_or(ErrorCodeParseError)
+    }
+}
+
+/// A persisted diagnostic code was not one of the frozen symbolic values.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("unknown ThinWorkspace error code")]
+pub struct ErrorCodeParseError;
 
 impl fmt::Display for ErrorCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

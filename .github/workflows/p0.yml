@@ -117,6 +117,10 @@ jobs:
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_git_status -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Workspace name fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_workspace_name -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Workspace state fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_workspace_state -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Bootstrap document fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_bootstrap_document -- -max_total_time=60 -timeout=5 -max_len=65537 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: >-

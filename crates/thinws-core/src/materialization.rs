@@ -859,6 +859,7 @@ pub struct RollbackEvidence {
     status: RollbackStatus,
     removed: Vec<RelativePath>,
     quarantined: Vec<RelativePath>,
+    unconfirmed_quarantined: Vec<RelativePath>,
     remaining: Vec<CreatedObjectEvidence>,
 }
 
@@ -874,6 +875,7 @@ impl RollbackEvidence {
             status,
             removed,
             quarantined: Vec::new(),
+            unconfirmed_quarantined: Vec::new(),
             remaining,
         }
     }
@@ -882,6 +884,16 @@ impl RollbackEvidence {
     #[must_use]
     pub fn with_quarantined(mut self, quarantined: Vec<RelativePath>) -> Self {
         self.quarantined = quarantined;
+        self
+    }
+
+    /// Adds trash locations whose moved identity or restoration was not confirmed.
+    #[must_use]
+    pub fn with_unconfirmed_quarantined(
+        mut self,
+        unconfirmed_quarantined: Vec<RelativePath>,
+    ) -> Self {
+        self.unconfirmed_quarantined = unconfirmed_quarantined;
         self
     }
 
@@ -901,6 +913,12 @@ impl RollbackEvidence {
     #[must_use]
     pub fn quarantined(&self) -> &[RelativePath] {
         &self.quarantined
+    }
+
+    /// Returns trash-relative locations retained after an unconfirmed restoration.
+    #[must_use]
+    pub fn unconfirmed_quarantined(&self) -> &[RelativePath] {
+        &self.unconfirmed_quarantined
     }
 
     /// Returns objects that could not be confirmed removed.

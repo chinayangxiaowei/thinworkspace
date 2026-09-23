@@ -10,6 +10,8 @@ pub enum PortErrorKind {
     Conflict,
     /// External bytes or durable rows violate the frozen schema.
     InvalidData,
+    /// A descriptor-backed controlled layout failed identity, type, or volume validation.
+    InvalidLayout,
     /// The durable format is newer, foreign, or otherwise unsupported.
     UnsupportedVersion,
     /// The host filesystem or another required platform feature is unavailable.

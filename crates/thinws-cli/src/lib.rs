@@ -129,11 +129,18 @@ where
                 error.kind(),
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             );
-            let target: &mut dyn Write = if success { stdout } else { stderr };
-            if target.write_all(error.to_string().as_bytes()).is_err() {
-                return 31;
+            if success {
+                if stdout.write_all(error.to_string().as_bytes()).is_err() {
+                    return 31;
+                }
+                return 0;
             }
-            return if success { 0 } else { 2 };
+            return render_error(
+                &usage_error("invalid command or arguments"),
+                false,
+                stdout,
+                stderr,
+            );
         }
     };
 

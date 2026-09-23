@@ -16,7 +16,8 @@ use crate::filesystem::{
     create_private_file, duplicate_validated_directory, entry_identity, io_error,
     open_private_child_directory, open_private_directory, open_private_directory_optional,
     open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
-    revalidate_directory, sync_directory, unlink_entry, validate_file_entry,
+    require_empty_directory, revalidate_directory, sync_directory, unlink_entry,
+    validate_file_entry,
 };
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
@@ -66,6 +67,13 @@ impl DataRootLayoutEvidence for MacOsDataRootLayout {
     }
 
     fn revalidate(&self) -> Result<(), PortError> {
+        self.revalidate_inner()
+            .map_err(classify_layout_revalidation)
+    }
+}
+
+impl MacOsDataRootLayout {
+    fn revalidate_inner(&self) -> Result<(), PortError> {
         revalidate_directory(&self.data_root)?;
         if volume_id_for_directory(&self.data_root)? != self.volume_id {
             return Err(PortError::new(
@@ -75,6 +83,12 @@ impl DataRootLayoutEvidence for MacOsDataRootLayout {
         }
         for directory in &self.controlled_directories {
             revalidate_directory(directory)?;
+            if volume_id_for_directory(directory)? != self.volume_id {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "revalidate controlled-directory volume identity",
+                ));
+            }
         }
         let metadata = self
             .controlled_directories
@@ -153,6 +167,7 @@ impl BootstrapStore for MacOsHostAdapter {
                 PortConflict::InstallationIdentity,
             ));
         }
+        require_empty_directory(&directory)?;
         let marker = RootMarker::new(identity.clone(), RootMarkerState::Initializing);
         let bytes = encode_marker(&marker).map_err(document_error)?;
         let temporary = PrivateTemp::create(&directory.fd, "root-marker", &bytes)?;
@@ -543,6 +558,27 @@ fn document_error(error: DocumentError) -> PortError {
     PortError::new(kind, "decode bootstrap document").with_source(error)
 }
 
+fn classify_layout_revalidation(error: PortError) -> PortError {
+    if error.kind() == PortErrorKind::InvalidLayout {
+        return error;
+    }
+    if matches!(
+        error.kind(),
+        PortErrorKind::InvalidData
+            | PortErrorKind::NotFound
+            | PortErrorKind::Conflict
+            | PortErrorKind::CapabilityUnavailable
+    ) {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "revalidate controlled data-root layout",
+        )
+        .with_source(error)
+    } else {
+        error
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -631,6 +667,65 @@ mod tests {
             .unwrap()
             .to_string(),
             "1a42c888-32e3-489c-9bfa-67fd640a94e8"
+        );
+    }
+
+    #[test]
+    fn layout_revalidation_classification_preserves_true_io_failures() {
+        let io = classify_layout_revalidation(PortError::new(
+            PortErrorKind::Io,
+            "injected filesystem failure",
+        ));
+        assert_eq!(io.kind(), PortErrorKind::Io);
+
+        for kind in [
+            PortErrorKind::InvalidData,
+            PortErrorKind::NotFound,
+            PortErrorKind::Conflict,
+            PortErrorKind::CapabilityUnavailable,
+        ] {
+            let error = classify_layout_revalidation(PortError::new(kind, "injected drift"));
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires repository and system temporary directories on different APFS volumes"]
+    fn layout_revalidation_rejects_a_real_different_apfs_volume() {
+        let repository_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-03-volume-tests");
+        fs::create_dir_all(&repository_root).unwrap();
+        let data_root = Builder::new()
+            .prefix("registered-root-")
+            .tempdir_in(fs::canonicalize(repository_root).unwrap())
+            .unwrap();
+        let foreign = Builder::new().prefix("foreign-volume-").tempdir().unwrap();
+        let data_root_path = fs::canonicalize(data_root.path()).unwrap();
+        let foreign_path = fs::canonicalize(foreign.path()).unwrap();
+        fs::set_permissions(&data_root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&foreign_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let data_root = open_private_directory(&data_root_path).unwrap();
+        let foreign = open_private_directory(&foreign_path).unwrap();
+        let registered_volume = volume_id_for_directory(&data_root).unwrap();
+        let foreign_volume = volume_id_for_directory(&foreign).unwrap();
+        assert_ne!(registered_volume, foreign_volume);
+
+        let (database_file, database_identity) =
+            create_private_file(&foreign, OsStr::new(STATE_DATABASE_NAME)).unwrap();
+        let database_path =
+            crate::filesystem::absolute_from_path(&foreign_path.join(STATE_DATABASE_NAME)).unwrap();
+        let layout = MacOsDataRootLayout {
+            data_root,
+            controlled_directories: vec![foreign],
+            database_file,
+            database_identity,
+            database_path,
+            volume_id: registered_volume,
+        };
+
+        assert_eq!(
+            layout.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
         );
     }
 }

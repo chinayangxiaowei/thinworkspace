@@ -152,6 +152,17 @@ fn json_usage_is_an_envelope_help_is_mutually_exclusive_and_double_dash_stops_pr
 }
 
 #[test]
+fn human_usage_errors_use_the_same_stable_error_renderer() {
+    let (status, stdout, stderr) = execute(&["thinws", "unknown"]);
+    assert_eq!(status, 2);
+    assert!(stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stderr).unwrap(),
+        "Error: invalid command or arguments\nCode: E_USAGE\n"
+    );
+}
+
+#[test]
 fn p1_03_public_errors_keep_their_frozen_exit_statuses() {
     for (code, expected_status) in [
         ("E_NOT_INITIALIZED", 10),

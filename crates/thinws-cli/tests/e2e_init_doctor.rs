@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -175,6 +175,38 @@ fn nonempty_unowned_root_and_missing_registered_root_use_distinct_public_errors(
     assert_eq!(status, 32);
     let error: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+}
+
+#[test]
+fn doctor_reports_controlled_directory_type_and_symlink_changes_as_layout_errors() {
+    for replacement in ["file", "symlink", "permissions"] {
+        let temp = apfs_tempdir("thinws-p1-03-layout-errors-");
+        let bootstrap = temp.path().join("bootstrap");
+        let data_root = temp.path().join("registered");
+        assert_eq!(execute(&bootstrap, init_args(&data_root)).0, 0);
+
+        let logs = data_root.join("logs");
+        fs::remove_dir(&logs).unwrap();
+        if replacement == "file" {
+            fs::write(&logs, b"not a controlled directory").unwrap();
+        } else if replacement == "symlink" {
+            let outside = temp.path().join("outside");
+            private_dir(&outside);
+            symlink(&outside, &logs).unwrap();
+        } else {
+            private_dir(&logs);
+            fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let (status, stdout, stderr) = execute(&bootstrap, doctor_args());
+        assert_eq!(status, 33, "replacement={replacement}");
+        assert!(stderr.is_empty());
+        let error: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            error["error"]["code"], "E_DATA_ROOT_LAYOUT",
+            "replacement={replacement}"
+        );
+    }
 }
 
 #[test]

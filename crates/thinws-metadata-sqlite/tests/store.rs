@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
@@ -38,6 +39,43 @@ const WORKSPACE_IDS: [&str; 8] = [
 
 struct TestLayout {
     database_path: AbsolutePath,
+}
+
+struct FailAtRevalidationLayout {
+    database_path: AbsolutePath,
+    calls: Cell<usize>,
+    fail_at: usize,
+}
+
+impl FailAtRevalidationLayout {
+    fn new(path: &std::path::Path, fail_at: usize) -> Self {
+        let path = fs::canonicalize(path).unwrap();
+        Self {
+            database_path: AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec())
+                .unwrap(),
+            calls: Cell::new(0),
+            fail_at,
+        }
+    }
+}
+
+impl DataRootLayoutEvidence for FailAtRevalidationLayout {
+    fn database_path(&self) -> &AbsolutePath {
+        &self.database_path
+    }
+
+    fn revalidate(&self) -> Result<(), PortError> {
+        let call = self.calls.get() + 1;
+        self.calls.set(call);
+        if call == self.fail_at {
+            Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "injected layout revalidation failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl TestLayout {
@@ -100,6 +138,38 @@ fn p1_03_factory_initializes_precreated_file_and_inspects_read_only() {
     assert_eq!(snapshot.installation(), &expected);
     assert!(snapshot.workspaces().is_empty());
     assert_eq!(fs::read(&database).unwrap(), main_database_before);
+}
+
+#[test]
+fn p1_03_factory_preserves_layout_failures_at_every_revalidation_boundary() {
+    let factory = SqliteMetadataStoreFactory;
+    let expected = installation();
+
+    for fail_at in 1..=3 {
+        let temp = controlled_tempdir();
+        let database = temp.path().join("initialize.db");
+        fs::File::create(&database).unwrap();
+        let layout = FailAtRevalidationLayout::new(&database, fail_at);
+        let error = factory
+            .initialize(&layout, &expected, Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+    }
+
+    for fail_at in 1..=3 {
+        let temp = controlled_tempdir();
+        let database = temp.path().join("inspect.db");
+        fs::File::create(&database).unwrap();
+        let stable = TestLayout::new(&database);
+        factory
+            .initialize(&stable, &expected, Duration::from_millis(50))
+            .unwrap();
+        let layout = FailAtRevalidationLayout::new(&database, fail_at);
+        let error = factory
+            .inspect(&layout, &expected, Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+    }
 }
 
 #[test]

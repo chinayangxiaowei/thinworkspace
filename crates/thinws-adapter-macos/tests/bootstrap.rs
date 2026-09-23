@@ -165,6 +165,32 @@ fn p1_03_rejects_nonempty_or_replaced_prepared_roots_without_writing_a_marker() 
 }
 
 #[test]
+fn p1_03_rechecks_prepared_root_emptiness_before_publishing_the_marker() {
+    let temp = controlled_tempdir();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data");
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    adapter.prepare_bootstrap().unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let (prepared, expected) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
+
+    fs::write(data_root.join("arrived-after-prepare"), b"preserve").unwrap();
+    let error = adapter
+        .create_initializing(&lock, prepared, &expected)
+        .err()
+        .expect("a prepared root that became nonempty must be rejected");
+
+    assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+    assert_eq!(
+        fs::read(data_root.join("arrived-after-prepare")).unwrap(),
+        b"preserve"
+    );
+    assert!(!data_root.join(".thinws-root.toml").exists());
+}
+
+#[test]
 fn p1_03_layout_evidence_detects_data_root_replacement() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
@@ -186,7 +212,7 @@ fn p1_03_layout_evidence_detects_data_root_replacement() {
     private_dir(&data_root);
     assert_eq!(
         layout.revalidate().unwrap_err().kind(),
-        PortErrorKind::InvalidData
+        PortErrorKind::InvalidLayout
     );
     assert!(adapter.publish_ready(&lock, proof).is_err());
 }
@@ -308,10 +334,7 @@ fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
         .create_initializing(&lock, second_prepared, &second)
         .err()
         .unwrap();
-    assert_eq!(
-        error.conflict_kind(),
-        Some(PortConflict::InstallationIdentity)
-    );
+    assert_eq!(error.kind(), PortErrorKind::NotEmpty);
     assert_eq!(
         fs::read(second_root.join(".thinws-root.toml")).unwrap(),
         existing

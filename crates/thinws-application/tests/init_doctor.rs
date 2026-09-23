@@ -447,6 +447,16 @@ fn port_failure_classes_map_to_the_frozen_public_codes() {
     assert_eq!(error.diagnostic().code(), ErrorCode::Metadata);
 
     let state = ready_state();
+    state.borrow_mut().metadata_error = Some(PortErrorKind::InvalidLayout);
+    let error = service(state).doctor().unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+
+    let state = ready_state();
+    state.borrow_mut().metadata_error = Some(PortErrorKind::Io);
+    let error = service(state).doctor().unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::Filesystem);
+
+    let state = ready_state();
     let installation = state.borrow().installation.clone().unwrap();
     state.borrow_mut().marker = Some(RootMarker::new(
         installation.identity().clone(),

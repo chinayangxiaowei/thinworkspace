@@ -389,6 +389,8 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         PortErrorKind::CapabilityUnavailable => ErrorCode::CapabilityUnavailable,
         PortErrorKind::NotEmpty => ErrorCode::DataRootNotEmpty,
         PortErrorKind::Unavailable => ErrorCode::DataRootUnavailable,
+        PortErrorKind::InvalidLayout => ErrorCode::DataRootLayout,
+        PortErrorKind::Io => ErrorCode::Filesystem,
         _ if matches!(stage, Stage::Metadata) => ErrorCode::Metadata,
         PortErrorKind::Conflict
         | PortErrorKind::InvalidData

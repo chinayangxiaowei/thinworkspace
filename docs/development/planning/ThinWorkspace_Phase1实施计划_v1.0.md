@@ -125,13 +125,23 @@ P0-07 只验证已跟踪检查与清理决策：真实主/子仓库状态、无�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | In Progress |
+| P1-01 Rust workspace 和 Core 类型 | crate 依赖门禁、类型 ID、错误模型与基础测试 | P0 结论 | R2 | Done |
 | P1-02 BootstrapStore、SQLite schema 和双 scope 锁 | 可迁移 schema、实例身份、并发唯一性与未完成状态 | P1-01 | R4 | Backlog |
 | P1-03 init/doctor | 完成可见初始化、只读能力诊断和不接管中断残留的边界 | P1-02 | R3 | Backlog |
 
 小阶段退出：全新、幂等和冲突初始化有自动证据；中断残留不被自动接管，未经验证的 data root 不被接管。
 
 当前领取：P1-01 由主 Agent 于 2026-09-23 领取，基线 `e547742`，任务分支 `task/p1-01-core-foundation`，工作区 `/Volumes/data/code/worktree`。本任务修改根 workspace、`thinws-core`、依赖方向检查、名称 fuzz harness 和既有 CI 入口；验收类型化 ID、名称语法、结构化错误、禁止依赖边及其自动测试。无状态、SQLite、Git、文件系统或公开 CLI 副作用，不创建空 Port/Adapter/Application/CLI crate，不改变既有 ADR。
+
+P1-01 完成记录（2026-09-23）：
+
+- 实现 commit 为 `f494d59`，审核修正 commit 为 `26ec218`；交付 UUIDv7 类型 ID、冻结的 Workspace 名称语法、结构化 Core 错误、敏感上下文脱敏、Core 直接依赖白名单及自动依赖方向检查。CLI 进程退出码映射不进入 Core。
+- 本轮有效 RED 只计两项行为失败：Core 仍暴露 `exit_status()` 时 `compile_fail` 契约失败；依赖抽取遗漏外部/实验/注册表直接依赖时回归测试得到空违规集。修正后两项均 GREEN。初始缺失模块或导入导致的编译失败不符合 RED 定义，未计为 TDD 证据。
+- 最终普通门禁：根 workspace 与 fuzz workspace 的 fmt、Clippy 全目标/全 feature 均通过；workspace 普通测试 265 通过、0 失败、7 个既有环境用例忽略；workspace rustdoc、26 个仓库工具测试、实际 crate 依赖检查、release workspace 构建、release Core 5 项测试和 1 项 rustdoc 均通过。`cargo-deny` 和离线 `cargo-audit` 通过；仅有既有未命中许可证 allowance/exception 警告。
+- 变异证据按受影响范围组合：候选 `f494d59` 的 Core 全量结果为 56＝42 caught＋14 unviable，0 missed/timeout（SHA-256 `3091b1db0863521c6838c088d5b7a88a7d489ce139ac2f9e2693f5bcd729c44c`）；修正候选 `26ec218` 对变化的 `diagnostic.rs` 补跑 22＝14 caught＋8 unviable，0 missed/timeout（SHA-256 `44cf6a8c1b52c8240fd8ad17e41e11f29086a706ce5868a4851019a04653c717`），其余 32 个未受影响变异经复审核对后复用。
+- 名称解析 fuzz 使用 `cargo-fuzz 0.12.0`、`nightly-2026-08-14` 和 60 秒预算，完成 30,032,981 次运行，无 crash/hang，未新增 artifact；后续修正未改变名称解析、harness、依赖、工具或配置，证据按《任务流程》§18.1 复用。
+- GPT-6 Astra（`gpt-6-astra`）/ `xhigh` 对完整候选 `26ec2186aef7558ffe8b8cda4326fbd61863469e` 独立只读复审，结论 Approve，Critical/High/Normal/Low 均为 0；随后 release Verification 的 Core 5 项测试、1 项 rustdoc、6 项依赖检查器测试及实际依赖检查再次通过。
+- 未执行线上 CI、线上 PR、push、真实 APFS/Git/SQLite/CLI 验收：前两项不属于当前本地流程，后四项没有 P1-01 运行时副作用。`/Volumes/data/code/worktree` 是维护者指定的唯一持久项目 checkout，不是可删除的临时 worktree；本地快进合并后继续作为 `main` 集成目录保留，任务分支随即删除。该任务完成不表示 P1.a 小阶段或 Phase 1 放行。
 
 ### 4.2 原 P1.b Git 托管任务处置
 

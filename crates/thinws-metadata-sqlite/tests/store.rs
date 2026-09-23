@@ -161,6 +161,42 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
         0
     );
 
+    let prefixed_path = temp.path().join("unowned-sqlite-prefix.db");
+    let prefixed = Connection::open(&prefixed_path).unwrap();
+    prefixed
+        .execute("CREATE TABLE sqliteX(value TEXT)", [])
+        .unwrap();
+    drop(prefixed);
+    let error =
+        SqliteMetadataStore::open(&prefixed_path, &installation(), Duration::from_millis(10))
+            .err()
+            .expect("a legal table name beginning with sqlite must make the database nonempty");
+    assert_eq!(error.kind(), PortErrorKind::UnsupportedVersion);
+    assert_eq!(error.operation(), "refuse unowned metadata database");
+    let prefixed = Connection::open(&prefixed_path).unwrap();
+    assert_eq!(
+        prefixed
+            .pragma_query_value(None, "application_id", |row| row.get::<_, i32>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        prefixed
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        prefixed
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='sqliteX'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+
     let future_path = temp.path().join("future.db");
     drop(open(&future_path));
     let future = Connection::open(&future_path).unwrap();
@@ -565,6 +601,14 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     assert!(
         identity_checks
             .execute(
+                "INSERT OR REPLACE INTO installation VALUES (1, ?1, ?2, ?3, 2)",
+                params![INSTANCE_ID, b"/other-data", VOLUME_ID],
+            )
+            .is_err()
+    );
+    assert!(
+        identity_checks
+            .execute(
                 "UPDATE installation SET created_at_unix_ms=2 WHERE singleton=1",
                 [],
             )
@@ -673,6 +717,14 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     assert!(
         connection
             .execute(
+                "INSERT OR REPLACE INTO materialization_receipts VALUES (?1, 1, '{}', 2)",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
                 "UPDATE materialization_receipts SET receipt_json='{}' WHERE workspace_id=?1",
                 [value.workspace_id().to_string()],
             )
@@ -690,6 +742,42 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
         "UPDATE workspaces SET state='ready', updated_at_unix_ms=updated_at_unix_ms+1 WHERE workspace_id=?1",
         [value.workspace_id().to_string()],
     ).unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO workspaces (
+                    workspace_id, instance_id, name, source_path, target_path,
+                    source_volume_id, data_volume_id, allow_full_copy, state,
+                    last_error_code, created_at_unix_ms, updated_at_unix_ms
+                 ) SELECT
+                    workspace_id, instance_id, name, source_path, target_path,
+                    source_volume_id, data_volume_id, allow_full_copy, 'creating',
+                    NULL, created_at_unix_ms, updated_at_unix_ms + 1
+                 FROM workspaces WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT state FROM workspaces WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "ready"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM materialization_receipts WHERE workspace_id=?1",
+                [value.workspace_id().to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
     assert!(connection.execute(
         "UPDATE workspaces SET state='creating', updated_at_unix_ms=updated_at_unix_ms+1 WHERE workspace_id=?1",
         [value.workspace_id().to_string()],
@@ -715,6 +803,17 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
             ],
         )
         .unwrap();
+    assert!(
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO deletion_tombstones VALUES (?1, ?2, 11)",
+                params![
+                    value.workspace_id().to_string(),
+                    value.instance_id().to_string()
+                ],
+            )
+            .is_err()
+    );
     connection
         .execute(
             "DELETE FROM workspaces WHERE workspace_id=?1",

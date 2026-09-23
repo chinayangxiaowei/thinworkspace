@@ -199,6 +199,38 @@ fn an_in_place_modified_initializing_marker_cannot_be_promoted() {
 }
 
 #[test]
+fn an_initializing_marker_moved_into_a_replacement_data_root_cannot_be_promoted() {
+    let temp = controlled_tempdir();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data");
+    let displaced_root = temp.path().join("displaced-data");
+    private_dir(&bootstrap);
+    private_dir(&data_root);
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let expected = identity(&data_root, INSTANCE_ID);
+    let proof = adapter.create_initializing(&lock, &expected).unwrap();
+
+    fs::rename(&data_root, &displaced_root).unwrap();
+    private_dir(&data_root);
+    fs::rename(
+        displaced_root.join(".thinws-root.toml"),
+        data_root.join(".thinws-root.toml"),
+    )
+    .unwrap();
+
+    let error = adapter.publish_ready(&lock, proof).unwrap_err();
+    assert_eq!(error.kind(), PortErrorKind::InvalidData);
+    assert_eq!(
+        fs::read(data_root.join(".thinws-root.toml")).unwrap(),
+        encoded_marker(&expected, "initializing")
+    );
+    assert!(!bootstrap.join("config.toml").exists());
+}
+
+#[test]
 fn an_existing_config_conflicts_even_when_the_requested_root_marker_is_ready() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");

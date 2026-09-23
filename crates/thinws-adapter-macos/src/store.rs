@@ -11,9 +11,9 @@ use crate::document::{
     DocumentError, decode_bootstrap_config, decode_root_marker, encode_config, encode_marker,
 };
 use crate::filesystem::{
-    FileIdentity, NoReplaceError, PrivateTemp, entry_identity, open_private_directory,
-    open_private_directory_optional, path_from_absolute, read_private_file, revalidate_directory,
-    sync_directory, unlink_entry, validate_file_entry,
+    FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, entry_identity,
+    open_private_directory, open_private_directory_optional, path_from_absolute, read_private_file,
+    revalidate_directory, sync_directory, unlink_entry, validate_file_entry,
 };
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
@@ -22,6 +22,7 @@ const MARKER_NAME: &str = ".thinws-root.toml";
 
 /// Non-copyable proof that this process published one exact initializing marker.
 pub struct MacOsInitializingProof {
+    data_root: ValidatedDirectory,
     marker_file: File,
     marker_identity: FileIdentity,
     marker: RootMarker,
@@ -74,6 +75,7 @@ impl BootstrapStore for MacOsHostAdapter {
                     return Err(error);
                 }
                 Ok(MacOsInitializingProof {
+                    data_root: directory,
                     marker_file,
                     marker_identity,
                     marker,
@@ -98,15 +100,15 @@ impl BootstrapStore for MacOsHostAdapter {
         proof: Self::InitializingProof,
     ) -> Result<RootMarker, PortError> {
         self.validate_bootstrap_lock(lock)?;
-        let data_root = path_from_absolute(proof.marker.identity().data_root());
-        let directory = open_private_directory(&data_root)?;
+        let directory = &proof.data_root;
+        revalidate_directory(directory)?;
         validate_file_entry(
             &directory.fd,
             OsStr::new(MARKER_NAME),
             &proof.marker_file,
             proof.marker_identity,
         )?;
-        let current = read_marker_at(&directory, OsStr::new(MARKER_NAME))?;
+        let current = read_marker_at(directory, OsStr::new(MARKER_NAME))?;
         if (current.as_ref(), proof.marker.state())
             != (Some(&proof.marker), RootMarkerState::Initializing)
         {
@@ -139,8 +141,8 @@ impl BootstrapStore for MacOsHostAdapter {
                 proof.marker_identity,
             )?;
             let observed_markers = (
-                read_marker_at(&directory, OsStr::new(MARKER_NAME))?,
-                read_marker_at(&directory, temporary.name())?,
+                read_marker_at(directory, OsStr::new(MARKER_NAME))?,
+                read_marker_at(directory, temporary.name())?,
             );
             if observed_markers != (Some(ready.clone()), Some(proof.marker.clone())) {
                 return Err(PortError::new(
@@ -148,7 +150,7 @@ impl BootstrapStore for MacOsHostAdapter {
                     "verify exchanged root marker content",
                 ));
             }
-            revalidate_directory(&directory)?;
+            revalidate_directory(directory)?;
             Ok(())
         })();
 

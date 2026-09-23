@@ -187,13 +187,13 @@ CREATE TABLE deletion_tombstones (
 
 v1 同时建立以下触发器；触发器错误是数据库不变量失败，不替代 Core/Application 的业务判断：
 
-- `installation` 单例禁止更新和删除；切换 data root 不以数据库更新实现。
-- Workspace 只能以 `creating` 插入；其 ID、实例、名称、路径、卷、copy 许可和创建时间随后不可变。
+- `installation` 单例只能首次插入，禁止更新、删除或用 `INSERT OR REPLACE` 替换；切换 data root 不以数据库更新实现。
+- Workspace 只能以 `creating` 插入；其 ID、名称、目标路径的任何唯一冲突均拒绝 `INSERT OR REPLACE`，其余实例、路径、卷、copy 许可和创建时间随后不可变。
 - 插入 Workspace 时，`source_volume_id` 和 `data_volume_id` 必须都等于 `installation.volume_id`，且 ID 不能已存在于 tombstone。
 - 状态变化只允许 `creating→ready|error|deleting`、`ready→deleting|error`、`deleting→error`、`error→deleting`；同值写入不构成迁移。`updated_at_unix_ms` 不得回退。
 - `ready` 更新前必须已有同 Workspace 的 final receipt；P1-02 不提供写 Ready 的公共存储方法，直到 P1-06/P1-07 冻结类型化 Receipt、P1-09 在同一短事务写 receipt 并转 Ready。
-- final receipt 只能在 Workspace 为 `creating` 时首次插入，之后不可更新。只要父 Workspace 行仍存在，直接删除 receipt 必须由 trigger 拒绝；仅允许在满足 tombstone 前置条件并删除活跃 Workspace 时，由 `ON DELETE CASCADE` 删除 receipt。
-- tombstone 只能为 `deleting` Workspace 插入。删除活跃记录前必须已有同 ID tombstone；两步必须位于同一事务。tombstone 不保存名称、路径、源码或日志，也不可更新或删除。
+- final receipt 只能在 Workspace 为 `creating` 时首次插入，之后不可更新，也不可用 `INSERT OR REPLACE` 改写。只要父 Workspace 行仍存在，直接删除 receipt 必须由 trigger 拒绝；仅允许在满足 tombstone 前置条件并删除活跃 Workspace 时，由 `ON DELETE CASCADE` 删除 receipt。
+- tombstone 只能为 `deleting` Workspace 首次插入，不可用 `INSERT OR REPLACE` 改写。删除活跃记录前必须已有同 ID tombstone；两步必须位于同一事务。tombstone 不保存名称、路径、源码或日志，也不可更新或删除。
 
 Core 状态事件仍负责区分普通删除与显式 force。数据库只接受详细设计允许的状态边，不把直接 SQL 能通过解释为用户已授权。
 

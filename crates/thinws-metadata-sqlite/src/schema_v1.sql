@@ -93,6 +93,13 @@ CREATE TABLE deletion_tombstones (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TRIGGER installation_insert_once
+BEFORE INSERT ON installation
+WHEN EXISTS (SELECT 1 FROM installation)
+BEGIN
+    SELECT RAISE(ABORT, 'installation is insert-once');
+END;
+
 CREATE TRIGGER installation_no_update
 BEFORE UPDATE ON installation
 BEGIN
@@ -108,6 +115,12 @@ END;
 CREATE TRIGGER workspaces_insert_guard
 BEFORE INSERT ON workspaces
 BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM workspaces
+        WHERE workspace_id = NEW.workspace_id
+           OR name = NEW.name
+           OR target_path = NEW.target_path
+    ) THEN RAISE(ABORT, 'workspace conflicts cannot be replaced') END;
     SELECT CASE WHEN NEW.state <> 'creating' OR NEW.last_error_code IS NOT NULL
         THEN RAISE(ABORT, 'workspace must be inserted as creating') END;
     SELECT CASE WHEN NOT EXISTS (
@@ -167,6 +180,15 @@ BEGIN
     SELECT RAISE(ABORT, 'ready workspace requires final receipt');
 END;
 
+CREATE TRIGGER receipts_insert_once
+BEFORE INSERT ON materialization_receipts
+WHEN EXISTS (
+    SELECT 1 FROM materialization_receipts WHERE workspace_id = NEW.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'receipt is insert-once');
+END;
+
 CREATE TRIGGER receipts_insert_only_creating
 BEFORE INSERT ON materialization_receipts
 WHEN (SELECT state FROM workspaces WHERE workspace_id = NEW.workspace_id) IS NOT 'creating'
@@ -185,6 +207,15 @@ BEFORE DELETE ON materialization_receipts
 WHEN EXISTS (SELECT 1 FROM workspaces WHERE workspace_id = OLD.workspace_id)
 BEGIN
     SELECT RAISE(ABORT, 'receipt can only be cascade deleted');
+END;
+
+CREATE TRIGGER tombstones_insert_once
+BEFORE INSERT ON deletion_tombstones
+WHEN EXISTS (
+    SELECT 1 FROM deletion_tombstones WHERE workspace_id = NEW.workspace_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'tombstone is insert-once');
 END;
 
 CREATE TRIGGER tombstones_insert_only_deleting

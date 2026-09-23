@@ -635,7 +635,7 @@ fn user_table_count(connection: &Connection) -> Result<i64, PortError> {
     connection
         .query_row(
             "SELECT count(*) FROM sqlite_schema
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+             WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
             [],
             |row| row.get(0),
         )

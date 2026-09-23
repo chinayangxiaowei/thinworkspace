@@ -145,6 +145,8 @@ P1-01 完成记录（2026-09-23）：
 
 当前领取：P1-02 由主 Agent 于 2026-09-23 领取，基线 `4fd9dd7`，任务分支 `task/p1-02-bootstrap-store`，继续使用维护者指定的唯一持久 checkout `/Volumes/data/code/worktree`。先由 ADR-0004 冻结 bootstrap/root marker、SQLite schema v1 与双 scope 锁协议，再实现实际 Port、Adapter、迁移和并发/未完成状态测试；P1-03 的 init/doctor、Workspace 物化、Ready Receipt、目录删除和公开 CLI 均在本任务范围外。风险 R4，文档候选须经规定模型审核后才进入代码。
 
+P1-02 变异执行记录（进行中）：冻结实现候选为 `8437e8a5358caba5bb72b7c4c73ee17c89eff80c`，执行负责人为主 Agent。范围是 12 个直接新增或修改的生产模块：Core 的 diagnostic/installation/path/time/volume/workspace、Ports 的 error、SQLite store，以及 macOS Adapter 的 document/filesystem/lock/store，共 381 个 mutant；不运行全 workspace 变异。环境为 macOS 15.7.2 arm64、Rust 1.97.1、cargo-mutants 27.1.0，并挂载独立 APFS 镜像以满足既有 `--include-ignored` 真实跨卷测试。固定参数为 2 jobs、单 mutant 60 秒、全 workspace 测试，结果目录为 `target/mutants.out/`。执行于 2026-09-23 08:34:41 -0700 启动，首次主动查看时间按无可比历史的暂定值设为不早于 09:34:41 -0700；完成后在本记录补充终态计数、实际耗时和证据摘要。
+
 ### 4.2 原 P1.b Git 托管任务处置
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

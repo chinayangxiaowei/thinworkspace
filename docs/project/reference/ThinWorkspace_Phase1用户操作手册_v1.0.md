@@ -40,7 +40,7 @@ init 只接管新目录或空目录；已完整初始化且身份一致时重复
 
 配置固定在 `~/Library/Application Support/ThinWorkspace/config.toml`，不通过环境变量切换。数据卷身份必须与登记匹配；卷不在线时不在其他位置新建替代目录。
 
-doctor 只读，报告主机、数据根、未完成工作区与 Git 检查是否可用。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
+doctor 对 ThinWorkspace 产品状态只读，报告主机、数据根、未完成工作区与 Git 检查是否可用。它不修改配置、root marker、主数据库、schema 或 Workspace 记录；SQLite 读取 WAL 数据库时可能管理同目录的 `state.db-wal`/`state.db-shm` 协调文件，因此该承诺不是文件系统字节零变化。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 
 init 的人类输出固定为以下字段；重复初始化只改变 `Result`：
 

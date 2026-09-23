@@ -226,9 +226,13 @@ data-root scope: <data-root>/metadata/lifecycle.lock
 
 ### 4.7 P1-03 初始化调用边界
 
-P1-03 不增加第八个概念 Port。`BootstrapStore` 在 P1-02 文档发布能力之外增加四个同职责调用：`prepare_bootstrap` 准备固定 bootstrap 目录；`prepare_data_root` 逐段准备并返回绑定已打开 data root 与实际 Volume ID 的证明；`initialize_layout` 只接受本次 `InitializingProof` 并建立受控布局；`validate_layout` 只读验证既有布局与登记身份。后两者返回 `DataRootLayout`，其中包含由受控 data root 推导的版本化数据库规范绝对路径；不能把任意调用方路径下传给 SQLite Adapter。
+P1-03 不增加第八个概念 Port。`BootstrapStore` 在 P1-02 文档发布能力之外增加四个同职责调用：`prepare_bootstrap` 准备固定 bootstrap 目录；`prepare_data_root` 逐段准备并返回不可伪造的 `PreparedDataRoot`，其中持有最终目录 FD、目录身份、规范路径和实际 Volume ID；`initialize_layout` 只接受本次 `InitializingProof` 并建立受控布局；`validate_layout` 只读验证既有布局与登记身份。
 
-`MetadataStoreFactory` 是 MetadataStore Port 的构造边界，不是新的存储模型。它只允许两类显式操作：`initialize` 接受 `DataRootLayout` 推导的数据库路径与期望 installation，在读写事务中初始化或核对并返回实际 installation；`inspect` 以只读方式接受同一路径与期望 installation，验证现有 `application_id`、`user_version`、schema 和 installation，并返回 installation 及按 WorkspaceId 稳定排序的活动 Workspace 快照。`inspect` 不创建数据库、不执行 migration、不改变 journal mode；两者都不向 Application 泄漏 SQLite 连接。
+证明链不得退化为裸路径：`create_initializing` 必须消费 `PreparedDataRoot`，核对 Application 提供的 identity 后使用其中的 FD 写 marker，不得按 identity 路径重开 data root；返回的 `InitializingProof` 继续持有同一目录证据。`initialize_layout` 只用该证明做 dirfd-relative 创建，并通过 no-follow、create-new 预建 `0600` 的空 `state.db`，然后返回不可由 Application 自行构造的 `DataRootLayout`；它绑定 data root、metadata 目录、`state.db` 目录项身份、Volume ID 和版本化数据库规范路径。SQLite factory 只接受该布局能力而非 `Path`，以 no-create 方式打开数据库，并在打开前、打开后、事务提交后分别触发布局身份/卷重验；任何失败都禁止发布 Ready/config。重复 init 与 doctor 的 `validate_layout` 也返回同类只读能力。P1-03 不用自定义 SQLite VFS 宣称无法提供的绝对防竞态保证，但把每个外部写边界限制到同一证明链，并在紧邻写入处检测目录替换。
+
+`MetadataStoreFactory` 是 MetadataStore Port 的构造边界，不是新的存储模型。它只允许两类显式操作：`initialize` 接受 `DataRootLayout` 与期望 installation，在读写事务中初始化或核对并返回实际 installation；`inspect` 以 SQLite read-only 模式接受同类布局与期望 installation，验证现有 `application_id`、`user_version`、schema 和 installation，并返回 installation 及按 WorkspaceId 稳定排序的活动 Workspace 快照。`inspect` 不创建主数据库、不执行 migration、不修改主数据库或 journal mode；两者都不向 Application 泄漏 SQLite 连接。
+
+SQLite 的“read-only”是产品状态只读，不等于目录字节零变化。WAL 模式读取可能创建、更新或删除 `state.db-wal`/`state.db-shm` 协调文件；P1 允许这一 SQLite 引擎行为，但不把它记录为产品成功或修复。如果辅助文件不可访问则结构化失败，不得回退 `immutable=1`。专项测试至少覆盖：初始无 sidecar、已有未 checkpoint WAL，以及并发写连接存在时读取到一致的已提交状态。
 
 CLI crate 是 composition root：业务调用和 renderer 只面向 Application，但生产装配可以直接依赖 macOS/SQLite Adapter 以构造 Port 实现。该依赖只做 wiring，不能在 CLI 复制初始化顺序、身份判断或错误策略。
 

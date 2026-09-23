@@ -52,13 +52,13 @@ data root 的 `.thinws-root.toml` 保存匹配的实例、路径、卷和 `initi
 
 初始化使用既有七个 Port，不新增平行的目录或数据库初始化 Port。`BootstrapStore` 先创建/验证固定 bootstrap 目录，Application 再取得 bootstrap lock；CLI 只在 composition root 注入具体 Adapter，不直接编排文件系统或 SQLite。
 
-持锁后的首次初始化顺序固定为：读取 config → 验证最近存在父目录并逐层 no-follow 创建/验证私有 data root → 从最终目录打开 FD 取得实际 APFS Volume UUID → 写 `initializing` 标记并持有本次证明 → 以该证明建立受控子目录 → 通过 `MetadataStore` 的 factory 边界事务化初始化 SQLite → 原子发布 `ready` 标记 → 最后发布 bootstrap config。Application 生成 InstanceId 并提供非负 Unix 毫秒时间；Adapter 不替代 Application 决定幂等、冲突或错误码。
+持锁后的首次初始化顺序固定为：读取 config → 验证最近存在父目录并逐层 no-follow 创建/验证私有 data root → 从最终目录打开 FD 取得实际 APFS Volume UUID 和目录身份，形成不可伪造的 prepared proof → 以该 proof 写 `initializing` 标记并将同一打开目录移入 `InitializingProof` → 以该 proof 建立受控子目录和数据库布局证明 → 通过 `MetadataStore` 的 factory 边界事务化初始化 SQLite → 重验布局证明 → 原子发布 `ready` 标记 → 最后发布 bootstrap config。Application 生成 InstanceId 并提供非负 Unix 毫秒时间；Adapter 不替代 Application 决定幂等、冲突或错误码。
 
-data root 已存在时必须是当前用户拥有、模式精确为 `0700` 的真实空目录；不自动改权限，不接管链接或非空目录。路径缺失后缀以 `mkdirat`/等价 dirfd-relative 方式逐层创建为 `0700` 并同步父目录；中途失败允许留下尚无 marker 的空目录，但不冒报初始化成功。root marker 建立后，`metadata`、`logs`、`workspaces`、`staging`、`trash` 只能在同一持有目录下 create-new 为 `0700`；日志文件和 lifecycle lock 在各自首次使用时建立，不作为 init 成功的空占位物。
+data root 已存在时必须是当前用户拥有、模式精确为 `0700` 的真实空目录；不自动改权限，不接管链接或非空目录。路径缺失后缀以 `mkdirat`/等价 dirfd-relative 方式逐层创建为 `0700` 并同步父目录；中途失败允许留下尚无 marker 的空目录，但不冒报初始化成功。root marker 建立后，`metadata`、`logs`、`workspaces`、`staging`、`trash` 只能在同一持有目录下 create-new 为 `0700`；`metadata/state.db` 由布局步骤通过 dirfd-relative、no-follow、create-new 方式预建为 `0600` 并绑定其目录项身份，SQLite 初始化只能以 no-create 方式打开该证明内的文件。日志文件和 lifecycle lock 在各自首次使用时建立，不作为 init 成功的空占位物。
 
 已有 config 时，Application 先将本次 `--data-root` 的规范路径字节与登记值比较；不同立即返回 `E_DATA_ROOT_CHANGE_UNSUPPORTED`，不得访问或创建新路径。相同时，重复 init 只在 Ready marker、当前 data-root Volume ID、受控子目录和 SQLite installation 全部一致时返回 `already-initialized`；它不重写文件、不补建缺失布局。
 
-doctor 使用相同校验的只读路径和 SQLite 只读打开，不取得 lifecycle lock、不创建目录/WAL/配置、不修复任何对象。MetadataStore 的只读快照返回 installation 和按 WorkspaceId 稳定排序的活动 Workspace；doctor 只统计其中非 Ready 项并报告数量，数量大于零本身不是根布局损坏，也不改变 `status=ready`。root marker 仍为 `initializing` 则属于未完成实例初始化并返回 `E_DATA_ROOT_LAYOUT`。P1-03 只报告 Git 检查尚未启用；P1-16 接入 GitInspector 后再改变该能力事实，不在 doctor 内直接启动 Git。
+doctor 使用相同校验的产品状态只读路径和 SQLite read-only 打开，不取得 lifecycle lock、不创建受控目录或配置、不修改主数据库、schema、installation、Workspace 行或 journal mode，也不修复任何对象。SQLite 为读取 WAL 数据库可能创建、更新或删除同目录的 `state.db-wal`/`state.db-shm` 引擎协调文件；这不是产品状态写入，不能宣称文件系统零写入。所需辅助文件无法访问时返回 `E_METADATA`，不得使用 `immutable=1` 绕过锁和变化检测。MetadataStore 的只读快照返回 installation 和按 WorkspaceId 稳定排序的活动 Workspace；doctor 只统计其中非 Ready 项并报告数量，数量大于零本身不是根布局损坏，也不改变 `status=ready`。root marker 仍为 `initializing` 则属于未完成实例初始化并返回 `E_DATA_ROOT_LAYOUT`。P1-03 只报告 Git 检查尚未启用；P1-16 接入 GitInspector 后再改变该能力事实，不在 doctor 内直接启动 Git。
 
 只接管新目录或空目录；已完整初始化且身份一致时幂等返回。初始化中断留下的非空目录不自动接管，需用户确认后在平台之外显式清理，再重新初始化。没有 reset/migrate。细化的错误行为由手册管理。
 

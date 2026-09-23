@@ -210,6 +210,34 @@ fn doctor_reports_controlled_directory_type_and_symlink_changes_as_layout_errors
 }
 
 #[test]
+fn doctor_reports_bootstrap_and_root_marker_symlinks_as_layout_errors() {
+    for document in ["config", "marker"] {
+        let temp = apfs_tempdir("thinws-p1-03-document-links-");
+        let bootstrap = temp.path().join("bootstrap");
+        let data_root = temp.path().join("registered");
+        assert_eq!(execute(&bootstrap, init_args(&data_root)).0, 0);
+
+        let document_path = if document == "config" {
+            bootstrap.join("config.toml")
+        } else {
+            data_root.join(".thinws-root.toml")
+        };
+        let displaced = document_path.with_extension("displaced");
+        fs::rename(&document_path, &displaced).unwrap();
+        symlink(&displaced, &document_path).unwrap();
+
+        let (status, stdout, stderr) = execute(&bootstrap, doctor_args());
+        assert_eq!(status, 33, "document={document}");
+        assert!(stderr.is_empty());
+        let error: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            error["error"]["code"], "E_DATA_ROOT_LAYOUT",
+            "document={document}"
+        );
+    }
+}
+
+#[test]
 fn compiled_binary_help_does_not_initialize_user_state() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_thinws"))
         .arg("--help")

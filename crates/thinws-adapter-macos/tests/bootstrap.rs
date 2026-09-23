@@ -218,6 +218,34 @@ fn p1_03_layout_evidence_detects_data_root_replacement() {
 }
 
 #[test]
+fn p1_03_layout_evidence_detects_database_entry_rename() {
+    let temp = controlled_tempdir();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data");
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    adapter.prepare_bootstrap().unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let (prepared, expected) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
+    let proof = adapter
+        .create_initializing(&lock, prepared, &expected)
+        .unwrap();
+    let layout = adapter.initialize_layout(&lock, &proof).unwrap();
+
+    fs::rename(
+        data_root.join("metadata/state.db"),
+        data_root.join("metadata/displaced.db"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        layout.revalidate().unwrap_err().kind(),
+        PortErrorKind::InvalidLayout
+    );
+}
+
+#[test]
 fn bootstrap_documents_publish_in_one_direction_with_exact_idempotence() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");

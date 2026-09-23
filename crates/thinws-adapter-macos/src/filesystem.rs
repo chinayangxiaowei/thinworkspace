@@ -397,7 +397,13 @@ pub(crate) fn read_private_file(
     let fd = match rustix::fs::openat(directory, name, PRIVATE_READ_FLAGS, Mode::empty()) {
         Ok(fd) => fd,
         Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(error) => return Err(io_error("open private document", error)),
+        Err(error) => {
+            return Err(secure_open_error(
+                "open private document",
+                error,
+                PortErrorKind::InvalidData,
+            ));
+        }
     };
     let mut file = File::from(fd);
     let expected = validate_private_file(&file, "validate private document")?;
@@ -423,8 +429,14 @@ pub(crate) fn validate_file_entry(
     expected: FileIdentity,
 ) -> Result<(), PortError> {
     let held = validate_private_file(file, "revalidate held private file")?;
-    let current = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|error| io_error("revalidate private file entry", error))?;
+    let current =
+        rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| {
+            secure_open_error(
+                "revalidate private file entry",
+                error,
+                PortErrorKind::InvalidData,
+            )
+        })?;
     if held != expected
         || identity(&current) != expected
         || !FileType::from_raw_mode(current.st_mode).is_file()

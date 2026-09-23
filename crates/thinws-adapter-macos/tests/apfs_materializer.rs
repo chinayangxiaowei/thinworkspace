@@ -106,7 +106,7 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
 
     assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
     assert_eq!(receipt.cow_evidence(), CowEvidence::Confirmed);
-    assert_eq!(receipt.regular_file_count(), 5);
+    assert_eq!(receipt.regular_file_count(), Some(5));
     assert_eq!(receipt.clone_calls_succeeded(), 5);
     assert_eq!(
         receipt.source_manifest_digest(),
@@ -171,7 +171,7 @@ fn empty_tree_succeeds_without_claiming_that_cow_was_used() {
 
     assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
     assert_eq!(receipt.cow_evidence(), CowEvidence::NotUsed);
-    assert_eq!(receipt.regular_file_count(), 0);
+    assert_eq!(receipt.regular_file_count(), Some(0));
     assert_eq!(receipt.clone_calls_succeeded(), 0);
 }
 
@@ -199,7 +199,7 @@ fn directory_and_symlink_only_tree_succeeds_with_cow_not_used() {
         .unwrap();
 
     assert_eq!(receipt.cow_evidence(), CowEvidence::NotUsed);
-    assert_eq!(receipt.regular_file_count(), 0);
+    assert_eq!(receipt.regular_file_count(), Some(0));
     assert_eq!(
         fs::read_link(target.join("directory/link"))
             .unwrap()

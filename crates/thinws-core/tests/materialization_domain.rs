@@ -2,11 +2,12 @@ use std::str::FromStr;
 
 use thinws_core::{
     AbsolutePath, CandidateEvidence, CowEvidence, DirectoryIdentityEvidence, Evidence,
-    FallbackPolicy, FileIdentity, FileSystemIdentity, MaterializationFailureKind,
-    MaterializationMode, MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
-    MaterializationPlanError, MaterializationReceipt, MaterializerKind, MountEvidence,
-    PathCapabilityReport, PathResolution, ProbeEvidenceDigest, RelativePath, RollbackEvidence,
-    RollbackStatus, SupportState, TreeDigest, VolumeId,
+    FallbackPolicy, FileIdentity, FileSystemIdentity, MaterializationAttemptEvidence,
+    MaterializationFailureKind, MaterializationMode, MaterializationOutcome,
+    MaterializationPathReport, MaterializationPlan, MaterializationPlanError,
+    MaterializationReceipt, MaterializerKind, MountEvidence, PathCapabilityReport, PathResolution,
+    ProbeEvidenceDigest, RelativePath, RollbackEvidence, RollbackStatus, SupportState, TreeDigest,
+    VolumeId,
 };
 
 fn path(value: &str) -> AbsolutePath {
@@ -172,8 +173,28 @@ fn failed_receipt_distinguishes_a_modified_target_root_from_a_prewrite_failure()
         Vec::new(),
         true,
         rollback,
+        MaterializationAttemptEvidence::new(
+            Some(12),
+            Some(8),
+            Some(1),
+            1,
+            Some(TreeDigest::new([3; 32])),
+            Some(TreeDigest::new([4; 32])),
+        ),
         1,
     );
 
     assert_eq!(receipt.outcome(), MaterializationOutcome::Partial);
+    assert_eq!(receipt.logical_bytes(), Some(12));
+    assert_eq!(receipt.physical_bytes(), Some(8));
+    assert_eq!(receipt.regular_file_count(), Some(1));
+    assert_eq!(receipt.clone_calls_succeeded(), 1);
+    assert_eq!(
+        receipt.source_manifest_digest(),
+        Some(TreeDigest::new([3; 32]))
+    );
+    assert_eq!(
+        receipt.target_manifest_digest(),
+        Some(TreeDigest::new([4; 32]))
+    );
 }

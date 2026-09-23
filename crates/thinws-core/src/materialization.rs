@@ -137,7 +137,7 @@ pub enum CowEvidence {
 pub enum RollbackStatus {
     /// The successful attempt did not require rollback.
     NotNeeded,
-    /// Every created object was identity-checked and removed.
+    /// Every created object was identity-checked and removed from the target tree.
     ConfirmedBaseline,
     /// At least one created or modified object could not be safely restored.
     Incomplete,
@@ -858,6 +858,7 @@ impl CreatedObjectEvidence {
 pub struct RollbackEvidence {
     status: RollbackStatus,
     removed: Vec<RelativePath>,
+    quarantined: Vec<RelativePath>,
     remaining: Vec<CreatedObjectEvidence>,
 }
 
@@ -872,8 +873,16 @@ impl RollbackEvidence {
         Self {
             status,
             removed,
+            quarantined: Vec::new(),
             remaining,
         }
+    }
+
+    /// Adds identities safely detached under the plan-bound trash root.
+    #[must_use]
+    pub fn with_quarantined(mut self, quarantined: Vec<RelativePath>) -> Self {
+        self.quarantined = quarantined;
+        self
     }
 
     /// Returns the overall rollback status.
@@ -882,10 +891,16 @@ impl RollbackEvidence {
         self.status
     }
 
-    /// Returns paths confirmed removed in rollback order.
+    /// Returns target-relative paths confirmed removed in rollback order.
     #[must_use]
     pub fn removed(&self) -> &[RelativePath] {
         &self.removed
+    }
+
+    /// Returns trash-relative quarantine paths retained for later explicit cleanup.
+    #[must_use]
+    pub fn quarantined(&self) -> &[RelativePath] {
+        &self.quarantined
     }
 
     /// Returns objects that could not be confirmed removed.
@@ -967,13 +982,46 @@ pub struct MaterializationReceipt {
     created: Vec<CreatedObjectEvidence>,
     rollback: RollbackEvidence,
     elapsed_millis: u64,
-    logical_bytes: u64,
+    logical_bytes: Option<u64>,
     physical_bytes: Option<u64>,
-    regular_file_count: u64,
+    regular_file_count: Option<u64>,
     clone_calls_succeeded: u64,
     source_manifest_digest: Option<TreeDigest>,
     target_manifest_digest: Option<TreeDigest>,
     failure_kind: Option<MaterializationFailureKind>,
+}
+
+/// Facts observed during an APFS attempt, including partial or failed attempts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MaterializationAttemptEvidence {
+    logical_bytes: Option<u64>,
+    physical_bytes: Option<u64>,
+    regular_file_count: Option<u64>,
+    clone_calls_succeeded: u64,
+    source_manifest_digest: Option<TreeDigest>,
+    target_manifest_digest: Option<TreeDigest>,
+}
+
+impl MaterializationAttemptEvidence {
+    /// Creates attempt evidence without turning unavailable observations into zeroes.
+    #[must_use]
+    pub const fn new(
+        logical_bytes: Option<u64>,
+        physical_bytes: Option<u64>,
+        regular_file_count: Option<u64>,
+        clone_calls_succeeded: u64,
+        source_manifest_digest: Option<TreeDigest>,
+        target_manifest_digest: Option<TreeDigest>,
+    ) -> Self {
+        Self {
+            logical_bytes,
+            physical_bytes,
+            regular_file_count,
+            clone_calls_succeeded,
+            source_manifest_digest,
+            target_manifest_digest,
+        }
+    }
 }
 
 impl MaterializationReceipt {
@@ -1009,9 +1057,9 @@ impl MaterializationReceipt {
             created,
             rollback: RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
             elapsed_millis,
-            logical_bytes,
+            logical_bytes: Some(logical_bytes),
             physical_bytes,
-            regular_file_count,
+            regular_file_count: Some(regular_file_count),
             clone_calls_succeeded,
             source_manifest_digest: Some(source_manifest_digest),
             target_manifest_digest: Some(target_manifest_digest),
@@ -1027,6 +1075,7 @@ impl MaterializationReceipt {
         created: Vec<CreatedObjectEvidence>,
         target_modified: bool,
         rollback: RollbackEvidence,
+        evidence: MaterializationAttemptEvidence,
         elapsed_millis: u64,
     ) -> Self {
         let outcome = if target_modified || !created.is_empty() {
@@ -1045,12 +1094,12 @@ impl MaterializationReceipt {
             created,
             rollback,
             elapsed_millis,
-            logical_bytes: 0,
-            physical_bytes: None,
-            regular_file_count: 0,
-            clone_calls_succeeded: 0,
-            source_manifest_digest: None,
-            target_manifest_digest: None,
+            logical_bytes: evidence.logical_bytes,
+            physical_bytes: evidence.physical_bytes,
+            regular_file_count: evidence.regular_file_count,
+            clone_calls_succeeded: evidence.clone_calls_succeeded,
+            source_manifest_digest: evidence.source_manifest_digest,
+            target_manifest_digest: evidence.target_manifest_digest,
             failure_kind: Some(failure_kind),
         }
     }
@@ -1117,7 +1166,7 @@ impl MaterializationReceipt {
 
     /// Returns logical ordinary-file bytes.
     #[must_use]
-    pub const fn logical_bytes(&self) -> u64 {
+    pub const fn logical_bytes(&self) -> Option<u64> {
         self.logical_bytes
     }
 
@@ -1129,7 +1178,7 @@ impl MaterializationReceipt {
 
     /// Returns the number of ordinary files in the promised tree.
     #[must_use]
-    pub const fn regular_file_count(&self) -> u64 {
+    pub const fn regular_file_count(&self) -> Option<u64> {
         self.regular_file_count
     }
 

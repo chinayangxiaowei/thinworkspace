@@ -81,6 +81,13 @@ impl PortError {
         self
     }
 
+    /// Retains an already type-erased source without wrapping away its concrete error.
+    #[must_use]
+    pub fn with_boxed_source(mut self, source: Box<dyn Error + Send + Sync + 'static>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
     /// Returns the stable broad failure class.
     #[must_use]
     pub const fn kind(&self) -> PortErrorKind {

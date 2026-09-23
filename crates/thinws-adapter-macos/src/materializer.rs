@@ -7,10 +7,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::time::Instant;
 
 use thinws_core::{
-    AbsolutePath, CreatedObjectEvidence, FileIdentity, MaterializationFailureKind,
-    MaterializationMode, MaterializationPlan, MaterializationReceipt, MaterializeRequest,
-    MaterializedEntryKind, MaterializerKind, RelativePath, RollbackEvidence, RollbackStatus,
-    SupportState, TreeDigest,
+    AbsolutePath, CreatedObjectEvidence, FileIdentity, MaterializationAttemptEvidence,
+    MaterializationFailureKind, MaterializationMode, MaterializationPlan, MaterializationReceipt,
+    MaterializeRequest, MaterializedEntryKind, MaterializerKind, PathCapabilityReport,
+    PathResolution, RelativePath, RollbackEvidence, RollbackStatus, SupportState, TreeDigest,
 };
 use thinws_ports::{
     MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, PortError,
@@ -20,9 +20,11 @@ use thinws_ports::{
 use crate::MacOsHostAdapter;
 use crate::ffi::{
     RawFileKind, RawNodeMetadata, c_string, clone_file_at, create_directory_at, create_symlink_at,
-    node_metadata, node_metadata_at, open_directory_at, open_file_read_at, open_root_directory,
-    read_directory, read_link_at, remove_at, set_mode, set_modified_time,
+    file_system_metadata, node_metadata, node_metadata_at, open_directory_at, open_file_read_at,
+    open_root_directory, read_directory, read_link_at, rename_exclusive_at, set_mode,
+    set_modified_time, volume_uuid,
 };
+use crate::volume::decode_volume_id;
 
 /// macOS APFS implementation of the Phase 1 clone-only materializer.
 pub struct ApfsCloneMaterializer {
@@ -84,10 +86,16 @@ impl ApfsCloneMaterializer {
                 )
             }),
             Err(mut failed) => {
-                let rollback = match failed.target.as_ref() {
-                    Some(target) if failed.target_modified => {
-                        rollback_created(target, failed.target_baseline, &failed.created)
-                    }
+                let rollback = match (failed.target.as_ref(), failed.trash.as_ref()) {
+                    (Some(target), Some(trash)) if failed.target_modified => rollback_created(
+                        request.target(),
+                        target,
+                        request.trash(),
+                        trash,
+                        failed.target_baseline,
+                        &failed.created,
+                        hook,
+                    ),
                     _ => RollbackEvidence::new(
                         RollbackStatus::NotNeeded,
                         Vec::new(),
@@ -113,6 +121,7 @@ impl ApfsCloneMaterializer {
                         created,
                         failed.target_modified,
                         rollback,
+                        failed.evidence,
                         elapsed_millis(started),
                     ),
                 ))
@@ -124,7 +133,7 @@ impl ApfsCloneMaterializer {
         request: &MaterializeRequest,
         plan: &MaterializationPlan,
         hook: &dyn ExecutionHook,
-    ) -> Result<Success, AttemptFailure> {
+    ) -> Result<Success, Box<AttemptFailure>> {
         validate_request_plan(request, plan).map_err(AttemptFailure::before_write)?;
         let fresh = self
             .probe
@@ -147,14 +156,16 @@ impl ApfsCloneMaterializer {
             )));
         }
 
-        let source =
-            open_absolute_directory(request.source()).map_err(AttemptFailure::before_write)?;
-        let target =
-            open_absolute_directory(request.target()).map_err(AttemptFailure::before_write)?;
-        let _staging =
-            open_absolute_directory(request.staging()).map_err(AttemptFailure::before_write)?;
-        let _trash =
-            open_absolute_directory(request.trash()).map_err(AttemptFailure::before_write)?;
+        hook.after_probe().map_err(AttemptFailure::before_write)?;
+
+        let source = open_bound_directory(request.source(), fresh.source())
+            .map_err(AttemptFailure::before_write)?;
+        let target = open_bound_directory(request.target(), fresh.target_root())
+            .map_err(AttemptFailure::before_write)?;
+        let staging = open_bound_directory(request.staging(), fresh.staging())
+            .map_err(AttemptFailure::before_write)?;
+        let trash = open_bound_directory(request.trash(), fresh.trash())
+            .map_err(AttemptFailure::before_write)?;
         let target_baseline = node_metadata(&target).map_err(|error| {
             AttemptFailure::before_write(Failure::io(
                 "inspect target root before materialization",
@@ -179,20 +190,30 @@ impl ApfsCloneMaterializer {
             let target_modified = !context.created.is_empty();
             return Err(AttemptFailure::after_write(
                 error,
-                target,
-                target_baseline,
-                context.created,
-                target_modified,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified,
+                    source_snapshot: &snapshot,
+                },
             ));
         }
 
         if let Err(error) = hook.before_root_metadata(&target) {
             return Err(AttemptFailure::after_write(
                 error,
-                target,
-                target_baseline,
-                context.created,
-                true,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
             ));
         }
         if let Err(error) =
@@ -200,10 +221,30 @@ impl ApfsCloneMaterializer {
         {
             return Err(AttemptFailure::after_write(
                 error,
-                target,
-                target_baseline,
-                context.created,
-                true,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
+            ));
+        }
+
+        if let Err(error) = hook.before_final_validation() {
+            return Err(AttemptFailure::after_write(
+                error,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
             ));
         }
 
@@ -212,20 +253,30 @@ impl ApfsCloneMaterializer {
             Err(error) => {
                 return Err(AttemptFailure::after_write(
                     error.into_source_revalidation(),
-                    target,
-                    target_baseline,
-                    context.created,
-                    true,
+                    FailedExecution {
+                        source: &source,
+                        target,
+                        trash,
+                        target_baseline,
+                        context,
+                        target_modified: true,
+                        source_snapshot: &snapshot,
+                    },
                 ));
             }
         };
         if source_after != snapshot {
             return Err(AttemptFailure::after_write(
                 source_changed(),
-                target,
-                target_baseline,
-                context.created,
-                true,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
             ));
         }
         let target_snapshot = match snapshot_tree(&target) {
@@ -233,10 +284,15 @@ impl ApfsCloneMaterializer {
             Err(error) => {
                 return Err(AttemptFailure::after_write(
                     error.into_target_revalidation(),
-                    target,
-                    target_baseline,
-                    context.created,
-                    true,
+                    FailedExecution {
+                        source: &source,
+                        target,
+                        trash,
+                        target_baseline,
+                        context,
+                        target_modified: true,
+                        source_snapshot: &snapshot,
+                    },
                 ));
             }
         };
@@ -250,10 +306,47 @@ impl ApfsCloneMaterializer {
                     PortErrorKind::InvalidData,
                     "verify APFS target manifest",
                 ),
-                target,
-                target_baseline,
-                context.created,
-                true,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
+            ));
+        }
+        if !target_snapshot_matches_created(&target_snapshot, &context.created) {
+            return Err(AttemptFailure::after_write(
+                target_changed(),
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
+            ));
+        }
+        let final_paths = revalidate_bound_path(request.source(), fresh.source(), &source)
+            .and_then(|()| revalidate_bound_path(request.target(), fresh.target_root(), &target))
+            .and_then(|()| revalidate_bound_path(request.staging(), fresh.staging(), &staging))
+            .and_then(|()| revalidate_bound_path(request.trash(), fresh.trash(), &trash));
+        if let Err(error) = final_paths {
+            return Err(AttemptFailure::after_write(
+                error,
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                },
             ));
         }
 
@@ -306,6 +399,86 @@ fn open_absolute_directory(path: &AbsolutePath) -> Result<OwnedFd, Failure> {
             .map_err(|error| Failure::path_open("open APFS path component", error))?;
     }
     Ok(current)
+}
+
+fn open_bound_directory(
+    path: &AbsolutePath,
+    report: &PathCapabilityReport,
+) -> Result<OwnedFd, Failure> {
+    if report.requested_path() != path || report.resolution() != PathResolution::ExistingDirectory {
+        return Err(stale_path_binding());
+    }
+    let directory = open_absolute_directory(path)?;
+    verify_directory_evidence(&directory, report)?;
+    Ok(directory)
+}
+
+fn revalidate_bound_path(
+    path: &AbsolutePath,
+    report: &PathCapabilityReport,
+    held: &OwnedFd,
+) -> Result<(), Failure> {
+    let reopened = open_bound_directory(path, report)?;
+    let held_metadata =
+        node_metadata(held).map_err(|error| Failure::io("inspect held APFS directory", error))?;
+    let reopened_metadata = node_metadata(&reopened)
+        .map_err(|error| Failure::io("reinspect APFS directory path", error))?;
+    if held_metadata.identity() != reopened_metadata.identity()
+        || held_metadata.kind != RawFileKind::Directory
+        || reopened_metadata.kind != RawFileKind::Directory
+    {
+        return Err(stale_path_binding());
+    }
+    Ok(())
+}
+
+fn verify_directory_evidence(
+    directory: &OwnedFd,
+    report: &PathCapabilityReport,
+) -> Result<(), Failure> {
+    let expected_identity = report
+        .ancestry()
+        .last()
+        .filter(|entry| entry.path() == report.requested_path())
+        .map(|entry| entry.identity())
+        .ok_or_else(stale_path_binding)?;
+    let metadata = node_metadata(directory)
+        .map_err(|error| Failure::io("inspect APFS directory identity", error))?;
+    let filesystem = file_system_metadata(directory)
+        .map_err(|error| Failure::io("inspect APFS directory filesystem", error))?;
+    let volume = volume_uuid(directory)
+        .map_err(|error| Failure::io("inspect APFS directory volume UUID", error))?;
+    let volume = decode_volume_id(volume).map_err(|error| {
+        Failure::with_source(
+            MaterializationFailureKind::PlanStale,
+            PortErrorKind::InvalidLayout,
+            "decode APFS directory volume UUID",
+            error,
+        )
+    })?;
+    let expected_volume = report
+        .filesystem()
+        .volume_id()
+        .known()
+        .ok_or_else(stale_path_binding)?;
+    if metadata.kind != RawFileKind::Directory
+        || metadata.identity() != expected_identity
+        || filesystem.type_name != report.filesystem().type_name()
+        || filesystem.fsid != report.filesystem().fsid()
+        || filesystem.mount_flags != report.mount().raw_flags()
+        || &volume != expected_volume
+    {
+        return Err(stale_path_binding());
+    }
+    Ok(())
+}
+
+fn stale_path_binding() -> Failure {
+    Failure::new(
+        MaterializationFailureKind::PlanStale,
+        PortErrorKind::InvalidLayout,
+        "bind APFS directory descriptors to plan evidence",
+    )
 }
 
 fn ensure_empty(target: &OwnedFd) -> Result<(), Failure> {
@@ -634,8 +807,8 @@ fn clone_directory(
                 }
                 clone_file_at(&source_file, target, &component)
                     .map_err(|error| Failure::clone_io("clone target file", error))?;
-                let identity = register_created(target, &component, &child, before.kind, context)?;
                 context.clone_calls = context.clone_calls.saturating_add(1);
+                let identity = register_created(target, &component, &child, before.kind, context)?;
                 let target_file = open_file_read_at(target, &component)
                     .map_err(|error| Failure::path_open("open cloned target file", error))?;
                 ensure_identity(
@@ -741,11 +914,23 @@ fn set_preserved_metadata(
 }
 
 trait ExecutionHook {
+    fn after_probe(&self) -> Result<(), Failure> {
+        Ok(())
+    }
+
     fn after_created(&self, _relative: &[OsString], _created_count: usize) -> Result<(), Failure> {
         Ok(())
     }
 
     fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn before_final_validation(&self) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn before_rollback_detach(&self, _relative: &[OsString]) -> Result<(), Failure> {
         Ok(())
     }
 }
@@ -776,9 +961,13 @@ impl TrackedCreated {
 }
 
 fn rollback_created(
+    target_path: &AbsolutePath,
     target: &OwnedFd,
+    trash_path: &AbsolutePath,
+    trash: &OwnedFd,
     baseline: Option<RawNodeMetadata>,
     created: &[TrackedCreated],
+    hook: &dyn ExecutionHook,
 ) -> RollbackEvidence {
     let Some(baseline) = baseline else {
         return RollbackEvidence::new(
@@ -809,11 +998,22 @@ fn rollback_created(
             created.iter().map(TrackedCreated::evidence).collect(),
         );
     }
+    if !path_points_to_held(target_path, target) || !path_points_to_held(trash_path, trash) {
+        return RollbackEvidence::new(
+            RollbackStatus::Incomplete,
+            Vec::new(),
+            created.iter().map(TrackedCreated::evidence).collect(),
+        );
+    }
 
     let mut removed = Vec::new();
+    let mut quarantined = Vec::new();
     let mut active_count = created.len();
     for entry in created.iter().rev() {
         if !rollback_set_matches(target, &created[..active_count]) {
+            break;
+        }
+        if !path_points_to_held(target_path, target) || !path_points_to_held(trash_path, trash) {
             break;
         }
         let Some(expected_identity) = entry.identity else {
@@ -828,9 +1028,15 @@ fn rollback_created(
         if current.identity() != expected_identity || current.kind != entry.kind {
             break;
         }
-        if remove_at(&parent, &component, entry.kind).is_err() {
+        if hook.before_rollback_detach(&entry.relative).is_err() {
             break;
         }
+        let Some(quarantine) =
+            detach_created_to_trash(&parent, &component, trash, entry, removed.len())
+        else {
+            break;
+        };
+        quarantined.push(quarantine);
         removed.push(entry.evidence().path().clone());
         active_count -= 1;
     }
@@ -863,7 +1069,54 @@ fn rollback_created(
     } else {
         RollbackStatus::Incomplete
     };
-    RollbackEvidence::new(status, removed, remaining)
+    RollbackEvidence::new(status, removed, remaining).with_quarantined(quarantined)
+}
+
+fn path_points_to_held(path: &AbsolutePath, held: &OwnedFd) -> bool {
+    let Ok(reopened) = open_absolute_directory(path) else {
+        return false;
+    };
+    let Ok(expected) = node_metadata(held) else {
+        return false;
+    };
+    node_metadata(&reopened).is_ok_and(|observed| {
+        observed.kind == RawFileKind::Directory
+            && expected.kind == RawFileKind::Directory
+            && observed.identity() == expected.identity()
+    })
+}
+
+fn detach_created_to_trash(
+    parent: &OwnedFd,
+    component: &CString,
+    trash: &OwnedFd,
+    entry: &TrackedCreated,
+    sequence: usize,
+) -> Option<RelativePath> {
+    let expected_identity = entry.identity?;
+    for collision in 0..128_u32 {
+        let quarantine = CString::new(format!(
+            ".thinws-rollback-{}-{}-{sequence}-{collision}",
+            expected_identity.device(),
+            expected_identity.inode(),
+        ))
+        .expect("rollback quarantine names contain no NUL");
+        match rename_exclusive_at(parent, component, trash, &quarantine) {
+            Ok(()) => {
+                let moved_matches = node_metadata_at(trash, &quarantine).is_ok_and(|moved| {
+                    moved.identity() == expected_identity && moved.kind == entry.kind
+                });
+                if moved_matches {
+                    return RelativePath::try_from_bytes(quarantine.as_bytes().to_vec()).ok();
+                }
+                let _ = rename_exclusive_at(trash, &quarantine, parent, component);
+                return None;
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn rollback_set_matches(target: &OwnedFd, created: &[TrackedCreated]) -> bool {
@@ -882,6 +1135,21 @@ fn rollback_set_matches(target: &OwnedFd, created: &[TrackedCreated]) -> bool {
         };
         observed.get(&relative_bytes(&entry.relative)) == Some(&(identity, entry.kind))
     })
+}
+
+fn target_snapshot_matches_created(snapshot: &TreeSnapshot, created: &[TrackedCreated]) -> bool {
+    snapshot.entries.len() == created.len()
+        && created.iter().all(|entry| {
+            let Some(identity) = entry.identity else {
+                return false;
+            };
+            snapshot
+                .entries
+                .get(&relative_bytes(&entry.relative))
+                .is_some_and(|observed| {
+                    observed.metadata.identity() == identity && observed.metadata.kind == entry.kind
+                })
+        })
 }
 
 fn observe_target_entries(
@@ -958,36 +1226,62 @@ struct Success {
 struct AttemptFailure {
     error: Failure,
     target: Option<OwnedFd>,
+    trash: Option<OwnedFd>,
     target_baseline: Option<RawNodeMetadata>,
     created: Vec<TrackedCreated>,
     target_modified: bool,
+    evidence: MaterializationAttemptEvidence,
+}
+
+struct FailedExecution<'a> {
+    source: &'a OwnedFd,
+    target: OwnedFd,
+    trash: OwnedFd,
+    target_baseline: RawNodeMetadata,
+    context: ExecutionContext,
+    target_modified: bool,
+    source_snapshot: &'a TreeSnapshot,
 }
 
 impl AttemptFailure {
-    fn before_write(error: Failure) -> Self {
-        Self {
+    fn before_write(error: Failure) -> Box<Self> {
+        Box::new(Self {
             error,
             target: None,
+            trash: None,
             target_baseline: None,
             created: Vec::new(),
             target_modified: false,
-        }
+            evidence: MaterializationAttemptEvidence::default(),
+        })
     }
 
-    fn after_write(
-        error: Failure,
-        target: OwnedFd,
-        target_baseline: RawNodeMetadata,
-        created: Vec<TrackedCreated>,
-        target_modified: bool,
-    ) -> Self {
-        Self {
+    fn after_write(error: Failure, failed: FailedExecution<'_>) -> Box<Self> {
+        let source_observation = snapshot_tree(failed.source).ok();
+        let target_snapshot = snapshot_tree(&failed.target).ok();
+        let evidence = MaterializationAttemptEvidence::new(
+            Some(failed.source_snapshot.manifest.logical_bytes),
+            target_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.manifest.physical_bytes),
+            Some(failed.source_snapshot.manifest.regular_files),
+            failed.context.clone_calls,
+            source_observation
+                .as_ref()
+                .map(|snapshot| snapshot.manifest.digest()),
+            target_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.manifest.digest()),
+        );
+        Box::new(Self {
             error,
-            target: Some(target),
-            target_baseline: Some(target_baseline),
-            created,
-            target_modified,
-        }
+            target: Some(failed.target),
+            trash: Some(failed.trash),
+            target_baseline: Some(failed.target_baseline),
+            created: failed.context.created,
+            target_modified: failed.target_modified,
+            evidence,
+        })
     }
 }
 
@@ -996,7 +1290,7 @@ struct Failure {
     kind: MaterializationFailureKind,
     port_kind: PortErrorKind,
     operation: &'static str,
-    source: Option<io::Error>,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
 impl Failure {
@@ -1023,7 +1317,7 @@ impl Failure {
             kind,
             port_kind,
             operation,
-            source: Some(io::Error::other(source)),
+            source: Some(Box::new(source)),
         }
     }
 
@@ -1083,7 +1377,7 @@ impl Failure {
     fn into_port_error(self) -> PortError {
         let error = PortError::new(self.port_kind, self.operation);
         match self.source {
-            Some(source) => error.with_source(source),
+            Some(source) => error.with_boxed_source(source),
             None => error,
         }
     }
@@ -1130,6 +1424,7 @@ fn failure_without_writes(
             Vec::new(),
             false,
             RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
+            MaterializationAttemptEvidence::default(),
             elapsed_millis(started),
         ),
     )
@@ -1248,8 +1543,10 @@ impl RawNodeMetadata {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::error::Error;
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
     use tempfile::{Builder, TempDir};
@@ -1333,15 +1630,152 @@ mod tests {
             Some(MaterializationFailureKind::SourceChanged)
         );
         assert_eq!(failure.receipt().created().len(), 1);
+        assert_eq!(failure.receipt().regular_file_count(), Some(1));
+        assert_eq!(failure.receipt().clone_calls_succeeded(), 1);
+        assert!(failure.receipt().logical_bytes().is_some());
+        assert!(failure.receipt().source_manifest_digest().is_some());
+        assert!(failure.receipt().target_manifest_digest().is_some());
         assert_eq!(
             failure.receipt().rollback().status(),
             RollbackStatus::ConfirmedBaseline
         );
+        assert_eq!(failure.receipt().rollback().quarantined().len(), 1);
         assert!(
             fs::read_dir(temp.path().join("target"))
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    struct ReplaceAfterProbeHook {
+        target: PathBuf,
+        displaced: PathBuf,
+    }
+
+    impl ExecutionHook for ReplaceAfterProbeHook {
+        fn after_probe(&self) -> Result<(), Failure> {
+            fs::rename(&self.target, &self.displaced).unwrap();
+            fs::create_dir(&self.target).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn target_replacement_after_probe_is_rejected_before_writes() {
+        let (temp, request, plan, adapter) = fixture("post-probe-root-replacement-");
+        let target = temp.path().join("target");
+        let displaced = temp.path().join("displaced-target");
+        let hook = ReplaceAfterProbeHook {
+            target: target.clone(),
+            displaced: displaced.clone(),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::PlanStale)
+        );
+        assert_eq!(failure.receipt().outcome(), MaterializationOutcome::Failed);
+        assert!(fs::read_dir(target).unwrap().next().is_none());
+        assert!(fs::read_dir(displaced).unwrap().next().is_none());
+    }
+
+    struct MoveTargetBeforeFinalValidationHook {
+        target: PathBuf,
+        displaced: PathBuf,
+    }
+
+    impl ExecutionHook for MoveTargetBeforeFinalValidationHook {
+        fn before_final_validation(&self) -> Result<(), Failure> {
+            fs::rename(&self.target, &self.displaced).unwrap();
+            fs::create_dir(&self.target).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn target_root_move_during_execution_cannot_return_success_or_touch_replacement() {
+        let (temp, request, plan, adapter) = fixture("mid-execution-root-move-");
+        let target = temp.path().join("target");
+        let displaced = temp.path().join("displaced-target");
+        let hook = MoveTargetBeforeFinalValidationHook {
+            target: target.clone(),
+            displaced: displaced.clone(),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::PlanStale)
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert!(fs::read_dir(target).unwrap().next().is_none());
+        assert_eq!(
+            fs::read(displaced.join("file.txt")).unwrap(),
+            b"source bytes"
+        );
+    }
+
+    struct ReplaceCloneWithSourceHardLinkHook {
+        source_file: PathBuf,
+        target_file: PathBuf,
+        fired: Cell<bool>,
+    }
+
+    impl ExecutionHook for ReplaceCloneWithSourceHardLinkHook {
+        fn after_created(
+            &self,
+            _relative: &[OsString],
+            _created_count: usize,
+        ) -> Result<(), Failure> {
+            if !self.fired.replace(true) {
+                fs::remove_file(&self.target_file).unwrap();
+                fs::hard_link(&self.source_file, &self.target_file).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn source_hard_link_replacement_is_detected_without_claiming_cow_success() {
+        let (temp, request, plan, adapter) = fixture("source-hard-link-");
+        let source_file = temp.path().join("source/file.txt");
+        let target_file = temp.path().join("target/file.txt");
+        let hook = ReplaceCloneWithSourceHardLinkHook {
+            source_file: source_file.clone(),
+            target_file: target_file.clone(),
+            fired: Cell::new(false),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(
+            failure.receipt().cow_evidence(),
+            thinws_core::CowEvidence::Unknown
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(
+            fs::metadata(source_file).unwrap().ino(),
+            fs::metadata(target_file).unwrap().ino()
         );
     }
 
@@ -1433,6 +1867,53 @@ mod tests {
         assert!(failure.receipt().rollback().removed().is_empty());
     }
 
+    struct ReplaceBetweenRollbackCheckAndDetachHook {
+        target_file: PathBuf,
+        fired: Cell<bool>,
+    }
+
+    impl ExecutionHook for ReplaceBetweenRollbackCheckAndDetachHook {
+        fn after_created(
+            &self,
+            _relative: &[OsString],
+            _created_count: usize,
+        ) -> Result<(), Failure> {
+            Err(target_changed())
+        }
+
+        fn before_rollback_detach(&self, _relative: &[OsString]) -> Result<(), Failure> {
+            if !self.fired.replace(true) {
+                fs::remove_file(&self.target_file).unwrap();
+                fs::write(&self.target_file, b"replacement during rollback").unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rollback_never_deletes_an_object_replaced_after_its_last_identity_check() {
+        let (temp, request, plan, adapter) = fixture("rollback-detach-race-");
+        let target_file = temp.path().join("target/file.txt");
+        let hook = ReplaceBetweenRollbackCheckAndDetachHook {
+            target_file: target_file.clone(),
+            fired: Cell::new(false),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert!(failure.receipt().rollback().removed().is_empty());
+        assert_eq!(
+            fs::read(target_file).unwrap(),
+            b"replacement during rollback"
+        );
+    }
+
     struct RootMetadataFailureHook;
 
     impl ExecutionHook for RootMetadataFailureHook {
@@ -1493,5 +1974,30 @@ mod tests {
             error.kind,
             MaterializationFailureKind::UnsupportedSourceEntry
         );
+    }
+
+    #[test]
+    fn port_error_chain_preserves_original_errno_values() {
+        for (failure, expected_errno) in [
+            (
+                Failure::io("injected EIO", io::Error::from_raw_os_error(libc::EIO)),
+                libc::EIO,
+            ),
+            (
+                Failure::io(
+                    "injected ENOSPC",
+                    io::Error::from_raw_os_error(libc::ENOSPC),
+                ),
+                libc::ENOSPC,
+            ),
+            (
+                Failure::clone_io("injected EXDEV", io::Error::from_raw_os_error(libc::EXDEV)),
+                libc::EXDEV,
+            ),
+        ] {
+            let error = failure.into_port_error();
+            let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+            assert_eq!(source.raw_os_error(), Some(expected_errno));
+        }
     }
 }

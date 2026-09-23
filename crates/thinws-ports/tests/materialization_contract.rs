@@ -54,6 +54,7 @@ fn materialization_failure_preserves_typed_error_and_partial_receipt() {
         Vec::new(),
         false,
         RollbackEvidence::new(RollbackStatus::ConfirmedBaseline, Vec::new(), Vec::new()),
+        Default::default(),
         7,
     );
     let failure = MaterializationFailure::new(

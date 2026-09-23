@@ -277,17 +277,28 @@ pub(crate) fn create_symlink_at(
     syscall_unit(result)
 }
 
-pub(crate) fn remove_at(parent: &OwnedFd, name: &CStr, kind: RawFileKind) -> io::Result<()> {
-    validate_component(name)?;
-    let flags = if kind == RawFileKind::Directory {
-        libc::AT_REMOVEDIR
-    } else {
-        0
-    };
+pub(crate) fn rename_exclusive_at(
+    source_parent: &OwnedFd,
+    source_name: &CStr,
+    target_parent: &OwnedFd,
+    target_name: &CStr,
+) -> io::Result<()> {
+    validate_component(source_name)?;
+    validate_component(target_name)?;
 
-    // SAFETY: the caller revalidated the entry identity and type, and the
-    // validated component is borrowed only for this call.
-    syscall_unit(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) })
+    // SAFETY: both directory descriptors and validated component names remain
+    // live for this non-retaining call. RENAME_EXCL prevents replacement of an
+    // object already present at the destination name.
+    let result = unsafe {
+        libc::renameatx_np(
+            source_parent.as_raw_fd(),
+            source_name.as_ptr(),
+            target_parent.as_raw_fd(),
+            target_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    syscall_unit(result)
 }
 
 pub(crate) fn file_system_metadata(fd: &OwnedFd) -> io::Result<RawFileSystemMetadata> {

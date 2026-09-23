@@ -19,12 +19,12 @@ pub use installation::{InstallationIdentity, InstallationRecord, RootMarker, Roo
 pub use materialization::{
     CandidateEvidence, CowEvidence, CreatedObjectEvidence, DirectoryIdentityEvidence, Evidence,
     FallbackPolicy, FileIdentity, FileSystemIdentity, HostCapabilityReport,
-    MaterializationFailureKind, MaterializationMode, MaterializationOutcome,
-    MaterializationPathReport, MaterializationPlan, MaterializationPlanError,
-    MaterializationReceipt, MaterializationReceiptError, MaterializeRequest, MaterializedEntryKind,
-    MaterializerKind, MountEvidence, PathCapabilityReport, PathCapabilityReportError,
-    PathResolution, ProbeEvidenceDigest, RelativePath, RelativePathError, RollbackEvidence,
-    RollbackStatus, SupportState, TreeDigest,
+    MaterializationAttemptEvidence, MaterializationFailureKind, MaterializationMode,
+    MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
+    MaterializationPlanError, MaterializationReceipt, MaterializationReceiptError,
+    MaterializeRequest, MaterializedEntryKind, MaterializerKind, MountEvidence,
+    PathCapabilityReport, PathCapabilityReportError, PathResolution, ProbeEvidenceDigest,
+    RelativePath, RelativePathError, RollbackEvidence, RollbackStatus, SupportState, TreeDigest,
 };
 pub use path::{AbsolutePath, AbsolutePathError};
 pub use time::{UnixMillis, UnixMillisError};

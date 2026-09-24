@@ -184,7 +184,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | In Progress |
+| P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Done |
 | P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Backlog |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
@@ -194,6 +194,16 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 当前领取：P1-06 由主 Agent 于 2026-09-23 领取，基线 `50617e9`，任务分支 `task/p1-06-apfs-materializer`，继续使用唯一持久 checkout `/Volumes/data/code/worktree`。风险 R4，主要写入区为 `thinws-core`、`thinws-ports` 和 `thinws-adapter-macos`；P0 Probe/物化实验只作为证据输入，不成为生产依赖。范围内是共同物化值、APFS 路径 Probe、`ApfsCloneMaterializer`、真实同卷 CoW、清单/保真校验、源变化检测、partial receipt 和身份约束回滚；范围外是 Full Copy/fallback、公开 CLI、SQLite 生命周期编排、Workspace Ready、删除/GC、Git 和后续平台。
 
 验收断言：同卷真实 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、系统可表示的原始名称、普通文件/目录/符号链接及约定权限和 mtime 均按设计物化，普通文件写入与源隔离，Receipt 的 clone 数和 CoW 事实准确；任意非 UTF-8 字节只在不接触文件系统的路径证据编码/解析测试中验证无损，APFS 以 `EILSEQ` 拒绝的名称不冒充可创建。空树与仅目录/链接树成功但不冒充 CoW confirmed。跨卷、路径/卷/挂载或源身份变化、包含关系、非空目标、特殊文件和子挂载在错误边界停止；部分创建按已登记身份逆序回滚，替换对象或无法确认回滚时保留 partial receipt 且不扩大删除。Probe 的 supported/unsupported/unknown、缺失目标父目录和四类实际路径组合有自动及真实平台证据。P1-06 不调用 Full Copy、不写产品 SQLite、不发布 Ready，也不增加 `workspace create` 命令。
+
+P1-06 完成记录（2026-09-24）：
+
+- 实现及审核修正 commit 为 `1a89761`、`246459f`、`0cda871`、`268f6a2`、`ec10ddd`、`dbbd58a`、`55d82a4`。交付共同物化值与 Port、macOS APFS Probe 和 `ApfsCloneMaterializer`，落实 Probe → Plan → Revalidate → Execute → Receipt、逐文件 clone、清单与保真核验、源变化拒绝、部分失败证据及按已登记身份逆序回滚；不实现 Full Copy/fallback、公开 CLI、SQLite 生命周期、Ready、删除/GC 或 Git 行为。
+- 真实 APFS 验收覆盖非 Git 来源、原样 `.git`、ignored/未跟踪命名内容、Unicode/空格、硬链接、外部符号链接、权限与 mtime、8 个普通文件的逐文件 clone、双向写隔离，以及删除来源目录后目标仍可读。四类计划根替换、六组路径包含关系、非空目标、特殊文件、源变化和失败回滚均有回归测试；成功 Receipt 必须绑定相同清单摘要和准确的源/目标卷身份。
+- 维护者确认的 `/Volumes/data` 与系统临时目录构成真实不同 APFS 卷，P1 跨卷 Probe、Plan 拒绝及既有 store-layout 跨卷测试均通过；同卷 CoW 由真实 `clonefile` 验收。当前主机不能创建额外子挂载，因此 P1 实现层的真实子挂载端到端用例未执行；以设备身份不一致的自动测试和 P0 已有真实子挂载证据覆盖该边界，但不把它表述为本轮已实测。
+- 普通门禁在 macOS arm64、Rust 1.97.1 上通过：根 workspace 的 fmt、Clippy 全目标/全 feature、debug/release 全 workspace 测试和 rustdoc，以及仓库工具、实际依赖检查、`cargo-deny` 和离线 `cargo-audit --no-fetch`；供应链检查沿用未变更依赖与配置上的同候选证据，仅有既有未命中 allowance/exception 警告。
+- 变异测试按受影响范围组合收口：首批 680 个 mutant 为 512 caught、156 unviable、12 timeout，超时来自 runner 将无关 P0 ignored 清理测试带入每个变异进程，不作为通过结论；限定 P1-06 三个 package 后，42 个相关/变化范围 mutant 为 24 caught、8 unviable、10 missed，随后针对这 10 项及构造变体补跑 12 个为 10 caught、2 unviable、0 missed/timeout。三批 `outcomes.json` SHA-256 依次为 `dc824dd01c08ecf24865017878fc6378ff89915947293d59d0be675148e83223`、`90c3f91f095c1bd2009eac04a6a973f338cefe70b6ea95b6a7440afc5579644d`、`8ffa7073f1f9c0fd3d5268de1ab45c8d21ab8a9f32bc1fbb716ae3dab883813b`；对应 `mutants.json` 为 `836428fec9a34fdf8f22d279a2c826355b8eed7b3dff125a21e1eb2aa17d4779`、`bd613aa6e4473bbbbd445a07a1bc295a7587b70a7b11b30d830f586679d29eb3`、`f937de5f6c96ff3858951fa80ffa36cf2b60940c65eabff2c6190476daad29bf`，组合后无未处置 missed/timeout。
+- `thinws_materialization_path` 使用 `cargo-fuzz 0.12.0`、`nightly-2026-08-14` 和 60 秒预算完成 17,373,911 次执行，退出码 0，无 crash/hang；运行生成的临时 corpus 已清理，仓库保留原有 3 个种子且未产生 artifact。
+- 未执行线上 CI、线上 PR 或 push，符合当前本地流程。P1-06 Done 仅表示 APFS 物化后端完成，不表示 `workspace create` 可用、P1.c 小阶段或 Phase 1 已放行；下一项技术依赖仍是 P1-07。
 
 ### 4.4 P1.d 查询与路径交付
 

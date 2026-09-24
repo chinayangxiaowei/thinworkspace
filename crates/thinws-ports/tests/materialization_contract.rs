@@ -39,6 +39,11 @@ fn plan() -> MaterializationPlan {
                 SupportState::Supported,
                 Vec::new(),
             ),
+            CandidateEvidence::new(
+                MaterializerKind::FullCopy,
+                SupportState::Supported,
+                Vec::new(),
+            ),
             ProbeEvidenceDigest::new([1; 32]),
         ),
         FallbackPolicy::Deny,

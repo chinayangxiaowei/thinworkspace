@@ -18,9 +18,9 @@ pub use id::{IdParseError, InstanceId, OperationId, WorkspaceId};
 pub use installation::{InstallationIdentity, InstallationRecord, RootMarker, RootMarkerState};
 pub use materialization::{
     CandidateEvidence, CowEvidence, CreatedObjectEvidence, DirectoryIdentityEvidence, Evidence,
-    FallbackPolicy, FileIdentity, FileSystemIdentity, HostCapabilityReport,
-    MaterializationAttemptEvidence, MaterializationFailureKind, MaterializationMode,
-    MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
+    FailedMaterializationAttempt, FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity,
+    HostCapabilityReport, MaterializationAttemptEvidence, MaterializationFailureKind,
+    MaterializationMode, MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
     MaterializationPlanError, MaterializationReceipt, MaterializationReceiptError,
     MaterializeRequest, MaterializedEntryKind, MaterializerKind, MountEvidence,
     PathCapabilityReport, PathCapabilityReportError, PathResolution, ProbeEvidenceDigest,

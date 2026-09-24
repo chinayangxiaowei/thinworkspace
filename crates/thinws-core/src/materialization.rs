@@ -110,6 +110,15 @@ pub enum FallbackPolicy {
     AllowFullCopyOnCowUnsupported,
 }
 
+/// Stable reason why Core selected Full Copy for a CoW request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FallbackReason {
+    /// Read-only probe evidence proved that APFS clone was unsupported.
+    CloneUnsupportedAtPreflight,
+    /// A real APFS clone attempt reported CoW unavailable and was safely rolled back.
+    CloneUnavailableAtRuntime,
+}
+
 /// Observable outcome of one materialization attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaterializationOutcome {
@@ -126,7 +135,7 @@ pub enum MaterializationOutcome {
 pub enum CowEvidence {
     /// Every promised ordinary file completed a real clone call.
     Confirmed,
-    /// The successful tree contained no ordinary file to clone.
+    /// No CoW operation was needed or selected.
     NotUsed,
     /// A failed or incomplete attempt cannot claim CoW completion.
     Unknown,
@@ -566,6 +575,7 @@ pub struct MaterializationPathReport {
     staging: PathCapabilityReport,
     trash: PathCapabilityReport,
     apfs_clone: CandidateEvidence,
+    full_copy: CandidateEvidence,
     evidence_digest: ProbeEvidenceDigest,
 }
 
@@ -578,6 +588,7 @@ impl MaterializationPathReport {
         staging: PathCapabilityReport,
         trash: PathCapabilityReport,
         apfs_clone: CandidateEvidence,
+        full_copy: CandidateEvidence,
         evidence_digest: ProbeEvidenceDigest,
     ) -> Self {
         Self {
@@ -586,6 +597,7 @@ impl MaterializationPathReport {
             staging,
             trash,
             apfs_clone,
+            full_copy,
             evidence_digest,
         }
     }
@@ -620,6 +632,12 @@ impl MaterializationPathReport {
         &self.apfs_clone
     }
 
+    /// Returns Full Copy candidate evidence.
+    #[must_use]
+    pub const fn full_copy(&self) -> &CandidateEvidence {
+        &self.full_copy
+    }
+
     /// Returns the digest binding all stable probe evidence.
     #[must_use]
     pub const fn evidence_digest(&self) -> ProbeEvidenceDigest {
@@ -645,6 +663,114 @@ pub enum MaterializationPlanError {
     /// The four path roles do not belong to one APFS Volume.
     #[error("materialization paths are on different volumes")]
     DifferentVolume,
+    /// Full Copy candidate evidence was for another backend.
+    #[error("candidate evidence does not describe Full Copy")]
+    WrongFullCopyCandidate,
+    /// Preflight did not prove that Full Copy is available.
+    #[error("Full Copy is not supported for this path combination")]
+    FullCopyUnavailable,
+    /// The frozen policy does not allow Full Copy fallback.
+    #[error("fallback policy denies Full Copy")]
+    FallbackDenied,
+    /// The observed clone failure is not eligible for Full Copy fallback.
+    #[error("clone evidence is not eligible for Full Copy fallback")]
+    FallbackNotEligible,
+    /// A previous attempt did not restore the target baseline.
+    #[error("previous materialization attempt did not restore the target baseline")]
+    PreviousAttemptNotClean,
+    /// A previous attempt or fresh probe does not match the frozen plan.
+    #[error("previous materialization attempt does not match the frozen plan")]
+    PreviousAttemptMismatch,
+}
+
+/// Immutable evidence for one backend attempt retained across a safe fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedMaterializationAttempt {
+    probe_evidence_digest: ProbeEvidenceDigest,
+    attempted_mode: MaterializationMode,
+    actual_adapter: MaterializerKind,
+    outcome: MaterializationOutcome,
+    failure_kind: MaterializationFailureKind,
+    source_volume_id: Option<VolumeId>,
+    target_volume_id: Option<VolumeId>,
+    created: Vec<CreatedObjectEvidence>,
+    rollback: RollbackEvidence,
+    elapsed_millis: u64,
+    evidence: MaterializationAttemptEvidence,
+}
+
+impl FailedMaterializationAttempt {
+    /// Returns the path-probe evidence bound to the failed attempt's plan.
+    #[must_use]
+    pub const fn probe_evidence_digest(&self) -> ProbeEvidenceDigest {
+        self.probe_evidence_digest
+    }
+
+    /// Returns the effective mode attempted by the failed backend.
+    #[must_use]
+    pub const fn attempted_mode(&self) -> MaterializationMode {
+        self.attempted_mode
+    }
+
+    /// Returns the backend that actually ran.
+    #[must_use]
+    pub const fn actual_adapter(&self) -> MaterializerKind {
+        self.actual_adapter
+    }
+
+    /// Returns the observable attempt outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> MaterializationOutcome {
+        self.outcome
+    }
+
+    /// Returns the stable failure category.
+    #[must_use]
+    pub const fn failure_kind(&self) -> MaterializationFailureKind {
+        self.failure_kind
+    }
+
+    /// Returns the source Volume UUID observed by the failed attempt.
+    #[must_use]
+    pub const fn source_volume_id(&self) -> Option<VolumeId> {
+        self.source_volume_id
+    }
+
+    /// Returns the target Volume UUID observed by the failed attempt.
+    #[must_use]
+    pub const fn target_volume_id(&self) -> Option<VolumeId> {
+        self.target_volume_id
+    }
+
+    /// Returns objects registered by the failed attempt.
+    #[must_use]
+    pub fn created(&self) -> &[CreatedObjectEvidence] {
+        &self.created
+    }
+
+    /// Returns the failed attempt's rollback evidence.
+    #[must_use]
+    pub const fn rollback(&self) -> &RollbackEvidence {
+        &self.rollback
+    }
+
+    /// Returns the failed attempt's elapsed time.
+    #[must_use]
+    pub const fn elapsed_millis(&self) -> u64 {
+        self.elapsed_millis
+    }
+
+    /// Returns successful clone calls made before failure.
+    #[must_use]
+    pub const fn clone_calls_succeeded(&self) -> u64 {
+        self.evidence.clone_calls_succeeded
+    }
+
+    /// Returns byte counts and source/target manifest observations from the attempt.
+    #[must_use]
+    pub const fn evidence(&self) -> MaterializationAttemptEvidence {
+        self.evidence
+    }
 }
 
 /// Immutable execution choice derived from one combined path report.
@@ -655,12 +781,15 @@ pub struct MaterializationPlan {
     selected_adapter: MaterializerKind,
     fallback_policy: FallbackPolicy,
     probe_evidence_digest: ProbeEvidenceDigest,
+    path_evidence: [PathCapabilityReport; 4],
     source_path: AbsolutePath,
     target_path: AbsolutePath,
     staging_path: AbsolutePath,
     trash_path: AbsolutePath,
     source_volume_id: VolumeId,
     target_volume_id: VolumeId,
+    fallback_reason: Option<FallbackReason>,
+    failed_attempts: Vec<FailedMaterializationAttempt>,
 }
 
 impl MaterializationPlan {
@@ -672,16 +801,7 @@ impl MaterializationPlan {
         if report.apfs_clone.kind() != MaterializerKind::ApfsFileClone {
             return Err(MaterializationPlanError::WrongCandidate);
         }
-        let source_volume_id = volume_id(report.source())?;
-        let target_volume_id = volume_id(report.target_root())?;
-        let staging_volume_id = volume_id(report.staging())?;
-        let trash_volume_id = volume_id(report.trash())?;
-        if [target_volume_id, staging_volume_id, trash_volume_id]
-            .into_iter()
-            .any(|volume_id| volume_id != source_volume_id)
-        {
-            return Err(MaterializationPlanError::DifferentVolume);
-        }
+        let (source_volume_id, target_volume_id) = phase1_volume_layout(report)?;
         if report.apfs_clone.state() == SupportState::Unsupported {
             return Err(MaterializationPlanError::CandidateUnsupported);
         }
@@ -691,13 +811,132 @@ impl MaterializationPlan {
             selected_adapter: MaterializerKind::ApfsFileClone,
             fallback_policy,
             probe_evidence_digest: report.evidence_digest(),
+            path_evidence: path_evidence(report),
             source_path: report.source().requested_path().clone(),
             target_path: report.target_root().requested_path().clone(),
             staging_path: report.staging().requested_path().clone(),
             trash_path: report.trash().requested_path().clone(),
             source_volume_id,
             target_volume_id,
+            fallback_reason: None,
+            failed_attempts: Vec::new(),
         })
+    }
+
+    /// Applies the Phase 1 preflight fallback policy to one probe report.
+    pub fn for_full_copy_after_preflight(
+        report: &MaterializationPathReport,
+        fallback_policy: FallbackPolicy,
+    ) -> Result<Self, MaterializationPlanError> {
+        require_fallback_policy(fallback_policy)?;
+        require_candidate_kinds(report)?;
+        let (source_volume_id, target_volume_id) = phase1_volume_layout(report)?;
+        require_full_copy_supported(report)?;
+        if report.apfs_clone.state() != SupportState::Unsupported
+            || report.apfs_clone.reasons() != ["clone_capability_unsupported"]
+        {
+            return Err(MaterializationPlanError::FallbackNotEligible);
+        }
+        Ok(Self::full_copy(
+            report,
+            fallback_policy,
+            source_volume_id,
+            target_volume_id,
+            FallbackReason::CloneUnsupportedAtPreflight,
+            Vec::new(),
+        ))
+    }
+
+    /// Replans after one safely rolled-back APFS clone-unavailable attempt.
+    pub fn for_full_copy_after_cow_unavailable(
+        fresh_report: &MaterializationPathReport,
+        prior_plan: &Self,
+        prior_receipt: &MaterializationReceipt,
+    ) -> Result<Self, MaterializationPlanError> {
+        require_fallback_policy(prior_plan.fallback_policy)?;
+        require_candidate_kinds(fresh_report)?;
+        if prior_plan.requested_mode != MaterializationMode::CowClone
+            || prior_plan.effective_mode != MaterializationMode::CowClone
+            || prior_plan.selected_adapter != MaterializerKind::ApfsFileClone
+            || prior_plan.fallback_reason.is_some()
+            || !prior_plan.failed_attempts.is_empty()
+            || !receipt_matches_plan(prior_receipt, prior_plan)
+        {
+            return Err(MaterializationPlanError::PreviousAttemptMismatch);
+        }
+        if prior_receipt.failure_kind != Some(MaterializationFailureKind::CowUnavailable) {
+            return Err(MaterializationPlanError::FallbackNotEligible);
+        }
+        if !receipt_restored_baseline(prior_receipt) {
+            return Err(MaterializationPlanError::PreviousAttemptNotClean);
+        }
+        if prior_receipt.source_manifest_digest.is_none() {
+            return Err(MaterializationPlanError::FallbackNotEligible);
+        }
+        if !report_paths_match_plan(fresh_report, prior_plan) {
+            return Err(MaterializationPlanError::PreviousAttemptMismatch);
+        }
+        let (source_volume_id, target_volume_id) = phase1_volume_layout(fresh_report)?;
+        if source_volume_id != prior_plan.source_volume_id
+            || target_volume_id != prior_plan.target_volume_id
+        {
+            return Err(MaterializationPlanError::PreviousAttemptMismatch);
+        }
+        require_full_copy_supported(fresh_report)?;
+        let failed_attempt = FailedMaterializationAttempt {
+            probe_evidence_digest: prior_receipt.probe_evidence_digest,
+            attempted_mode: prior_receipt.actual_mode,
+            actual_adapter: prior_receipt.actual_adapter,
+            outcome: prior_receipt.outcome,
+            failure_kind: MaterializationFailureKind::CowUnavailable,
+            source_volume_id: prior_receipt.source_volume_id,
+            target_volume_id: prior_receipt.target_volume_id,
+            created: prior_receipt.created.clone(),
+            rollback: prior_receipt.rollback.clone(),
+            elapsed_millis: prior_receipt.elapsed_millis,
+            evidence: MaterializationAttemptEvidence::new(
+                prior_receipt.logical_bytes,
+                prior_receipt.physical_bytes,
+                prior_receipt.regular_file_count,
+                prior_receipt.clone_calls_succeeded,
+                prior_receipt.source_manifest_digest,
+                prior_receipt.target_manifest_digest,
+            ),
+        };
+        Ok(Self::full_copy(
+            fresh_report,
+            prior_plan.fallback_policy,
+            source_volume_id,
+            target_volume_id,
+            FallbackReason::CloneUnavailableAtRuntime,
+            vec![failed_attempt],
+        ))
+    }
+
+    fn full_copy(
+        report: &MaterializationPathReport,
+        fallback_policy: FallbackPolicy,
+        source_volume_id: VolumeId,
+        target_volume_id: VolumeId,
+        fallback_reason: FallbackReason,
+        failed_attempts: Vec<FailedMaterializationAttempt>,
+    ) -> Self {
+        Self {
+            requested_mode: MaterializationMode::CowClone,
+            effective_mode: MaterializationMode::FullCopy,
+            selected_adapter: MaterializerKind::FullCopy,
+            fallback_policy,
+            probe_evidence_digest: report.evidence_digest(),
+            path_evidence: path_evidence(report),
+            source_path: report.source().requested_path().clone(),
+            target_path: report.target_root().requested_path().clone(),
+            staging_path: report.staging().requested_path().clone(),
+            trash_path: report.trash().requested_path().clone(),
+            source_volume_id,
+            target_volume_id,
+            fallback_reason: Some(fallback_reason),
+            failed_attempts,
+        }
     }
 
     /// Returns the original requested mode.
@@ -764,6 +1003,123 @@ impl MaterializationPlan {
     #[must_use]
     pub const fn target_volume_id(&self) -> VolumeId {
         self.target_volume_id
+    }
+
+    /// Returns why the effective mode differs from the requested mode.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+
+    /// Returns failed backend attempts retained by a runtime fallback plan.
+    #[must_use]
+    pub fn failed_attempts(&self) -> &[FailedMaterializationAttempt] {
+        &self.failed_attempts
+    }
+}
+
+fn require_fallback_policy(policy: FallbackPolicy) -> Result<(), MaterializationPlanError> {
+    if policy == FallbackPolicy::AllowFullCopyOnCowUnsupported {
+        Ok(())
+    } else {
+        Err(MaterializationPlanError::FallbackDenied)
+    }
+}
+
+fn require_candidate_kinds(
+    report: &MaterializationPathReport,
+) -> Result<(), MaterializationPlanError> {
+    if report.apfs_clone.kind() != MaterializerKind::ApfsFileClone {
+        return Err(MaterializationPlanError::WrongCandidate);
+    }
+    if report.full_copy.kind() != MaterializerKind::FullCopy {
+        return Err(MaterializationPlanError::WrongFullCopyCandidate);
+    }
+    Ok(())
+}
+
+fn require_full_copy_supported(
+    report: &MaterializationPathReport,
+) -> Result<(), MaterializationPlanError> {
+    if report.full_copy.state() == SupportState::Supported {
+        Ok(())
+    } else {
+        Err(MaterializationPlanError::FullCopyUnavailable)
+    }
+}
+
+fn phase1_volume_layout(
+    report: &MaterializationPathReport,
+) -> Result<(VolumeId, VolumeId), MaterializationPlanError> {
+    let source_volume_id = volume_id(report.source())?;
+    let target_volume_id = volume_id(report.target_root())?;
+    let staging_volume_id = volume_id(report.staging())?;
+    let trash_volume_id = volume_id(report.trash())?;
+    if [target_volume_id, staging_volume_id, trash_volume_id]
+        .into_iter()
+        .any(|volume_id| volume_id != source_volume_id)
+    {
+        return Err(MaterializationPlanError::DifferentVolume);
+    }
+    Ok((source_volume_id, target_volume_id))
+}
+
+fn report_paths_match_plan(report: &MaterializationPathReport, plan: &MaterializationPlan) -> bool {
+    [
+        report.source(),
+        report.target_root(),
+        report.staging(),
+        report.trash(),
+    ]
+    .into_iter()
+    .zip(plan.path_evidence.iter())
+    .all(|(fresh, frozen)| {
+        fresh.requested_path() == frozen.requested_path()
+            && fresh.resolution() == frozen.resolution()
+            && fresh.nearest_existing_ancestor() == frozen.nearest_existing_ancestor()
+            && fresh.missing_components() == frozen.missing_components()
+            && fresh.ancestry() == frozen.ancestry()
+            && fresh.filesystem() == frozen.filesystem()
+            && fresh.mount() == frozen.mount()
+    })
+}
+
+fn path_evidence(report: &MaterializationPathReport) -> [PathCapabilityReport; 4] {
+    [
+        report.source().clone(),
+        report.target_root().clone(),
+        report.staging().clone(),
+        report.trash().clone(),
+    ]
+}
+
+fn receipt_matches_plan(receipt: &MaterializationReceipt, plan: &MaterializationPlan) -> bool {
+    receipt.probe_evidence_digest == plan.probe_evidence_digest
+        && receipt.requested_mode == plan.requested_mode
+        && receipt.effective_mode == plan.effective_mode
+        && receipt.actual_mode == MaterializationMode::CowClone
+        && receipt.actual_adapter == plan.selected_adapter
+        && receipt.source_volume_id == Some(plan.source_volume_id)
+        && receipt.target_volume_id == Some(plan.target_volume_id)
+        && receipt.fallback_reason == plan.fallback_reason
+        && receipt.failed_attempts == plan.failed_attempts
+        && receipt.outcome != MaterializationOutcome::Succeeded
+}
+
+fn receipt_restored_baseline(receipt: &MaterializationReceipt) -> bool {
+    let rollback_is_empty = receipt.rollback.remaining().is_empty()
+        && receipt.rollback.unconfirmed_quarantined().is_empty();
+    match receipt.rollback.status() {
+        RollbackStatus::ConfirmedBaseline => rollback_is_empty,
+        RollbackStatus::NotNeeded => {
+            rollback_is_empty
+                && receipt.rollback.removed().is_empty()
+                && receipt.rollback.quarantined().is_empty()
+                && receipt.outcome == MaterializationOutcome::Failed
+                && receipt.created.is_empty()
+                && receipt.clone_calls_succeeded == 0
+        }
+        RollbackStatus::Incomplete => false,
     }
 }
 
@@ -988,13 +1344,18 @@ pub enum MaterializationReceiptError {
     /// A successful receipt must bind identical promised source and target trees.
     #[error("successful APFS receipt requires matching source and target manifests")]
     ManifestMismatch,
+    /// The receipt constructor did not match the selected plan backend.
+    #[error("materialization receipt backend does not match the selected plan")]
+    AdapterMismatch,
 }
 
 /// Final or partial evidence emitted by one materialization attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterializationReceipt {
+    probe_evidence_digest: ProbeEvidenceDigest,
     requested_mode: MaterializationMode,
     effective_mode: MaterializationMode,
+    actual_mode: MaterializationMode,
     actual_adapter: MaterializerKind,
     outcome: MaterializationOutcome,
     cow_evidence: CowEvidence,
@@ -1010,6 +1371,8 @@ pub struct MaterializationReceipt {
     source_manifest_digest: Option<TreeDigest>,
     target_manifest_digest: Option<TreeDigest>,
     failure_kind: Option<MaterializationFailureKind>,
+    fallback_reason: Option<FallbackReason>,
+    failed_attempts: Vec<FailedMaterializationAttempt>,
 }
 
 /// Facts observed during an APFS attempt, including partial or failed attempts.
@@ -1043,6 +1406,42 @@ impl MaterializationAttemptEvidence {
             target_manifest_digest,
         }
     }
+
+    /// Returns logical ordinary-file bytes when observed.
+    #[must_use]
+    pub const fn logical_bytes(self) -> Option<u64> {
+        self.logical_bytes
+    }
+
+    /// Returns a physical-size estimate when observed.
+    #[must_use]
+    pub const fn physical_bytes(self) -> Option<u64> {
+        self.physical_bytes
+    }
+
+    /// Returns the ordinary-file count when observed.
+    #[must_use]
+    pub const fn regular_file_count(self) -> Option<u64> {
+        self.regular_file_count
+    }
+
+    /// Returns the number of successful clone calls.
+    #[must_use]
+    pub const fn clone_calls_succeeded(self) -> u64 {
+        self.clone_calls_succeeded
+    }
+
+    /// Returns the source manifest digest when observed.
+    #[must_use]
+    pub const fn source_manifest_digest(self) -> Option<TreeDigest> {
+        self.source_manifest_digest
+    }
+
+    /// Returns the target manifest digest when observed.
+    #[must_use]
+    pub const fn target_manifest_digest(self) -> Option<TreeDigest> {
+        self.target_manifest_digest
+    }
 }
 
 impl MaterializationReceipt {
@@ -1071,8 +1470,10 @@ impl MaterializationReceipt {
             CowEvidence::Confirmed
         };
         Ok(Self {
+            probe_evidence_digest: plan.probe_evidence_digest(),
             requested_mode: plan.requested_mode(),
             effective_mode: plan.effective_mode(),
+            actual_mode: MaterializationMode::CowClone,
             actual_adapter: MaterializerKind::ApfsFileClone,
             outcome: MaterializationOutcome::Succeeded,
             cow_evidence,
@@ -1088,6 +1489,8 @@ impl MaterializationReceipt {
             source_manifest_digest: Some(source_manifest_digest),
             target_manifest_digest: Some(target_manifest_digest),
             failure_kind: None,
+            fallback_reason: plan.fallback_reason(),
+            failed_attempts: plan.failed_attempts().to_vec(),
         })
     }
 
@@ -1108,8 +1511,10 @@ impl MaterializationReceipt {
             MaterializationOutcome::Failed
         };
         Self {
+            probe_evidence_digest: plan.probe_evidence_digest(),
             requested_mode: plan.requested_mode(),
             effective_mode: plan.effective_mode(),
+            actual_mode: MaterializationMode::CowClone,
             actual_adapter: MaterializerKind::ApfsFileClone,
             outcome,
             cow_evidence: CowEvidence::Unknown,
@@ -1125,7 +1530,101 @@ impl MaterializationReceipt {
             source_manifest_digest: evidence.source_manifest_digest,
             target_manifest_digest: evidence.target_manifest_digest,
             failure_kind: Some(failure_kind),
+            fallback_reason: plan.fallback_reason(),
+            failed_attempts: plan.failed_attempts().to_vec(),
         }
+    }
+
+    /// Builds a failed or partial Full Copy receipt without claiming CoW.
+    #[must_use]
+    pub fn failed_full_copy(
+        plan: &MaterializationPlan,
+        failure_kind: MaterializationFailureKind,
+        created: Vec<CreatedObjectEvidence>,
+        target_modified: bool,
+        rollback: RollbackEvidence,
+        evidence: MaterializationAttemptEvidence,
+        elapsed_millis: u64,
+    ) -> Self {
+        let outcome = if target_modified || !created.is_empty() {
+            MaterializationOutcome::Partial
+        } else {
+            MaterializationOutcome::Failed
+        };
+        Self {
+            probe_evidence_digest: plan.probe_evidence_digest(),
+            requested_mode: plan.requested_mode(),
+            effective_mode: plan.effective_mode(),
+            actual_mode: MaterializationMode::FullCopy,
+            actual_adapter: MaterializerKind::FullCopy,
+            outcome,
+            cow_evidence: CowEvidence::NotUsed,
+            source_volume_id: Some(plan.source_volume_id()),
+            target_volume_id: Some(plan.target_volume_id()),
+            created,
+            rollback,
+            elapsed_millis,
+            logical_bytes: evidence.logical_bytes,
+            physical_bytes: evidence.physical_bytes,
+            regular_file_count: evidence.regular_file_count,
+            clone_calls_succeeded: 0,
+            source_manifest_digest: evidence.source_manifest_digest,
+            target_manifest_digest: evidence.target_manifest_digest,
+            failure_kind: Some(failure_kind),
+            fallback_reason: plan.fallback_reason(),
+            failed_attempts: plan.failed_attempts().to_vec(),
+        }
+    }
+
+    /// Builds a successful Full Copy receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn successful_full_copy(
+        plan: &MaterializationPlan,
+        regular_file_count: u64,
+        created: Vec<CreatedObjectEvidence>,
+        source_manifest_digest: TreeDigest,
+        target_manifest_digest: TreeDigest,
+        elapsed_millis: u64,
+        logical_bytes: u64,
+        physical_bytes: Option<u64>,
+    ) -> Result<Self, MaterializationReceiptError> {
+        if plan.selected_adapter() != MaterializerKind::FullCopy
+            || plan.effective_mode() != MaterializationMode::FullCopy
+        {
+            return Err(MaterializationReceiptError::AdapterMismatch);
+        }
+        if source_manifest_digest != target_manifest_digest {
+            return Err(MaterializationReceiptError::ManifestMismatch);
+        }
+        Ok(Self {
+            probe_evidence_digest: plan.probe_evidence_digest(),
+            requested_mode: plan.requested_mode(),
+            effective_mode: plan.effective_mode(),
+            actual_mode: MaterializationMode::FullCopy,
+            actual_adapter: MaterializerKind::FullCopy,
+            outcome: MaterializationOutcome::Succeeded,
+            cow_evidence: CowEvidence::NotUsed,
+            source_volume_id: Some(plan.source_volume_id()),
+            target_volume_id: Some(plan.target_volume_id()),
+            created,
+            rollback: RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
+            elapsed_millis,
+            logical_bytes: Some(logical_bytes),
+            physical_bytes,
+            regular_file_count: Some(regular_file_count),
+            clone_calls_succeeded: 0,
+            source_manifest_digest: Some(source_manifest_digest),
+            target_manifest_digest: Some(target_manifest_digest),
+            failure_kind: None,
+            fallback_reason: plan.fallback_reason(),
+            failed_attempts: plan.failed_attempts().to_vec(),
+        })
+    }
+
+    /// Returns the path-probe evidence bound to the executed plan.
+    #[must_use]
+    pub const fn probe_evidence_digest(&self) -> ProbeEvidenceDigest {
+        self.probe_evidence_digest
     }
 
     /// Returns the original requested mode.
@@ -1138,6 +1637,12 @@ impl MaterializationReceipt {
     #[must_use]
     pub const fn effective_mode(&self) -> MaterializationMode {
         self.effective_mode
+    }
+
+    /// Returns the mode that actually ran.
+    #[must_use]
+    pub const fn actual_mode(&self) -> MaterializationMode {
+        self.actual_mode
     }
 
     /// Returns the backend that actually ran.
@@ -1228,5 +1733,17 @@ impl MaterializationReceipt {
     #[must_use]
     pub const fn failure_kind(&self) -> Option<MaterializationFailureKind> {
         self.failure_kind
+    }
+
+    /// Returns why the effective mode differs from the requested mode.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+
+    /// Returns earlier failed attempts retained by a runtime fallback.
+    #[must_use]
+    pub fn failed_attempts(&self) -> &[FailedMaterializationAttempt] {
+        &self.failed_attempts
     }
 }

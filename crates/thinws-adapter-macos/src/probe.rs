@@ -51,13 +51,25 @@ impl PlatformProbe for MacOsHostAdapter {
         let trash = inspect_path(request.trash())?;
         let (state, reasons) = combined_clone_support(&source, &target_root, &staging, &trash);
         let candidate = CandidateEvidence::new(MaterializerKind::ApfsFileClone, state, reasons);
-        let digest = probe_digest(&source, &target_root, &staging, &trash, &candidate);
+        let (copy_state, copy_reasons) =
+            combined_full_copy_support(&source, &target_root, &staging, &trash);
+        let full_copy =
+            CandidateEvidence::new(MaterializerKind::FullCopy, copy_state, copy_reasons);
+        let digest = probe_digest(
+            &source,
+            &target_root,
+            &staging,
+            &trash,
+            &candidate,
+            &full_copy,
+        );
         Ok(MaterializationPathReport::new(
             source,
             target_root,
             staging,
             trash,
             candidate,
+            full_copy,
             digest,
         ))
     }
@@ -168,19 +180,93 @@ fn combined_clone_support(
     staging: &PathCapabilityReport,
     trash: &PathCapabilityReport,
 ) -> (SupportState, Vec<String>) {
+    let mut support = common_materialization_support(source, target, staging, trash);
     let paths = [source, target, staging, trash];
-    let mut reasons = Vec::new();
-    let mut unsupported = false;
-    let mut unknown = false;
+    let mut volume = None;
+    for report in paths {
+        if report.filesystem().type_name() != "apfs" {
+            support.unsupported("non_apfs_path");
+        }
+        match report.filesystem().volume_id().known().copied() {
+            Some(observed) => match volume {
+                Some(expected) if expected != observed => {
+                    support.unsupported("different_volume");
+                }
+                None => volume = Some(observed),
+                _ => {}
+            },
+            None => {
+                support.unknown("volume_unknown");
+            }
+        }
+        support.record("clone_capability", report.apfs_clone());
+    }
 
+    support.finish()
+}
+
+fn combined_full_copy_support(
+    source: &PathCapabilityReport,
+    target: &PathCapabilityReport,
+    staging: &PathCapabilityReport,
+    trash: &PathCapabilityReport,
+) -> (SupportState, Vec<String>) {
+    common_materialization_support(source, target, staging, trash).finish()
+}
+
+#[derive(Default)]
+struct CandidateSupport {
+    unsupported: bool,
+    unknown: bool,
+    reasons: Vec<String>,
+}
+
+impl CandidateSupport {
+    fn unsupported(&mut self, reason: impl Into<String>) {
+        self.unsupported = true;
+        self.reasons.push(reason.into());
+    }
+
+    fn unknown(&mut self, reason: impl Into<String>) {
+        self.unknown = true;
+        self.reasons.push(reason.into());
+    }
+
+    fn record(&mut self, name: &str, state: SupportState) {
+        match state {
+            SupportState::Supported => {}
+            SupportState::Unsupported => self.unsupported(format!("{name}_unsupported")),
+            SupportState::Unknown => self.unknown(format!("{name}_unknown")),
+        }
+    }
+
+    fn finish(mut self) -> (SupportState, Vec<String>) {
+        self.reasons.sort();
+        self.reasons.dedup();
+        let state = if self.unsupported {
+            SupportState::Unsupported
+        } else if self.unknown {
+            SupportState::Unknown
+        } else {
+            SupportState::Supported
+        };
+        (state, self.reasons)
+    }
+}
+
+fn common_materialization_support(
+    source: &PathCapabilityReport,
+    target: &PathCapabilityReport,
+    staging: &PathCapabilityReport,
+    trash: &PathCapabilityReport,
+) -> CandidateSupport {
+    let mut support = CandidateSupport::default();
     if source.resolution() != PathResolution::ExistingDirectory {
-        unsupported = true;
-        reasons.push("source_missing".to_owned());
+        support.unsupported("source_missing");
     }
     for (name, report) in [("staging", staging), ("trash", trash)] {
         if report.resolution() != PathResolution::ExistingDirectory {
-            unsupported = true;
-            reasons.push(format!("{name}_missing"));
+            support.unsupported(format!("{name}_missing"));
         }
     }
     for (left_name, left, right_name, right) in [
@@ -192,41 +278,7 @@ fn combined_clone_support(
         ("staging", staging, "trash", trash),
     ] {
         if roots_overlap(left, right) {
-            unsupported = true;
-            reasons.push(format!("{left_name}_{right_name}_overlap"));
-        }
-    }
-
-    let mut volume = None;
-    for report in paths {
-        if report.filesystem().type_name() != "apfs" {
-            unsupported = true;
-            reasons.push("non_apfs_path".to_owned());
-        }
-        match report.filesystem().volume_id().known().copied() {
-            Some(observed) => match volume {
-                Some(expected) if expected != observed => {
-                    unsupported = true;
-                    reasons.push("different_volume".to_owned());
-                }
-                None => volume = Some(observed),
-                _ => {}
-            },
-            None => {
-                unknown = true;
-                reasons.push("volume_unknown".to_owned());
-            }
-        }
-        match report.apfs_clone() {
-            SupportState::Supported => {}
-            SupportState::Unsupported => {
-                unsupported = true;
-                reasons.push("clone_capability_unsupported".to_owned());
-            }
-            SupportState::Unknown => {
-                unknown = true;
-                reasons.push("clone_capability_unknown".to_owned());
-            }
+            support.unsupported(format!("{left_name}_{right_name}_overlap"));
         }
     }
 
@@ -236,29 +288,9 @@ fn combined_clone_support(
         ("staging_write", staging.writability()),
         ("trash_write", trash.writability()),
     ] {
-        match state {
-            SupportState::Supported => {}
-            SupportState::Unsupported => {
-                unsupported = true;
-                reasons.push(format!("{name}_unsupported"));
-            }
-            SupportState::Unknown => {
-                unknown = true;
-                reasons.push(format!("{name}_unknown"));
-            }
-        }
+        support.record(name, state);
     }
-
-    reasons.sort();
-    reasons.dedup();
-    let state = if unsupported {
-        SupportState::Unsupported
-    } else if unknown {
-        SupportState::Unknown
-    } else {
-        SupportState::Supported
-    };
-    (state, reasons)
+    support
 }
 
 fn roots_overlap(source: &PathCapabilityReport, target: &PathCapabilityReport) -> bool {
@@ -371,9 +403,10 @@ fn probe_digest(
     staging: &PathCapabilityReport,
     trash: &PathCapabilityReport,
     candidate: &CandidateEvidence,
+    full_copy: &CandidateEvidence,
 ) -> ProbeEvidenceDigest {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"thinws-materialization-probe-v2\0");
+    hasher.update(b"thinws-materialization-probe-v3\0");
     for (role, report) in [
         (b"source".as_slice(), source),
         (b"target".as_slice(), target),
@@ -383,15 +416,20 @@ fn probe_digest(
         update_bytes(&mut hasher, role);
         update_path_report(&mut hasher, report);
     }
+    update_candidate(&mut hasher, candidate);
+    update_candidate(&mut hasher, full_copy);
+    ProbeEvidenceDigest::new(*hasher.finalize().as_bytes())
+}
+
+fn update_candidate(hasher: &mut blake3::Hasher, candidate: &CandidateEvidence) {
     hasher.update(&[
         materializer_kind_byte(candidate.kind()),
         enum_byte(candidate.state()),
     ]);
-    update_count(&mut hasher, candidate.reasons().len());
+    update_count(hasher, candidate.reasons().len());
     for reason in candidate.reasons() {
-        update_bytes(&mut hasher, reason.as_bytes());
+        update_bytes(hasher, reason.as_bytes());
     }
-    ProbeEvidenceDigest::new(*hasher.finalize().as_bytes())
 }
 
 fn update_path_report(hasher: &mut blake3::Hasher, report: &PathCapabilityReport) {
@@ -562,8 +600,32 @@ mod tests {
     fn digest_for(
         report: &PathCapabilityReport,
         candidate: &CandidateEvidence,
+        full_copy: &CandidateEvidence,
     ) -> ProbeEvidenceDigest {
-        probe_digest(report, report, report, report, candidate)
+        probe_digest(report, report, report, report, candidate, full_copy)
+    }
+
+    #[test]
+    fn cross_volume_clone_candidate_is_rejected_independently_of_full_copy() {
+        let first = VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap();
+        let second = VolumeId::from_str("c25d1051-142f-423e-bcd2-1e07daa4246e").unwrap();
+        let source = report("/source", Evidence::Known(first), SupportState::Supported);
+        let target = report("/target", Evidence::Known(second), SupportState::Supported);
+        let staging = report("/staging", Evidence::Known(second), SupportState::Supported);
+        let trash = report("/trash", Evidence::Known(second), SupportState::Supported);
+
+        let (clone_state, clone_reasons) =
+            combined_clone_support(&source, &target, &staging, &trash);
+        assert_eq!(clone_state, SupportState::Unsupported);
+        assert!(
+            clone_reasons
+                .iter()
+                .any(|reason| reason == "different_volume")
+        );
+        assert_eq!(
+            combined_full_copy_support(&source, &target, &staging, &trash).0,
+            SupportState::Supported
+        );
     }
 
     #[test]
@@ -584,7 +646,10 @@ mod tests {
             Vec::new(),
         );
 
-        assert_ne!(digest_for(&report, &apfs), digest_for(&report, &full_copy));
+        assert_ne!(
+            digest_for(&report, &apfs, &full_copy),
+            digest_for(&report, &full_copy, &apfs)
+        );
     }
 
     #[test]
@@ -610,10 +675,71 @@ mod tests {
             SupportState::Unknown,
             vec!["volume_unknown".to_owned()],
         );
+        let full_copy = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        );
 
         assert_ne!(
-            digest_for(&without_errno, &candidate),
-            digest_for(&errno_zero, &candidate)
+            digest_for(&without_errno, &candidate, &full_copy),
+            digest_for(&errno_zero, &candidate, &full_copy)
+        );
+    }
+
+    #[test]
+    fn full_copy_candidate_is_independent_of_clone_capability() {
+        let volume =
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap());
+        let source = report(
+            "/Volumes/data/source",
+            volume.clone(),
+            SupportState::Unsupported,
+        );
+        let target = report(
+            "/Volumes/data/target",
+            volume.clone(),
+            SupportState::Unsupported,
+        );
+        let staging = report(
+            "/Volumes/data/staging",
+            volume.clone(),
+            SupportState::Unsupported,
+        );
+        let trash = report("/Volumes/data/trash", volume, SupportState::Unsupported);
+
+        assert_eq!(
+            combined_full_copy_support(&source, &target, &staging, &trash),
+            (SupportState::Supported, Vec::new())
+        );
+    }
+
+    #[test]
+    fn probe_digest_binds_full_copy_candidate_reasons() {
+        let report = report(
+            "/Volumes/data/source",
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap()),
+            SupportState::Supported,
+        );
+        let apfs = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            Vec::new(),
+        );
+        let supported = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        );
+        let unsupported = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Unsupported,
+            vec!["target_write_unsupported".to_owned()],
+        );
+
+        assert_ne!(
+            digest_for(&report, &apfs, &supported),
+            digest_for(&report, &apfs, &unsupported)
         );
     }
 
@@ -644,11 +770,19 @@ mod tests {
             SupportState::Supported,
             vec![String::new()],
         );
+        let full_copy = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        );
 
-        assert_ne!(digest_for(&report, &alpha), digest_for(&report, &bravo));
         assert_ne!(
-            digest_for(&report, &no_reasons),
-            digest_for(&report, &one_empty_reason)
+            digest_for(&report, &alpha, &full_copy),
+            digest_for(&report, &bravo, &full_copy)
+        );
+        assert_ne!(
+            digest_for(&report, &no_reasons, &full_copy),
+            digest_for(&report, &one_empty_reason, &full_copy)
         );
     }
 

@@ -210,6 +210,18 @@ P1-06 完成记录（2026-09-24）：
 
 验收断言：Full Copy 候选不因 clone 能力缺失而被误判不可用，但 Phase 1 计划仍要求 source、target、staging、trash 位于同一已知 APFS Volume；默认 Deny、clone unknown、路径/权限/卷异常、`EXDEV`、`ENOSPC`、普通 I/O、源/目标变化或未确认回滚均不得降级。只有 clone 预检明确不支持且策略为 `AllowFullCopyOnCowUnsupported`，或运行时 `CowUnavailable` 且前次目标已证明未修改/恢复基线、重新 Probe 仍满足布局时，才产生 Full Copy 有效计划；预检降级没有失败尝试，运行时降级保留前次失败及回滚证据。真实同卷 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、硬链接目录项、普通文件/目录/链接、权限和 mtime 满足与 P1-06 相同的保真范围；普通文件以独立字节副本交付，Receipt 为 actual/effective `full-copy`、`cow=not-used`、clone count 0，并绑定相同源/目标 manifest。部分写入、注册失败、路径替换和源变化返回 partial receipt，按登记身份逆序回滚且不接管替换对象。P1-07 不发布 Ready、不写产品 SQLite、不增加或改变公开 CLI。
 
+P1-07 定向变异首次尝试（2026-09-24 03:03 UTC）：候选为基线 `38a2500` 上的暂存代码差异 SHA-256 `4f5649dd2e9b0bfb3edb95462f70497f5c540bff9aa95b1d85e28745de5dcd88`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库 `.cargo/mutants.toml`，并发 4。枚举的 152 个变异覆盖 Core 的 Full Copy 预检/运行时决策、同卷布局与回执，macOS Probe 的 clone/Full Copy 候选及摘要，Materializer 的共享执行与字节复制路径，以及独占新建文件 FFI；验证包为 `thinws-core` 和 `thinws-adapter-macos`，输出位置为 `target/p1-07-mutants/mutants.out`。独立审核发现旧候选存在新建文件登记竞态和运行时降级连续性缺口，主 Agent 主动中止该未完成批次并退回修改；此批不能作为门禁证据，也不能以其耗时估算完整执行。修正后须按受影响范围重新取得变异证据。小阶段全量变异仍留到 P1.c 收口。
+
+P1-07 定向变异重跑启动记录（2026-09-24 03:16 UTC）：基线 `38a2500` 上的当前代码差异 SHA-256 `727a1f59c7a0a44f423ea5af37233197b4a72f189787a4bef6528d3b6cbf5708`；主 Agent 单独执行，环境及工具配置同上，并发 4，输出为 `target/p1-07-mutants-recheck/mutants.out`。按受影响生产函数过滤列出 176 个变异，包含新建身份登记、失败后来源连续性及四路径/回执绑定；验证包为 `thinws-core` 和 `thinws-adapter-macos`，开启 gitignore 以避免忽略的 P0 `target` 测试 fixture 进入变异副本。参考 P1-03 同类 367 个约 15 分钟的完整记录，首次主动查看预计 03:35 UTC；此前不轮询或修改该代码候选。
+
+上述第二批实际于 03:17:54–03:22:43 UTC 完成，约 4 分 49 秒；176 个变异为 124 caught、23 unviable、29 missed、0 timeout，退出码 2，不能作为通过结论。`outcomes.json` SHA-256 为 `5a633f6d4aaebd0fd56caecc3b85792117dd122d8c880af6444bdece5adcc382`，`mutants.json` 为 `346a77f648faf28ae307568c1332798c3d5893f0b383876b5bf46ff8eaa9427f`。未到预估查看时间不轮询；这次完整耗时替代先前估算。存活项中请求/计划逐角色校验、跨卷候选、源目录项即时变化、回滚证据和失败回执分类已补直接测试；位标志 `|→^`、合法 Plan 不变量下不可单独触发的守卫变体，以及不改变字节内容的 copy buffer 大小变体需在最终核对时逐项证明等价或继续补测。
+
+P1-07 定向补跑启动记录（2026-09-24 03:40 UTC）：当前代码差异 SHA-256 `b84cb85e8e3a25fd1f40f39664c1bd3547fe98fac629d4af9bfb1de8e617790c`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，验证包仍为 `thinws-core` 和 `thinws-adapter-macos`。只覆盖补测改变语义的生产函数及先记录待确认对象的登记函数，共 78 个变异，输出为 `target/p1-07-mutants-followup/mutants.out`。按上一批 176 个约 5 分钟加上固定构建开销，首次主动查看估计 03:46 UTC；此前不轮询或修改该代码候选。
+
+补跑实际于 03:40:37–03:42:43 UTC 完成，约 2 分 07 秒；78 个变异为 64 caught、8 unviable、6 missed、0 timeout，退出码 2，不能记作工具全绿。`outcomes.json` SHA-256 为 `dd9cc1f41405af6e9ac8f4a0034e8882d3809246756c0cfbba025f7e004cbdd3`，`mutants.json` 为 `51affcfc983cad1e4da1609cc7e81f11632ff3319620c2ca81cf4e3feafc8cdd`。相对上一完整候选的 29 个 missed，新增测试已捕获所有可达的请求路径、候选卷、目录项变化、回滚证据、失败回执判定。剩余 6 项的等价性待独立 Reviewer 接受：`validate_request_plan` 中的 Adapter 与有效模式由 Plan/Backend 构造一一配对，单独改其 `||` 不改变判定；Core runtime fallback 的前四个 `||` 在合法 Plan 下分别同为 clone 基线或被 Full Copy 的其他不变量共同拒绝，卷比较的两个布尔值又因双方均通过同卷布局检查而恒相同。另有未补跑的 4 个 FFI `|→^` 变体：本机头文件中 `O_WRONLY=0x0001`、`O_CREAT=0x00000200`、`O_EXCL=0x00000800`、`O_NOFOLLOW=0x00000100`、`O_CLOEXEC=0x01000000` 位互不重叠；一个 copy buffer `64*1024→64+1024` 变体只改变内部每次读取大小，不改变复制内容、边界或公开性能保证；一个 Full Copy 成功回执的 Adapter/有效模式 `||→&&` 变体由所有可构造 Plan 的二者一致性保证等价。将来新增 Plan 构造、修改标志位、把 chunk 大小/内部 hook 设为公开契约或允许跨卷布局时，上述证明失效并须重测；在 Reviewer 接受前，P1-07 仍不得 Done。
+
+上述 copy buffer 的“等价”仅相对于生产 `NoopHook` 和首版公开正确性契约；它确实改变内部测试 hook 的回调次数与故障注入时点，也可能改变吞吐，不宣称内部执行轨迹或性能等价。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

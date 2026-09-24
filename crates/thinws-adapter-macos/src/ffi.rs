@@ -93,6 +93,24 @@ pub(crate) fn open_file_read_at(parent: &OwnedFd, name: &CStr) -> io::Result<Own
     owned_fd(raw_fd)
 }
 
+pub(crate) fn create_file_at(parent: &OwnedFd, name: &CStr, mode: u32) -> io::Result<OwnedFd> {
+    validate_component(name)?;
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    // SAFETY: the live directory descriptor and validated component remain
+    // valid for the call. O_EXCL prevents overwriting any existing entry and
+    // a successful descriptor is newly owned by this process.
+    let raw_fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags,
+            mode as libc::c_int,
+        )
+    };
+    owned_fd(raw_fd)
+}
+
 pub(crate) fn node_metadata(fd: &impl AsRawFd) -> io::Result<RawNodeMetadata> {
     let mut stat = MaybeUninit::<libc::stat>::uninit();
 
@@ -600,6 +618,42 @@ impl Drop for DirectoryStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclusive_full_copy_file_creation_preserves_existing_entries() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("existing"), b"caller bytes").unwrap();
+        symlink("existing", temp.path().join("link")).unwrap();
+        let parent: OwnedFd = fs::File::open(temp.path()).unwrap().into();
+
+        let existing = create_file_at(&parent, c"existing", 0o600).unwrap_err();
+        let link = create_file_at(&parent, c"link", 0o600).unwrap_err();
+        assert_eq!(existing.raw_os_error(), Some(libc::EEXIST));
+        assert_eq!(link.raw_os_error(), Some(libc::EEXIST));
+        assert_eq!(
+            fs::read(temp.path().join("existing")).unwrap(),
+            b"caller bytes"
+        );
+        assert_eq!(
+            fs::read_link(temp.path().join("link")).unwrap(),
+            std::path::Path::new("existing")
+        );
+
+        let created = create_file_at(&parent, c"created", 0o600).unwrap();
+        // SAFETY: `created` is a live descriptor and F_GETFL takes no variadic argument.
+        let flags = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_GETFL) };
+        // SAFETY: `created` is a live descriptor and F_GETFD takes no variadic argument.
+        let descriptor_flags = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_GETFD) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_WRONLY);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        assert_eq!(
+            node_metadata(&created).unwrap().kind,
+            RawFileKind::RegularFile
+        );
+    }
 
     #[test]
     fn volume_uuid_requires_both_returned_bit_and_complete_buffer() {

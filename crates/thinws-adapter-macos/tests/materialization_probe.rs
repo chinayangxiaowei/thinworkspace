@@ -56,6 +56,7 @@ fn combined_probe_proves_a_same_volume_apfs_clone_plan_without_executing_it() {
         .unwrap();
 
     assert_eq!(report.apfs_clone().state(), SupportState::Supported);
+    assert_eq!(report.full_copy().state(), SupportState::Supported);
     assert_ne!(report.evidence_digest().as_bytes(), [0; 32]);
     let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
     assert_eq!(plan.source_volume_id(), plan.target_volume_id());
@@ -151,6 +152,7 @@ fn source_and_target_containment_disables_the_clone_candidate() {
         .unwrap();
 
     assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
     assert_eq!(
         MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny),
         Err(MaterializationPlanError::CandidateUnsupported)
@@ -237,8 +239,16 @@ fn configured_real_cross_volume_report_is_unsupported_not_same_volume() {
         report.target_root().filesystem().volume_id().known()
     );
     assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Supported);
     assert_eq!(
         MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny),
+        Err(MaterializationPlanError::DifferentVolume)
+    );
+    assert_eq!(
+        MaterializationPlan::for_full_copy_after_preflight(
+            &report,
+            FallbackPolicy::AllowFullCopyOnCowUnsupported,
+        ),
         Err(MaterializationPlanError::DifferentVolume)
     );
 }

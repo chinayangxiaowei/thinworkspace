@@ -200,6 +200,8 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS d
 
 对于 `mkdirat`、`symlinkat`、`fclonefileat` 这类成功时不返回新对象 FD 的调用，不得在公开 target 名称上创建后再从该名称首次认领身份。Phase 1 先在实例私有 staging 中以独占名称创建并固定类型/身份，再用同卷、不覆盖目标的 rename 发布；发布前登记已知身份，发布后核对 target 名称与该身份。目标名称在发布后被替换时必须失败，不写入、接管或回滚删除替换对象。创建失败或发布失败须清理可证明归属的 staging 项；清理无法确认时报告失败，不触发 Full Copy 降级。普通 Full Copy 文件可直接以独占新建并持有的 FD 固定身份。
 
+失败 Receipt 的 `created` 与 `rollback` 只描述 target root；独占 rename 返回失败时未发布的对象不得冒充 target 已创建项。若 staging 项的清理无法确认，另以 `unconfirmed_staging` 记录相对 staging root 的名称、类型和已知或未知身份，结果为 partial，即使 target 未修改且 target 回滚为 `not-needed` 也如此。该字段表示清理未获确认，不凭名称存在与否推断可自动回收；存在此证据时禁止启动 Full Copy 降级。成功 `fclonefileat` 调用在系统调用返回成功时计数，后续身份核验、发布或清理失败不得把该事实从失败 Receipt 中抹去；计数不等于最终 CoW 成功声明。
+
 上述 staging 身份固定依赖实例的私有 data root 和 staging 目录在操作期间没有外部写者；它不把 `0700` 或不可预测名称宣称为对同 UID 恶意进程的隔离。工作区不是 Sandbox，同 UID 主动篡改实例内部 staging 不在 Phase 1 保证范围；公开 target 名称的并发替换仍须按身份失败。进程中断可能留下未发布 staging 项，不自动续做或以未知身份清理。
 
 只有至少一个普通文件实际执行克隆、每个应克隆普通文件的真实 `fclonefileat` 调用都成功且最终树校验通过，Receipt 才能记录 `cow=confirmed`。空树或仅含目录/链接的树可以创建成功，但 CoW 记为 `not-used`，不能以空集合证明块共享。

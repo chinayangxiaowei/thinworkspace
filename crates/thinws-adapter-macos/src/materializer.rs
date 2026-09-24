@@ -201,6 +201,10 @@ fn materialize_with_backend(
                     elapsed_millis(started),
                 ),
             };
+            let receipt = match failed.active_staging.take() {
+                Some(staged) => receipt.with_unconfirmed_staging(staged.evidence()),
+                None => receipt,
+            };
             Err(MaterializationFailure::new(port_error, receipt))
         }
     }
@@ -268,6 +272,7 @@ fn materialize_inner(
     }
     let mut context = ExecutionContext {
         created: Vec::new(),
+        active_staging: None,
         clone_calls: 0,
         backend,
     };
@@ -953,6 +958,7 @@ fn materialize_directory(
                     &child,
                     before.kind,
                     context,
+                    hook,
                     |stage, name| create_directory_at(stage, name, 0o700),
                     Failure::io,
                     "create staged target directory",
@@ -996,19 +1002,27 @@ fn materialize_directory(
                 }
                 let (identity, target_file) = match context.backend {
                     Backend::ApfsClone => {
-                        let identity = stage_and_publish(
+                        let mut successful_clone_calls = 0_u64;
+                        let published = stage_and_publish(
                             staging,
                             target,
                             &component,
                             &child,
                             before.kind,
                             context,
-                            |stage, name| clone_file_at(&source_file, stage, name),
+                            hook,
+                            |stage, name| {
+                                clone_file_at(&source_file, stage, name)?;
+                                successful_clone_calls = successful_clone_calls.saturating_add(1);
+                                Ok(())
+                            },
                             Failure::clone_io,
                             "clone staged target file",
                             || hook.after_clone_published_before_validation(&child),
-                        )?;
-                        context.clone_calls = context.clone_calls.saturating_add(1);
+                        );
+                        context.clone_calls =
+                            context.clone_calls.saturating_add(successful_clone_calls);
+                        let identity = published?;
                         let target_file =
                             open_file_read_at(target, &component).map_err(|error| {
                                 Failure::path_open("open cloned target file", error)
@@ -1073,6 +1087,7 @@ fn materialize_directory(
                     &child,
                     before.kind,
                     context,
+                    hook,
                     |stage, name| create_symlink_at(&text, stage, name),
                     Failure::io,
                     "create staged target symlink",
@@ -1141,6 +1156,7 @@ fn stage_and_publish(
     relative: &[OsString],
     kind: RawFileKind,
     context: &mut ExecutionContext,
+    hook: &dyn ExecutionHook,
     mut create: impl FnMut(&OwnedFd, &CString) -> io::Result<()>,
     classify_create_error: fn(&'static str, io::Error) -> Failure,
     create_operation: &'static str,
@@ -1170,13 +1186,27 @@ fn stage_and_publish(
             "reserve unique staging entry",
         )
     })?;
+    context.active_staging = Some(TrackedCreated {
+        relative: vec![OsString::from(
+            staged_name
+                .to_str()
+                .expect("generated staging name is UTF-8"),
+        )],
+        kind,
+        identity: None,
+    });
     // The instance-private staging namespace has no external writer while an
     // operation runs; published target names remain concurrently mutable.
-    let staged = match node_metadata_at(staging, &staged_name) {
+    let staged = match hook
+        .before_staged_identity()
+        .and_then(|()| node_metadata_at(staging, &staged_name))
+    {
         Ok(staged) => staged,
         Err(error) => {
-            remove_staged_at(staging, &staged_name, kind)
+            hook.before_staged_cleanup()
+                .and_then(|()| remove_staged_at(staging, &staged_name, kind))
                 .map_err(|cleanup| Failure::io("remove unverified staged object", cleanup))?;
+            context.active_staging = None;
             return Err(Failure::io("inspect staged object identity", error));
         }
     };
@@ -1184,20 +1214,34 @@ fn stage_and_publish(
         return Err(target_changed());
     }
     let identity = staged.identity();
+    context
+        .active_staging
+        .as_mut()
+        .expect("newly created staging object is tracked")
+        .identity = Some(identity);
     context.created.push(TrackedCreated {
         relative: relative.to_vec(),
         kind,
         identity: Some(identity),
     });
-    if let Err(error) = rename_exclusive_at(staging, &staged_name, target, target_name) {
-        cleanup_staged(staging, &staged_name, kind, identity)?;
+    if let Err(error) = hook
+        .before_staged_publish()
+        .and_then(|()| rename_exclusive_at(staging, &staged_name, target, target_name))
+    {
+        // An unsuccessful exclusive rename never published this entry. Keep
+        // staging uncertainty separate from target-root creation evidence.
         context.created.pop();
+        hook.before_staged_cleanup()
+            .map_err(|cleanup| Failure::io("prepare staged cleanup", cleanup))?;
+        cleanup_staged(staging, &staged_name, kind, identity)?;
+        context.active_staging = None;
         return if error.raw_os_error() == Some(libc::EEXIST) {
             Err(target_changed())
         } else {
             Err(Failure::io("publish staged target object", error))
         };
     }
+    context.active_staging = None;
     after_publish()?;
     let published = node_metadata_at(target, target_name)
         .map_err(|error| Failure::io("inspect published target identity", error))?;
@@ -1292,6 +1336,18 @@ fn set_preserved_metadata(
 }
 
 trait ExecutionHook {
+    fn before_staged_identity(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn before_staged_publish(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn before_staged_cleanup(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn after_probe(&self) -> Result<(), Failure> {
         Ok(())
     }
@@ -1348,6 +1404,7 @@ impl ExecutionHook for NoopHook {}
 
 struct ExecutionContext {
     created: Vec<TrackedCreated>,
+    active_staging: Option<TrackedCreated>,
     clone_calls: u64,
     backend: Backend,
 }
@@ -1689,6 +1746,7 @@ struct AttemptFailure {
     trash_report: Option<PathCapabilityReport>,
     target_baseline: Option<RawNodeMetadata>,
     created: Vec<TrackedCreated>,
+    active_staging: Option<TrackedCreated>,
     target_modified: bool,
     evidence: MaterializationAttemptEvidence,
 }
@@ -1714,6 +1772,7 @@ impl AttemptFailure {
             trash_report: None,
             target_baseline: None,
             created: Vec::new(),
+            active_staging: None,
             target_modified: false,
             evidence: MaterializationAttemptEvidence::default(),
         })
@@ -1751,6 +1810,7 @@ impl AttemptFailure {
             trash_report: Some(failed.path_report.trash().clone()),
             target_baseline: Some(failed.target_baseline),
             created: failed.context.created,
+            active_staging: failed.context.active_staging,
             target_modified: failed.target_modified,
             evidence,
         })
@@ -2517,12 +2577,119 @@ mod tests {
             failure.receipt().failure_kind(),
             Some(MaterializationFailureKind::TargetChanged)
         );
+        assert_eq!(failure.receipt().clone_calls_succeeded(), 1);
         assert_eq!(fs::symlink_metadata(&target).unwrap().ino(), foreign_inode);
         assert_eq!(fs::read(&target).unwrap(), fs::read(&source).unwrap());
         assert_eq!(
             failure.receipt().rollback().status(),
             RollbackStatus::Incomplete
         );
+    }
+
+    struct FailStagedObservationAndCleanup;
+
+    impl ExecutionHook for FailStagedObservationAndCleanup {
+        fn before_staged_identity(&self) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        }
+
+        fn before_staged_cleanup(&self) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EACCES))
+        }
+    }
+
+    #[test]
+    fn failed_staging_identity_and_cleanup_report_the_unconfirmed_staging_path() {
+        let (temp, request, plan, adapter) = fixture("unconfirmed-staged-identity-");
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &FailStagedObservationAndCleanup)
+            .unwrap_err();
+
+        let receipt = failure.receipt();
+        let staged = receipt.unconfirmed_staging().expect("staging evidence");
+        let name = std::str::from_utf8(staged.path().as_bytes()).unwrap();
+        assert_eq!(receipt.outcome(), MaterializationOutcome::Partial);
+        assert_eq!(receipt.clone_calls_succeeded(), 1);
+        assert!(receipt.created().is_empty());
+        assert_eq!(receipt.rollback().status(), RollbackStatus::NotNeeded);
+        assert_eq!(staged.kind(), MaterializedEntryKind::RegularFile);
+        assert_eq!(staged.identity(), None);
+        assert!(temp.path().join("staging").join(name).is_file());
+        assert!(
+            fs::read_dir(temp.path().join("target"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn full_copy_symlink_staging_cleanup_failure_is_in_its_failed_receipt() {
+        let (temp, request, _, adapter) = fixture("unconfirmed-copy-staging-");
+        fs::remove_file(temp.path().join("source/file.txt")).unwrap();
+        std::os::unix::fs::symlink("../outside", temp.path().join("source/link")).unwrap();
+        let plan = runtime_copy_plan(&adapter, &request);
+        let failure = materialize_with_backend(
+            &adapter,
+            Backend::FullCopy,
+            &request,
+            &plan,
+            &FailStagedObservationAndCleanup,
+        )
+        .unwrap_err();
+
+        let receipt = failure.receipt();
+        let staged = receipt.unconfirmed_staging().expect("staging evidence");
+        let name = std::str::from_utf8(staged.path().as_bytes()).unwrap();
+        assert_eq!(receipt.outcome(), MaterializationOutcome::Partial);
+        assert_eq!(receipt.clone_calls_succeeded(), 0);
+        assert_eq!(staged.kind(), MaterializedEntryKind::SymbolicLink);
+        assert_eq!(staged.identity(), None);
+        assert!(fs::symlink_metadata(temp.path().join("staging").join(name)).is_ok());
+        assert!(
+            fs::read_dir(temp.path().join("target"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    struct OccupyTargetAndFailStagingCleanup {
+        target: PathBuf,
+    }
+
+    impl ExecutionHook for OccupyTargetAndFailStagingCleanup {
+        fn before_staged_publish(&self) -> io::Result<()> {
+            fs::write(&self.target, b"foreign target")
+        }
+
+        fn before_staged_cleanup(&self) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EACCES))
+        }
+    }
+
+    #[test]
+    fn rejected_publication_and_cleanup_report_staging_and_preserve_foreign_target() {
+        let (temp, request, plan, adapter) = fixture("unconfirmed-staged-publication-");
+        let target = temp.path().join("target/file.txt");
+        let hook = OccupyTargetAndFailStagingCleanup {
+            target: target.clone(),
+        };
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        let receipt = failure.receipt();
+        let staged = receipt.unconfirmed_staging().expect("staging evidence");
+        let name = std::str::from_utf8(staged.path().as_bytes()).unwrap();
+        assert_eq!(receipt.outcome(), MaterializationOutcome::Partial);
+        assert_eq!(receipt.clone_calls_succeeded(), 1);
+        assert!(receipt.created().is_empty());
+        assert_eq!(receipt.rollback().status(), RollbackStatus::NotNeeded);
+        assert_eq!(staged.kind(), MaterializedEntryKind::RegularFile);
+        assert!(staged.identity().is_some());
+        assert!(temp.path().join("staging").join(name).is_file());
+        assert_eq!(fs::read(target).unwrap(), b"foreign target");
     }
 
     #[test]
@@ -2533,6 +2700,7 @@ mod tests {
         let name = CString::new("published-link").unwrap();
         let mut context = ExecutionContext {
             created: Vec::new(),
+            active_staging: None,
             clone_calls: 0,
             backend: Backend::ApfsClone,
         };
@@ -2544,6 +2712,7 @@ mod tests {
             &[OsString::from("published-link")],
             RawFileKind::SymbolicLink,
             &mut context,
+            &NoopHook,
             |parent, candidate| {
                 calls.set(calls.get() + 1);
                 if calls.get() == 1 {
@@ -2569,6 +2738,7 @@ mod tests {
             &[OsString::from("never-published")],
             RawFileKind::SymbolicLink,
             &mut context,
+            &NoopHook,
             |_, _| {
                 calls.set(calls.get() + 1);
                 Err(io::Error::from_raw_os_error(libc::EACCES))
@@ -2595,6 +2765,7 @@ mod tests {
         let occupied_inode = fs::symlink_metadata(&occupied).unwrap().ino();
         let mut context = ExecutionContext {
             created: Vec::new(),
+            active_staging: None,
             clone_calls: 0,
             backend: Backend::ApfsClone,
         };
@@ -2606,6 +2777,7 @@ mod tests {
             &[OsString::from("occupied")],
             RawFileKind::Directory,
             &mut context,
+            &NoopHook,
             |parent, candidate| create_directory_at(parent, candidate, 0o700),
             Failure::io,
             "create staged test directory",
@@ -2882,6 +3054,7 @@ mod tests {
             .link_text = Some(b"different".to_vec());
         let mut context = ExecutionContext {
             created: Vec::new(),
+            active_staging: None,
             clone_calls: 0,
             backend: Backend::FullCopy,
         };

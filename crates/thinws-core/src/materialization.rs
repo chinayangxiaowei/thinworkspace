@@ -1107,6 +1107,9 @@ fn receipt_matches_plan(receipt: &MaterializationReceipt, plan: &Materialization
 }
 
 fn receipt_restored_baseline(receipt: &MaterializationReceipt) -> bool {
+    if receipt.unconfirmed_staging.is_some() {
+        return false;
+    }
     let rollback_is_empty = receipt.rollback.remaining().is_empty()
         && receipt.rollback.unconfirmed_quarantined().is_empty();
     match receipt.rollback.status() {
@@ -1362,6 +1365,7 @@ pub struct MaterializationReceipt {
     source_volume_id: Option<VolumeId>,
     target_volume_id: Option<VolumeId>,
     created: Vec<CreatedObjectEvidence>,
+    unconfirmed_staging: Option<CreatedObjectEvidence>,
     rollback: RollbackEvidence,
     elapsed_millis: u64,
     logical_bytes: Option<u64>,
@@ -1480,6 +1484,7 @@ impl MaterializationReceipt {
             source_volume_id: Some(plan.source_volume_id()),
             target_volume_id: Some(plan.target_volume_id()),
             created,
+            unconfirmed_staging: None,
             rollback: RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
             elapsed_millis,
             logical_bytes: Some(logical_bytes),
@@ -1521,6 +1526,7 @@ impl MaterializationReceipt {
             source_volume_id: Some(plan.source_volume_id()),
             target_volume_id: Some(plan.target_volume_id()),
             created,
+            unconfirmed_staging: None,
             rollback,
             elapsed_millis,
             logical_bytes: evidence.logical_bytes,
@@ -1562,6 +1568,7 @@ impl MaterializationReceipt {
             source_volume_id: Some(plan.source_volume_id()),
             target_volume_id: Some(plan.target_volume_id()),
             created,
+            unconfirmed_staging: None,
             rollback,
             elapsed_millis,
             logical_bytes: evidence.logical_bytes,
@@ -1607,6 +1614,7 @@ impl MaterializationReceipt {
             source_volume_id: Some(plan.source_volume_id()),
             target_volume_id: Some(plan.target_volume_id()),
             created,
+            unconfirmed_staging: None,
             rollback: RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
             elapsed_millis,
             logical_bytes: Some(logical_bytes),
@@ -1679,6 +1687,22 @@ impl MaterializationReceipt {
     #[must_use]
     pub fn created(&self) -> &[CreatedObjectEvidence] {
         &self.created
+    }
+
+    /// Returns a staging-relative object whose cleanup could not be confirmed.
+    /// This is separate from target-root rollback evidence.
+    #[must_use]
+    pub const fn unconfirmed_staging(&self) -> Option<&CreatedObjectEvidence> {
+        self.unconfirmed_staging.as_ref()
+    }
+
+    /// Records a staged object left after an attempt failed to confirm cleanup.
+    #[must_use]
+    pub fn with_unconfirmed_staging(mut self, object: CreatedObjectEvidence) -> Self {
+        assert_ne!(self.outcome, MaterializationOutcome::Succeeded);
+        self.unconfirmed_staging = Some(object);
+        self.outcome = MaterializationOutcome::Partial;
+        self
     }
 
     /// Returns rollback evidence.

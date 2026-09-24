@@ -234,6 +234,16 @@ P1-07 竞态修正定向补跑启动记录（2026-09-24 04:14 UTC）：代码差
 
 本地最终候选普通门禁（2026-09-24，macOS arm64、Rust 1.97.1）：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --release --all-targets`、`cargo doc --workspace --no-deps`、29 项工具测试、`cargo deny check`、`cargo audit --no-fetch` 均退出 0；deny 仅有既有未命中 allowance/exception 警告，离线审计使用本地 1261 条 advisory。`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data` 下，真实跨卷 Probe 拒绝及 store 跨卷布局用例在 Debug/Release 均通过；真实同卷 APFS clone/Full Copy 与 staging 无残留由全 workspace 集成测试覆盖。新增目录、链接、匹配内容外来文件的目标替换故障注入，以及失败发布清理/no-replace 测试均通过。未执行真实子挂载创建（本机权限边界），未新增能到达本次 staging 执行代码的 fuzz harness；既有纯路径 fuzz 证据仅覆盖未变更的解析边界，不能代替本次文件系统竞态测试。线上 CI/PR/push 均不属于当前本地交付。
 
+P1-07 精确提交 `4714b1fff710aaf9412368e6b73cf561163b6154` 经 GPT-6 Astra（`gpt-6-astra` / `xhigh`）只读复核，前次 High 已关闭，结论 Changes requested（Critical/High 0、Normal 2）：后续发布失败漏记已成功的 `fclonefileat` 调用；staging 清理失败未在失败 Receipt 中给出相对 staging 名称与身份是否已知。任务退回 In Progress。主 Agent 已用真实 APFS RED 确认第一项；修正计数时点，增加 staging 清理未确认的独立证据和禁止降级判定，分别对首次身份观察失败、发布失败、Full Copy 链接对象做故障注入。Debug/Release 全 workspace、Clippy 与 `/Volumes/data` 真实跨卷 Probe/store 验证已通过；此处仅是修正中的验证记录，不代表 P1-07 已审核通过。
+
+P1-07 失败回执修正定向变异启动记录（2026-09-24 23:44 UTC）：相对 `4714b1f` 的代码和相关测试差异 SHA-256 为 `ba813ae2635cca008375b479d224cc0f6bef9dd69000759fada1224d2bfc8a87`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，验证包 `thinws-core` 与 `thinws-adapter-macos`。仅选择共享遍历、staging 发布、失败回执构造与 fallback 清洁基线判断相关的 35 个变异，输出为 `target/p1-07-failure-receipt-mutants/mutants.out`。上次同机 23 个约 44 秒、9 个约 38 秒，连同构建波动，首次主动查看预计 23:47 UTC；此前不轮询、不修改冻结生产代码。
+
+该批实际 55 秒完成：31 caught、4 unviable、0 missed/timeout，退出码 0。`outcomes.json`/`mutants.json` SHA-256 分别为 `22d3f7e9f1617f3c22151fb659ba5393192c5ce0f738e37e1406042c6cc5cf3c`、`e243a82c46278a791e1c7da234c4644f60c04019106650c87a7ae1c9c02b702f`。之后自查又发现独占 rename 拒绝发布且 staging 清理失败时，target `created` 仍包含未发布的幻影项；已以单测 RED/GREEN 修正为 target 未修改、仅 staging 清理未确认。该小改动仅触及 `stage_and_publish`，需补跑此函数的变异；前批其他函数证据可沿用。
+
+P1-07 幻影 target 修正变异补跑启动记录（2026-09-24 23:48 UTC）：相对 `4714b1f` 的 Adapter 差异 SHA-256 `9615c423b17d3d78e79e19934809c8a32081142ef704e91c6666d4868141d685`；主 Agent 单独执行，平台/工具/配置同上，并发 4、gitignore 开启，仅针对受影响的 `stage_and_publish` 6 个变异，验证包为 `thinws-adapter-macos`，输出 `target/p1-07-target-evidence-mutants/mutants.out`。上次同机 35 个 55 秒，留构建波动余量，首次主动查看预计 23:50 UTC；此前不轮询或修改候选生产代码。
+
+补跑实际 16 秒完成：5 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `52ad94638e9f6ed37ecf4187e3f3d2b6fee6d67a0ab555e8b8fe7950733e6896`、`8abbe048f586988abc3276d7aafa679f597ad41086f874fefa4b9a291c7a31fb`。此后生产代码未再变化。最终候选提交前本地 `cargo fmt --all -- --check`、Clippy 全目标/全 feature、Debug/Release 全 workspace 测试、rustdoc、29 项仓库工具测试、`cargo deny check`、离线 `cargo audit --no-fetch` 均退出 0；deny 只有既有未命中配置警告。`/Volumes/data` 真实跨卷 Probe 和 store 用例在 Debug/Release 均通过，相关 Probe/store 生产代码在本次回执修正中未变。不存在与本次 syscall 失败时序对应的模糊测试 harness；不以未变更的路径解析 fuzz 证据冒充此项覆盖。仍未执行线上 CI/PR/push 或真实子挂载创建。任务在精确提交独立审核通过前保持 In Progress。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

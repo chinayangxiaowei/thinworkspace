@@ -353,6 +353,27 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         SupportState::Supported,
     );
 
+    let unconfirmed_staging =
+        clean_failure
+            .clone()
+            .with_unconfirmed_staging(thinws_core::CreatedObjectEvidence::new(
+                RelativePath::try_from_bytes(b".thinws-materialize-123-1".to_vec()).unwrap(),
+                thinws_core::MaterializedEntryKind::RegularFile,
+                None,
+            ));
+    assert_eq!(
+        unconfirmed_staging.outcome(),
+        MaterializationOutcome::Partial
+    );
+    assert_eq!(
+        MaterializationPlan::for_full_copy_after_cow_unavailable(
+            &fresh,
+            &prior_plan,
+            &unconfirmed_staging,
+        ),
+        Err(MaterializationPlanError::PreviousAttemptNotClean)
+    );
+
     let fallback = MaterializationPlan::for_full_copy_after_cow_unavailable(
         &fresh,
         &prior_plan,

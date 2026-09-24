@@ -115,6 +115,7 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
     assert_eq!(receipt.cow_evidence(), CowEvidence::Confirmed);
     assert_eq!(receipt.regular_file_count(), Some(8));
     assert_eq!(receipt.clone_calls_succeeded(), 8);
+    assert!(fs::read_dir(&staging).unwrap().next().is_none());
     assert_eq!(
         receipt.source_manifest_digest(),
         receipt.target_manifest_digest()

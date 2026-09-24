@@ -127,6 +127,7 @@ fn real_full_copy_preserves_tree_and_isolates_each_regular_file() {
     assert_eq!(receipt.cow_evidence(), CowEvidence::NotUsed);
     assert_eq!(receipt.clone_calls_succeeded(), 0);
     assert_eq!(receipt.regular_file_count(), Some(8));
+    assert!(fs::read_dir(&staging).unwrap().next().is_none());
     assert_eq!(
         receipt.source_manifest_digest(),
         receipt.target_manifest_digest()

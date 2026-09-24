@@ -319,6 +319,19 @@ pub(crate) fn rename_exclusive_at(
     syscall_unit(result)
 }
 
+pub(crate) fn remove_staged_at(parent: &OwnedFd, name: &CStr, kind: RawFileKind) -> io::Result<()> {
+    validate_component(name)?;
+    let flags = if kind == RawFileKind::Directory {
+        libc::AT_REMOVEDIR
+    } else {
+        0
+    };
+
+    // SAFETY: the live parent descriptor and validated component remain valid
+    // for this non-retaining call. The caller verifies the staging identity.
+    syscall_unit(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) })
+}
+
 pub(crate) fn file_system_metadata(fd: &OwnedFd) -> io::Result<RawFileSystemMetadata> {
     let mut stat = MaybeUninit::<libc::statfs>::uninit();
 
@@ -618,6 +631,33 @@ impl Drop for DirectoryStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_publication_never_replaces_an_existing_target() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let staging_path = temp.path().join("staging");
+        let target_path = temp.path().join("target");
+        fs::create_dir(&staging_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        fs::write(staging_path.join("staged"), b"created by this operation").unwrap();
+        fs::write(target_path.join("entry"), b"foreign target").unwrap();
+        let staging: OwnedFd = fs::File::open(&staging_path).unwrap().into();
+        let target: OwnedFd = fs::File::open(&target_path).unwrap().into();
+
+        let error = rename_exclusive_at(&staging, c"staged", &target, c"entry").unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+        assert_eq!(
+            fs::read(target_path.join("entry")).unwrap(),
+            b"foreign target"
+        );
+        assert_eq!(
+            fs::read(staging_path.join("staged")).unwrap(),
+            b"created by this operation"
+        );
+    }
 
     #[test]
     fn exclusive_full_copy_file_creation_preserves_existing_entries() {

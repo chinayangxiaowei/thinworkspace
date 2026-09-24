@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use thinws_core::{
@@ -22,8 +23,8 @@ use crate::MacOsHostAdapter;
 use crate::ffi::{
     RawFileKind, RawNodeMetadata, c_string, clone_file_at, create_directory_at, create_file_at,
     create_symlink_at, file_system_metadata, node_metadata, node_metadata_at, open_directory_at,
-    open_file_read_at, open_root_directory, read_directory, read_link_at, rename_exclusive_at,
-    set_mode, set_modified_time, volume_uuid,
+    open_file_read_at, open_root_directory, read_directory, read_link_at, remove_staged_at,
+    rename_exclusive_at, set_mode, set_modified_time, volume_uuid,
 };
 use crate::volume::decode_volume_id;
 
@@ -36,6 +37,8 @@ pub struct ApfsCloneMaterializer {
 pub struct FullCopyMaterializer {
     probe: MacOsHostAdapter,
 }
+
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl FullCopyMaterializer {
     /// Creates a Full Copy materializer using the same host Adapter for revalidation.
@@ -271,6 +274,7 @@ fn materialize_inner(
     if let Err(error) = materialize_directory(
         &source,
         &target,
+        &staging,
         &[],
         snapshot.root.device,
         &snapshot.entries,
@@ -906,9 +910,11 @@ fn digest_file(file: OwnedFd, expected: RawNodeMetadata) -> Result<(u64, [u8; 32
     Ok((length, *hasher.finalize().as_bytes()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_directory(
     source: &OwnedFd,
     target: &OwnedFd,
+    staging: &OwnedFd,
     relative: &[OsString],
     source_root_device: u64,
     expected: &BTreeMap<Vec<u8>, SnapshotEntry>,
@@ -940,10 +946,18 @@ fn materialize_directory(
                 {
                     return Err(source_changed());
                 }
-                create_directory_at(target, &component, 0o700)
-                    .map_err(|error| Failure::io("create target directory", error))?;
-                let identity =
-                    register_created(target, &component, &child, before.kind, None, None, context)?;
+                let identity = stage_and_publish(
+                    staging,
+                    target,
+                    &component,
+                    &child,
+                    before.kind,
+                    context,
+                    |stage, name| create_directory_at(stage, name, 0o700),
+                    Failure::io,
+                    "create staged target directory",
+                    || hook.after_directory_published_before_validation(&child),
+                )?;
                 let target_child = open_directory_at(target, &component)
                     .map_err(|error| Failure::path_open("open created target directory", error))?;
                 ensure_identity(
@@ -955,6 +969,7 @@ fn materialize_directory(
                 materialize_directory(
                     &source_child,
                     &target_child,
+                    staging,
                     &child,
                     source_root_device,
                     expected,
@@ -981,19 +996,19 @@ fn materialize_directory(
                 }
                 let (identity, target_file) = match context.backend {
                     Backend::ApfsClone => {
-                        clone_file_at(&source_file, target, &component)
-                            .map_err(|error| Failure::clone_io("clone target file", error))?;
-                        context.clone_calls = context.clone_calls.saturating_add(1);
-                        hook.after_file_cloned_before_registration(&child)?;
-                        let identity = register_created(
+                        let identity = stage_and_publish(
+                            staging,
                             target,
                             &component,
                             &child,
                             before.kind,
-                            Some(expected),
-                            None,
                             context,
+                            |stage, name| clone_file_at(&source_file, stage, name),
+                            Failure::clone_io,
+                            "clone staged target file",
+                            || hook.after_clone_published_before_validation(&child),
                         )?;
+                        context.clone_calls = context.clone_calls.saturating_add(1);
                         let target_file =
                             open_file_read_at(target, &component).map_err(|error| {
                                 Failure::path_open("open cloned target file", error)
@@ -1051,9 +1066,18 @@ fn materialize_directory(
                 }
                 let text = CString::new(text)
                     .map_err(|error| Failure::invalid("encode source symlink", error))?;
-                create_symlink_at(&text, target, &component)
-                    .map_err(|error| Failure::io("create target symlink", error))?;
-                register_created(target, &component, &child, before.kind, None, None, context)?;
+                stage_and_publish(
+                    staging,
+                    target,
+                    &component,
+                    &child,
+                    before.kind,
+                    context,
+                    |stage, name| create_symlink_at(&text, stage, name),
+                    Failure::io,
+                    "create staged target symlink",
+                    || hook.after_symlink_published_before_validation(&child),
+                )?;
                 hook.after_created(&child, context.created.len())?;
             }
             RawFileKind::Fifo
@@ -1107,6 +1131,91 @@ fn copy_file_bytes(
         .flush()
         .map_err(|error| Failure::io("flush Full Copy target file", error))?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_and_publish(
+    staging: &OwnedFd,
+    target: &OwnedFd,
+    target_name: &CString,
+    relative: &[OsString],
+    kind: RawFileKind,
+    context: &mut ExecutionContext,
+    mut create: impl FnMut(&OwnedFd, &CString) -> io::Result<()>,
+    classify_create_error: fn(&'static str, io::Error) -> Failure,
+    create_operation: &'static str,
+    after_publish: impl FnOnce() -> Result<(), Failure>,
+) -> Result<FileIdentity, Failure> {
+    let mut staged_name = None;
+    for _ in 0..128 {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = CString::new(format!(
+            ".thinws-materialize-{}-{sequence}",
+            std::process::id()
+        ))
+        .expect("staging names contain no NUL");
+        match create(staging, &name) {
+            Ok(()) => {
+                staged_name = Some(name);
+                break;
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+            Err(error) => return Err(classify_create_error(create_operation, error)),
+        }
+    }
+    let staged_name = staged_name.ok_or_else(|| {
+        Failure::new(
+            MaterializationFailureKind::Filesystem,
+            PortErrorKind::Io,
+            "reserve unique staging entry",
+        )
+    })?;
+    // The instance-private staging namespace has no external writer while an
+    // operation runs; published target names remain concurrently mutable.
+    let staged = match node_metadata_at(staging, &staged_name) {
+        Ok(staged) => staged,
+        Err(error) => {
+            remove_staged_at(staging, &staged_name, kind)
+                .map_err(|cleanup| Failure::io("remove unverified staged object", cleanup))?;
+            return Err(Failure::io("inspect staged object identity", error));
+        }
+    };
+    if staged.kind != kind {
+        return Err(target_changed());
+    }
+    let identity = staged.identity();
+    context.created.push(TrackedCreated {
+        relative: relative.to_vec(),
+        kind,
+        identity: Some(identity),
+    });
+    if let Err(error) = rename_exclusive_at(staging, &staged_name, target, target_name) {
+        cleanup_staged(staging, &staged_name, kind, identity)?;
+        context.created.pop();
+        return if error.raw_os_error() == Some(libc::EEXIST) {
+            Err(target_changed())
+        } else {
+            Err(Failure::io("publish staged target object", error))
+        };
+    }
+    after_publish()?;
+    let published = node_metadata_at(target, target_name)
+        .map_err(|error| Failure::io("inspect published target identity", error))?;
+    ensure_identity(published, identity, kind)?;
+    Ok(identity)
+}
+
+fn cleanup_staged(
+    staging: &OwnedFd,
+    name: &CString,
+    kind: RawFileKind,
+    identity: FileIdentity,
+) -> Result<(), Failure> {
+    let observed = node_metadata_at(staging, name)
+        .map_err(|error| Failure::io("inspect failed staged object", error))?;
+    ensure_identity(observed, identity, kind)?;
+    remove_staged_at(staging, name, kind)
+        .map_err(|error| Failure::io("remove failed staged object", error))
 }
 
 fn register_created(
@@ -1191,11 +1300,28 @@ trait ExecutionHook {
         Ok(())
     }
 
-    fn after_file_cloned_before_registration(&self, _relative: &[OsString]) -> Result<(), Failure> {
+    fn after_clone_published_before_validation(
+        &self,
+        _relative: &[OsString],
+    ) -> Result<(), Failure> {
         Ok(())
     }
 
     fn after_file_created_before_registration(&self, _relative: &[OsString]) {}
+
+    fn after_directory_published_before_validation(
+        &self,
+        _relative: &[OsString],
+    ) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn after_symlink_published_before_validation(
+        &self,
+        _relative: &[OsString],
+    ) -> Result<(), Failure> {
+        Ok(())
+    }
 
     fn after_copy_chunk(&self, _relative: &[OsString], _written_total: u64) -> Result<(), Failure> {
         Ok(())
@@ -1870,7 +1996,7 @@ impl RawNodeMetadata {
 mod tests {
     use std::cell::Cell;
     use std::error::Error;
-    use std::fs;
+    use std::fs::{self, FileTimes};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -2264,6 +2390,242 @@ mod tests {
         assert_eq!(fs::read(&target_file).unwrap(), foreign_bytes);
     }
 
+    struct ReplacePublishedDirectoryHook {
+        target: PathBuf,
+        foreign: PathBuf,
+    }
+
+    impl ExecutionHook for ReplacePublishedDirectoryHook {
+        fn after_directory_published_before_validation(
+            &self,
+            _relative: &[OsString],
+        ) -> Result<(), Failure> {
+            fs::remove_dir(&self.target).unwrap();
+            fs::rename(&self.foreign, &self.target).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clone_does_not_adopt_or_write_into_foreign_directory_before_validation() {
+        let (temp, request, plan, adapter) = fixture("unregistered-foreign-directory-");
+        let source_child = temp.path().join("source/child");
+        fs::create_dir(&source_child).unwrap();
+        fs::write(source_child.join("nested.txt"), b"nested bytes").unwrap();
+        let target = temp.path().join("target/child");
+        let foreign = temp.path().join("foreign-directory");
+        fs::create_dir(&foreign).unwrap();
+        let foreign_inode = fs::symlink_metadata(&foreign).unwrap().ino();
+        let hook = ReplacePublishedDirectoryHook {
+            target: target.clone(),
+            foreign,
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(fs::symlink_metadata(&target).unwrap().ino(), foreign_inode);
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+    }
+
+    struct ReplacePublishedSymlinkHook {
+        target: PathBuf,
+        foreign: PathBuf,
+    }
+
+    impl ExecutionHook for ReplacePublishedSymlinkHook {
+        fn after_symlink_published_before_validation(
+            &self,
+            _relative: &[OsString],
+        ) -> Result<(), Failure> {
+            fs::remove_file(&self.target).unwrap();
+            fs::rename(&self.foreign, &self.target).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clone_does_not_adopt_foreign_symlink_before_validation() {
+        let (temp, request, plan, adapter) = fixture("unregistered-foreign-symlink-");
+        let source = temp.path().join("source/link");
+        std::os::unix::fs::symlink("../outside", &source).unwrap();
+        let target = temp.path().join("target/link");
+        let foreign = temp.path().join("foreign-link");
+        std::os::unix::fs::symlink("../outside", &foreign).unwrap();
+        let foreign_inode = fs::symlink_metadata(&foreign).unwrap().ino();
+        let hook = ReplacePublishedSymlinkHook {
+            target: target.clone(),
+            foreign,
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(fs::symlink_metadata(&target).unwrap().ino(), foreign_inode);
+        assert_eq!(fs::read_link(&target).unwrap(), PathBuf::from("../outside"));
+    }
+
+    struct ReplacePublishedCloneWithForeignFileHook {
+        target: PathBuf,
+        foreign: PathBuf,
+    }
+
+    impl ExecutionHook for ReplacePublishedCloneWithForeignFileHook {
+        fn after_clone_published_before_validation(
+            &self,
+            _relative: &[OsString],
+        ) -> Result<(), Failure> {
+            fs::remove_file(&self.target).unwrap();
+            fs::rename(&self.foreign, &self.target).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clone_does_not_confirm_cow_for_matching_foreign_file_before_validation() {
+        let (temp, request, plan, adapter) = fixture("unregistered-foreign-clone-");
+        let source = temp.path().join("source/file.txt");
+        let target = temp.path().join("target/file.txt");
+        let foreign = temp.path().join("foreign-file.txt");
+        fs::copy(&source, &foreign).unwrap();
+        let source_mtime = fs::metadata(&source).unwrap().modified().unwrap();
+        fs::File::open(&foreign)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(source_mtime))
+            .unwrap();
+        let foreign_inode = fs::symlink_metadata(&foreign).unwrap().ino();
+        let hook = ReplacePublishedCloneWithForeignFileHook {
+            target: target.clone(),
+            foreign,
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(fs::symlink_metadata(&target).unwrap().ino(), foreign_inode);
+        assert_eq!(fs::read(&target).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+    }
+
+    #[test]
+    fn staging_name_collision_retries_but_other_creation_errors_do_not() {
+        let (_temp, request, _, _) = fixture("stage-create-errors-");
+        let staging = open_absolute_directory(request.staging()).unwrap();
+        let target = open_absolute_directory(request.target()).unwrap();
+        let name = CString::new("published-link").unwrap();
+        let mut context = ExecutionContext {
+            created: Vec::new(),
+            clone_calls: 0,
+            backend: Backend::ApfsClone,
+        };
+        let calls = Cell::new(0);
+        stage_and_publish(
+            &staging,
+            &target,
+            &name,
+            &[OsString::from("published-link")],
+            RawFileKind::SymbolicLink,
+            &mut context,
+            |parent, candidate| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Err(io::Error::from_raw_os_error(libc::EEXIST))
+                } else {
+                    create_symlink_at(c"../outside", parent, candidate)
+                }
+            },
+            Failure::io,
+            "create staged test symlink",
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(context.created.len(), 1);
+        assert!(read_directory(&staging).unwrap().is_empty());
+
+        calls.set(0);
+        let error = stage_and_publish(
+            &staging,
+            &target,
+            &CString::new("never-published").unwrap(),
+            &[OsString::from("never-published")],
+            RawFileKind::SymbolicLink,
+            &mut context,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            },
+            Failure::io,
+            "reject staged test symlink",
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, MaterializationFailureKind::Filesystem);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(context.created.len(), 1);
+        assert!(read_directory(&staging).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejected_staged_publication_cleans_only_its_own_directory() {
+        let (temp, request, _, _) = fixture("stage-target-collision-");
+        let staging = open_absolute_directory(request.staging()).unwrap();
+        let target = open_absolute_directory(request.target()).unwrap();
+        let occupied = temp.path().join("target/occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("sentinel"), b"foreign data").unwrap();
+        let occupied_inode = fs::symlink_metadata(&occupied).unwrap().ino();
+        let mut context = ExecutionContext {
+            created: Vec::new(),
+            clone_calls: 0,
+            backend: Backend::ApfsClone,
+        };
+
+        let error = stage_and_publish(
+            &staging,
+            &target,
+            &CString::new("occupied").unwrap(),
+            &[OsString::from("occupied")],
+            RawFileKind::Directory,
+            &mut context,
+            |parent, candidate| create_directory_at(parent, candidate, 0o700),
+            Failure::io,
+            "create staged test directory",
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, MaterializationFailureKind::TargetChanged);
+        assert!(context.created.is_empty());
+        assert!(read_directory(&staging).unwrap().is_empty());
+        assert_eq!(
+            fs::symlink_metadata(&occupied).unwrap().ino(),
+            occupied_inode
+        );
+        assert_eq!(
+            fs::read(occupied.join("sentinel")).unwrap(),
+            b"foreign data"
+        );
+    }
+
     struct ChangeSourceThenReportCloneUnavailableHook {
         source_file: PathBuf,
         fired: Cell<bool>,
@@ -2511,6 +2873,7 @@ mod tests {
         std::os::unix::fs::symlink("original", temp.path().join("source/link")).unwrap();
         let source = open_absolute_directory(request.source()).unwrap();
         let target = open_absolute_directory(request.target()).unwrap();
+        let staging = open_absolute_directory(request.staging()).unwrap();
         let mut snapshot = snapshot_tree(&source).unwrap();
         snapshot
             .entries
@@ -2526,6 +2889,7 @@ mod tests {
         let result = materialize_directory(
             &source,
             &target,
+            &staging,
             &[],
             snapshot.root.device,
             &snapshot.entries,
@@ -2804,14 +3168,14 @@ mod tests {
         }
     }
 
-    struct ReplaceUnregisteredCloneWithSourceHardLinkHook {
+    struct ReplacePublishedCloneWithSourceHardLinkHook {
         source_file: PathBuf,
         target_file: PathBuf,
         fired: Cell<bool>,
     }
 
-    impl ExecutionHook for ReplaceUnregisteredCloneWithSourceHardLinkHook {
-        fn after_file_cloned_before_registration(
+    impl ExecutionHook for ReplacePublishedCloneWithSourceHardLinkHook {
+        fn after_clone_published_before_validation(
             &self,
             _relative: &[OsString],
         ) -> Result<(), Failure> {
@@ -2824,11 +3188,11 @@ mod tests {
     }
 
     #[test]
-    fn source_hard_link_before_first_identity_registration_is_rejected_and_preserved() {
+    fn source_hard_link_after_clone_publication_is_rejected_and_preserved() {
         let (temp, request, plan, adapter) = fixture("unregistered-source-hard-link-");
         let source_file = temp.path().join("source/file.txt");
         let target_file = temp.path().join("target/file.txt");
-        let hook = ReplaceUnregisteredCloneWithSourceHardLinkHook {
+        let hook = ReplacePublishedCloneWithSourceHardLinkHook {
             source_file: source_file.clone(),
             target_file: target_file.clone(),
             fired: Cell::new(false),

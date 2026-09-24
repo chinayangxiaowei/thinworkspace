@@ -195,8 +195,12 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS d
 - 所有安全关键遍历使用 dirfd-relative/no-follow 方式；
 - 目录逐层创建，不通过 shell、glob 或未验证路径操作；
 - 使用 `fstatat(..., AT_SYMLINK_NOFOLLOW)` 区分普通文件、目录和符号链接；
-- 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与源清单证据；持有源文件 FD，调用 `fclonefileat(source_fd, target_dirfd, target_name, CLONE_NOFOLLOW_ANY)`，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
-- symlink 使用 `readlinkat/symlinkat` 复制 link text，不跟随目标。link text 可以指向树外，但平台不得在物化和删除中解引用它。
+- 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与源清单证据；持有源文件 FD，调用 `fclonefileat(source_fd, staging_dirfd, staged_name, CLONE_NOFOLLOW_ANY)`，再按下述身份固定与发布规则写入 target，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
+- symlink 使用 `readlinkat/symlinkat` 在 staging 复制 link text 后发布，不跟随目标。link text 可以指向树外，但平台不得在物化和删除中解引用它。
+
+对于 `mkdirat`、`symlinkat`、`fclonefileat` 这类成功时不返回新对象 FD 的调用，不得在公开 target 名称上创建后再从该名称首次认领身份。Phase 1 先在实例私有 staging 中以独占名称创建并固定类型/身份，再用同卷、不覆盖目标的 rename 发布；发布前登记已知身份，发布后核对 target 名称与该身份。目标名称在发布后被替换时必须失败，不写入、接管或回滚删除替换对象。创建失败或发布失败须清理可证明归属的 staging 项；清理无法确认时报告失败，不触发 Full Copy 降级。普通 Full Copy 文件可直接以独占新建并持有的 FD 固定身份。
+
+上述 staging 身份固定依赖实例的私有 data root 和 staging 目录在操作期间没有外部写者；它不把 `0700` 或不可预测名称宣称为对同 UID 恶意进程的隔离。工作区不是 Sandbox，同 UID 主动篡改实例内部 staging 不在 Phase 1 保证范围；公开 target 名称的并发替换仍须按身份失败。进程中断可能留下未发布 staging 项，不自动续做或以未知身份清理。
 
 只有至少一个普通文件实际执行克隆、每个应克隆普通文件的真实 `fclonefileat` 调用都成功且最终树校验通过，Receipt 才能记录 `cow=confirmed`。空树或仅含目录/链接的树可以创建成功，但 CoW 记为 `not-used`，不能以空集合证明块共享。
 

@@ -222,6 +222,18 @@ P1-07 定向补跑启动记录（2026-09-24 03:40 UTC）：当前代码差异 SH
 
 上述 copy buffer 的“等价”仅相对于生产 `NoopHook` 和首版公开正确性契约；它确实改变内部测试 hook 的回调次数与故障注入时点，也可能改变吞吐，不宣称内部执行轨迹或性能等价。
 
+P1-07 本地审核修正（2026-09-24）：规定 Reviewer 对精确实现提交 `d170b205fa628aa9ac1c266dd370d2efc5d886b9` 的结论为 Changes requested（Critical 0、High 1），指出目录、符号链接及 APFS clone 在创建后首次从公开 target 名称登记身份，可能接管内容相同的替换对象。前次四项 finding 已闭合，12 项存活变异的契约等价证明获接受；本项 High 未关闭前不得 Done 或合并。主 Agent 决定让无创建 FD 的对象先在实例私有 staging 固定身份，再以 no-replace rename 发布，发布前登记已知身份、发布后复核 target；明示 staging 无外部写者的信任前提，不承诺对恶意同 UID 内部篡改隔离。目录与链接的替换反例已先 RED 后 GREEN；匹配内容的外来文件、no-replace 和真实 CoW 均补自动证据。该修正同时覆盖 P1-06 共享路径，不重开 Git 或持久化范围。
+
+P1-07 竞态修正定向变异启动记录（2026-09-24 04:05 UTC）：代码差异相对 `d170b205` 的 SHA-256 为 `d23a1abf64bea042656bc170a66af744f77a8ca513bcf9f395f4ef37aa544765`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，验证包为 `thinws-adapter-macos`，输出为 `target/p1-07-staged-publication-mutants/mutants.out`。只选择共享物化遍历、staging 发布/清理与对应 FFI 的 23 个生产变异；前次同机 78 个完整变异耗时约 2 分 07 秒，考虑本次构建与正常波动，预计 04:09 UTC 首次主动查看；之前不轮询、不修改冻结代码。
+
+该批实际 44 秒完成，23 个变异为 15 caught、1 unviable、7 missed、0 timeout，退出码 2，不作为通过结论；按预计时间检查时已结束，未提前轮询。`outcomes.json`/`mutants.json` SHA-256 分别为 `bfba4c8fb111ded799b5c8e07ba925d788f5b77af58ddef89f5d5206c1cfdb69`、`a762b7045074971d54c73d71db4b59f838c124209370ba777e2740b612f6cda7`。存活项集中于 staging 名称冲突与非冲突错误、发布目标已存在后的清理和错误分类；已补直接回归。来源身份排除守卫只处理旧“从公开 target 首次取身份”的竞态，staging 独占创建加预先身份绑定后已成为不可达防御分支，已删除并保留替换为源硬链接的真实回归。
+
+P1-07 竞态修正定向补跑启动记录（2026-09-24 04:14 UTC）：代码差异相对 `d170b205` 的 SHA-256 为 `b366916663333d072ee25ca26b395e273cb1eabcfaeb95c3c7cd09d679c9116e`；执行负责人、平台、工具、配置、并发与验证包同上，输出为 `target/p1-07-staged-publication-followup/mutants.out`。仅重新枚举受补测或删减影响的 staging 发布/清理和 FFI，共 9 个生产变异；按上一批 23 个 44 秒，留构建波动余量，预计 04:16 UTC 首次主动查看；此前不轮询或修改冻结代码。
+
+补跑实际 38 秒完成，9 个变异为 8 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `a6e90469b30d24514e4d79bcc6f7af15df3f61f79e11576c7f43e84c1fca992f`、`126d92baa3b3916917b308d1b90cc895cee9cba247be2d78bce04486111bc317`。第一批已捕获且本轮未变语义的物化遍历变异按同一候选证据复用；本轮更改的 staging 发布/清理范围无存活变异。此后仅调整测试 hook 名称、补 Full Copy staging 无残留断言及修正信任边界注释，生产行为与变异选择不变，不重跑相同变异。P1-07 仍需精确提交审核与合并，不能因变异绿单独标 Done。
+
+本地最终候选普通门禁（2026-09-24，macOS arm64、Rust 1.97.1）：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --release --all-targets`、`cargo doc --workspace --no-deps`、29 项工具测试、`cargo deny check`、`cargo audit --no-fetch` 均退出 0；deny 仅有既有未命中 allowance/exception 警告，离线审计使用本地 1261 条 advisory。`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data` 下，真实跨卷 Probe 拒绝及 store 跨卷布局用例在 Debug/Release 均通过；真实同卷 APFS clone/Full Copy 与 staging 无残留由全 workspace 集成测试覆盖。新增目录、链接、匹配内容外来文件的目标替换故障注入，以及失败发布清理/no-replace 测试均通过。未执行真实子挂载创建（本机权限边界），未新增能到达本次 staging 执行代码的 fuzz harness；既有纯路径 fuzz 证据仅覆盖未变更的解析边界，不能代替本次文件系统竞态测试。线上 CI/PR/push 均不属于当前本地交付。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

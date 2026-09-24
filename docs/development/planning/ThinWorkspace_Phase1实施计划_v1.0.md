@@ -185,7 +185,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Done |
-| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Backlog |
+| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | In Progress |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
 
@@ -205,6 +205,10 @@ P1-06 完成记录（2026-09-24）：
 - `thinws_materialization_path` 使用 `cargo-fuzz 0.12.0`、`nightly-2026-08-14` 和 60 秒预算完成 17,373,911 次执行，退出码 0，无 crash/hang；运行生成的临时 corpus 已清理，仓库保留原有 3 个种子且未产生 artifact。
 - GPT-6 Astra（`gpt-6-astra` / `xhigh`）对完整候选 `24ad6fdb29ddcb3791d07bd94447a6b0d4b1d050` 首次终审发现 clone 后首次身份登记窗口的一项 High，任务退回并以 `0882a64` 的精确 RED/GREEN 修正；同一规定模型随后审核完整范围 `50617e9cdf1eaf9f8ca3f2154d7cd4b12fb8a93e..078a24b412b9bc0f59a20f89df5e5cc5e3eca2a9`，结论 Approve，Critical/High/Normal/Low 均为 0。
 - 未执行线上 CI、线上 PR 或 push，符合当前本地流程。P1-06 Done 仅表示 APFS 物化后端完成，不表示 `workspace create` 可用、P1.c 小阶段或 Phase 1 已放行；下一项技术依赖仍是 P1-07。
+
+当前领取：P1-07 由主 Agent 于 2026-09-24 领取，基线 `38a2500`，任务分支 `task/p1-07-full-copy-materializer`，继续使用唯一持久 checkout `/Volumes/data/code/worktree`。基线 fmt 与 debug 全 workspace 测试通过。风险 R4，主要写入区仍为 `thinws-core`、`thinws-ports` 和 `thinws-adapter-macos`；P0 Full Copy 与 fallback 实验只作为算法和测试输入，不成为生产依赖。范围内是 Full Copy 候选证据、Core 的受限预检/运行时降级计划、fallback 原因与失败尝试证据、`FullCopyMaterializer`、真实字节复制、共同清单/保真和身份约束回滚；范围外是 P1-09 Application/SQLite/Ready 编排、公开 `workspace create`、跨卷复制、删除/GC、Git 和后续平台。
+
+验收断言：Full Copy 候选不因 clone 能力缺失而被误判不可用，但 Phase 1 计划仍要求 source、target、staging、trash 位于同一已知 APFS Volume；默认 Deny、clone unknown、路径/权限/卷异常、`EXDEV`、`ENOSPC`、普通 I/O、源/目标变化或未确认回滚均不得降级。只有 clone 预检明确不支持且策略为 `AllowFullCopyOnCowUnsupported`，或运行时 `CowUnavailable` 且前次目标已证明未修改/恢复基线、重新 Probe 仍满足布局时，才产生 Full Copy 有效计划；预检降级没有失败尝试，运行时降级保留前次失败及回滚证据。真实同卷 APFS 上，非 Git、原样 `.git`、ignored/未跟踪内容、硬链接目录项、普通文件/目录/链接、权限和 mtime 满足与 P1-06 相同的保真范围；普通文件以独立字节副本交付，Receipt 为 actual/effective `full-copy`、`cow=not-used`、clone count 0，并绑定相同源/目标 manifest。部分写入、注册失败、路径替换和源变化返回 partial receipt，按登记身份逆序回滚且不接管替换对象。P1-07 不发布 Ready、不写产品 SQLite、不增加或改变公开 CLI。
 
 ### 4.4 P1.d 查询与路径交付
 

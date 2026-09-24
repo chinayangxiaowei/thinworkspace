@@ -373,7 +373,7 @@ fn probe_digest(
     candidate: &CandidateEvidence,
 ) -> ProbeEvidenceDigest {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"thinws-materialization-probe-v1\0");
+    hasher.update(b"thinws-materialization-probe-v2\0");
     for (role, report) in [
         (b"source".as_slice(), source),
         (b"target".as_slice(), target),
@@ -383,7 +383,11 @@ fn probe_digest(
         update_bytes(&mut hasher, role);
         update_path_report(&mut hasher, report);
     }
-    hasher.update(&[enum_byte(candidate.state())]);
+    hasher.update(&[
+        materializer_kind_byte(candidate.kind()),
+        enum_byte(candidate.state()),
+    ]);
+    update_count(&mut hasher, candidate.reasons().len());
     for reason in candidate.reasons() {
         update_bytes(&mut hasher, reason.as_bytes());
     }
@@ -397,9 +401,11 @@ fn update_path_report(hasher: &mut blake3::Hasher, report: &PathCapabilityReport
         PathResolution::MissingTarget => 2,
     }]);
     update_bytes(hasher, report.nearest_existing_ancestor().as_bytes());
+    update_count(hasher, report.missing_components().len());
     for component in report.missing_components() {
         update_bytes(hasher, component);
     }
+    update_count(hasher, report.ancestry().len());
     for entry in report.ancestry() {
         update_bytes(hasher, entry.path().as_bytes());
         hasher.update(&entry.identity().device().to_le_bytes());
@@ -425,14 +431,15 @@ fn update_path_report(hasher: &mut blake3::Hasher, report: &PathCapabilityReport
                     .unwrap_or_default()
                     .as_bytes(),
             );
-            hasher.update(
-                &report
-                    .filesystem()
-                    .volume_id()
-                    .unknown_errno()
-                    .unwrap_or_default()
-                    .to_le_bytes(),
-            );
+            match report.filesystem().volume_id().unknown_errno() {
+                Some(errno) => {
+                    hasher.update(&[1]);
+                    hasher.update(&errno.to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
         }
     }
     hasher.update(&report.mount().raw_flags().to_le_bytes());
@@ -445,8 +452,19 @@ fn update_path_report(hasher: &mut blake3::Hasher, report: &PathCapabilityReport
 }
 
 fn update_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    update_count(hasher, bytes.len());
     hasher.update(bytes);
+}
+
+fn update_count(hasher: &mut blake3::Hasher, count: usize) {
+    hasher.update(&(count as u64).to_le_bytes());
+}
+
+const fn materializer_kind_byte(kind: MaterializerKind) -> u8 {
+    match kind {
+        MaterializerKind::ApfsFileClone => 1,
+        MaterializerKind::FullCopy => 2,
+    }
 }
 
 const fn enum_byte(state: SupportState) -> u8 {
@@ -502,4 +520,130 @@ fn probe_invalid(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> PortError {
     PortError::new(PortErrorKind::InvalidLayout, operation).with_source(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use thinws_core::VolumeId;
+
+    use super::*;
+
+    fn absolute(value: &str) -> AbsolutePath {
+        AbsolutePath::try_from_bytes(value.as_bytes().to_vec()).unwrap()
+    }
+
+    fn report(
+        path: &str,
+        volume_id: Evidence<VolumeId>,
+        clone_support: SupportState,
+    ) -> PathCapabilityReport {
+        let requested = absolute(path);
+        let inode = u64::from(*path.as_bytes().last().unwrap());
+        PathCapabilityReport::new(
+            requested.clone(),
+            PathResolution::ExistingDirectory,
+            requested.clone(),
+            Vec::new(),
+            vec![DirectoryIdentityEvidence::new(
+                requested,
+                FileIdentity::new(1, inode),
+            )],
+            FileSystemIdentity::new("apfs", [7, 8], volume_id),
+            MountEvidence::new(0, true),
+            SupportState::Supported,
+            SupportState::Supported,
+            clone_support,
+        )
+        .unwrap()
+    }
+
+    fn digest_for(
+        report: &PathCapabilityReport,
+        candidate: &CandidateEvidence,
+    ) -> ProbeEvidenceDigest {
+        probe_digest(report, report, report, report, candidate)
+    }
+
+    #[test]
+    fn probe_digest_binds_the_candidate_backend_kind() {
+        let report = report(
+            "/Volumes/data/source",
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap()),
+            SupportState::Supported,
+        );
+        let apfs = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            Vec::new(),
+        );
+        let full_copy = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        );
+
+        assert_ne!(digest_for(&report, &apfs), digest_for(&report, &full_copy));
+    }
+
+    #[test]
+    fn probe_digest_distinguishes_absent_errno_from_errno_zero() {
+        let without_errno = report(
+            "/Volumes/data/source",
+            Evidence::Unknown {
+                reason: "missing volume identity".to_owned(),
+                errno: None,
+            },
+            SupportState::Unknown,
+        );
+        let errno_zero = report(
+            "/Volumes/data/source",
+            Evidence::Unknown {
+                reason: "missing volume identity".to_owned(),
+                errno: Some(0),
+            },
+            SupportState::Unknown,
+        );
+        let candidate = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Unknown,
+            vec!["volume_unknown".to_owned()],
+        );
+
+        assert_ne!(
+            digest_for(&without_errno, &candidate),
+            digest_for(&errno_zero, &candidate)
+        );
+    }
+
+    #[test]
+    fn combined_clone_support_preserves_an_unknown_path_fact() {
+        let volume = VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap();
+        let source = report(
+            "/Volumes/data/source",
+            Evidence::Known(volume),
+            SupportState::Unknown,
+        );
+        let target = report(
+            "/Volumes/data/target",
+            Evidence::Known(volume),
+            SupportState::Supported,
+        );
+        let staging = report(
+            "/Volumes/data/staging",
+            Evidence::Known(volume),
+            SupportState::Supported,
+        );
+        let trash = report(
+            "/Volumes/data/trash",
+            Evidence::Known(volume),
+            SupportState::Supported,
+        );
+
+        let (state, reasons) = combined_clone_support(&source, &target, &staging, &trash);
+
+        assert_eq!(state, SupportState::Unknown);
+        assert_eq!(reasons, ["clone_capability_unknown"]);
+    }
 }

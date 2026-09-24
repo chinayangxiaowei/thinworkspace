@@ -62,30 +62,8 @@ impl ApfsCloneMaterializer {
         hook: &dyn ExecutionHook,
     ) -> Result<MaterializationReceipt, MaterializationFailure> {
         let started = Instant::now();
-        match self.materialize_inner(request, plan, hook) {
-            Ok(success) => MaterializationReceipt::successful_apfs_clone(
-                plan,
-                success.regular_files,
-                success.clone_calls,
-                success.created,
-                success.source_digest,
-                success.target_digest,
-                elapsed_millis(started),
-                success.logical_bytes,
-                Some(success.physical_bytes),
-            )
-            .map_err(|error| {
-                failure_without_writes(
-                    plan,
-                    started,
-                    Failure::with_source(
-                        MaterializationFailureKind::ManifestMismatch,
-                        PortErrorKind::InvalidData,
-                        "construct APFS materialization receipt",
-                        error,
-                    ),
-                )
-            }),
+        match self.materialize_inner(request, plan, hook, started) {
+            Ok(receipt) => Ok(receipt),
             Err(mut failed) => {
                 let rollback = match (
                     failed.target.as_ref(),
@@ -153,7 +131,8 @@ impl ApfsCloneMaterializer {
         request: &MaterializeRequest,
         plan: &MaterializationPlan,
         hook: &dyn ExecutionHook,
-    ) -> Result<Success, Box<AttemptFailure>> {
+        started: Instant,
+    ) -> Result<MaterializationReceipt, Box<AttemptFailure>> {
         validate_request_plan(request, plan).map_err(AttemptFailure::before_write)?;
         let fresh = self
             .probe
@@ -380,19 +359,42 @@ impl ApfsCloneMaterializer {
             ));
         }
 
-        Ok(Success {
-            regular_files: snapshot.manifest.regular_files,
-            clone_calls: context.clone_calls,
-            created: context
+        let receipt = MaterializationReceipt::successful_apfs_clone(
+            plan,
+            snapshot.manifest.regular_files,
+            context.clone_calls,
+            context
                 .created
-                .into_iter()
-                .map(|entry| entry.evidence())
+                .iter()
+                .map(TrackedCreated::evidence)
                 .collect(),
-            source_digest: snapshot.manifest.digest(),
-            target_digest: target_snapshot.manifest.digest(),
-            logical_bytes: snapshot.manifest.logical_bytes,
-            physical_bytes: target_snapshot.manifest.physical_bytes,
-        })
+            snapshot.manifest.digest(),
+            target_snapshot.manifest.digest(),
+            elapsed_millis(started),
+            snapshot.manifest.logical_bytes,
+            Some(target_snapshot.manifest.physical_bytes),
+        );
+        match receipt {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => Err(AttemptFailure::after_write(
+                Failure::with_source(
+                    MaterializationFailureKind::ManifestMismatch,
+                    PortErrorKind::InvalidData,
+                    "construct APFS materialization receipt",
+                    error,
+                ),
+                FailedExecution {
+                    source: &source,
+                    target,
+                    trash,
+                    target_baseline,
+                    context,
+                    target_modified: true,
+                    source_snapshot: &snapshot,
+                    path_report: &fresh,
+                },
+            )),
+        }
     }
 }
 
@@ -1345,16 +1347,6 @@ fn open_rollback_parent(
     Ok((current, component_name_io(name)?))
 }
 
-struct Success {
-    regular_files: u64,
-    clone_calls: u64,
-    created: Vec<CreatedObjectEvidence>,
-    source_digest: TreeDigest,
-    target_digest: TreeDigest,
-    logical_bytes: u64,
-    physical_bytes: u64,
-}
-
 struct AttemptFailure {
     error: Failure,
     target: Option<OwnedFd>,
@@ -1500,7 +1492,7 @@ impl Failure {
     fn path_open(operation: &'static str, error: io::Error) -> Self {
         if matches!(
             error.raw_os_error(),
-            Some(libc::ELOOP) | Some(libc::ENOTDIR)
+            Some(libc::ENOENT) | Some(libc::ESTALE) | Some(libc::ELOOP) | Some(libc::ENOTDIR)
         ) {
             Self::with_source(
                 MaterializationFailureKind::PlanStale,
@@ -1547,26 +1539,6 @@ impl Failure {
         }
         self
     }
-}
-
-fn failure_without_writes(
-    plan: &MaterializationPlan,
-    started: Instant,
-    error: Failure,
-) -> MaterializationFailure {
-    let kind = error.kind;
-    MaterializationFailure::new(
-        error.into_port_error(),
-        MaterializationReceipt::failed_apfs_clone(
-            plan,
-            kind,
-            Vec::new(),
-            false,
-            RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
-            MaterializationAttemptEvidence::default(),
-            elapsed_millis(started),
-        ),
-    )
 }
 
 fn ensure_directory(metadata: RawNodeMetadata, operation: &'static str) -> Result<(), Failure> {
@@ -1821,6 +1793,42 @@ mod tests {
         assert_eq!(failure.receipt().outcome(), MaterializationOutcome::Failed);
         assert!(fs::read_dir(target).unwrap().next().is_none());
         assert!(fs::read_dir(displaced).unwrap().next().is_none());
+    }
+
+    struct RemoveSourceAfterProbeHook {
+        source: PathBuf,
+    }
+
+    impl ExecutionHook for RemoveSourceAfterProbeHook {
+        fn after_probe(&self) -> Result<(), Failure> {
+            fs::remove_dir_all(&self.source).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn source_disappearance_after_fresh_probe_is_plan_stale_without_writes() {
+        let (temp, request, plan, adapter) = fixture("post-probe-source-disappearance-");
+        let hook = RemoveSourceAfterProbeHook {
+            source: temp.path().join("source"),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::PlanStale)
+        );
+        assert_eq!(failure.receipt().outcome(), MaterializationOutcome::Failed);
+        assert!(failure.receipt().created().is_empty());
+        assert!(
+            fs::read_dir(temp.path().join("target"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     struct ReplaceCommonParentKeepLeafIdentitiesHook {
@@ -2231,24 +2239,41 @@ mod tests {
 
     #[test]
     fn port_error_chain_preserves_original_errno_values() {
-        for (failure, expected_errno) in [
+        for (failure, expected_errno, expected_kind, expected_port_kind) in [
             (
-                Failure::io("injected EIO", io::Error::from_raw_os_error(libc::EIO)),
+                Failure::clone_io("injected EIO", io::Error::from_raw_os_error(libc::EIO)),
                 libc::EIO,
+                MaterializationFailureKind::Filesystem,
+                PortErrorKind::Io,
             ),
             (
-                Failure::io(
+                Failure::clone_io(
                     "injected ENOSPC",
                     io::Error::from_raw_os_error(libc::ENOSPC),
                 ),
                 libc::ENOSPC,
+                MaterializationFailureKind::NoSpace,
+                PortErrorKind::Io,
             ),
             (
                 Failure::clone_io("injected EXDEV", io::Error::from_raw_os_error(libc::EXDEV)),
                 libc::EXDEV,
+                MaterializationFailureKind::PlanStale,
+                PortErrorKind::InvalidLayout,
+            ),
+            (
+                Failure::clone_io(
+                    "injected ENOTSUP",
+                    io::Error::from_raw_os_error(libc::ENOTSUP),
+                ),
+                libc::ENOTSUP,
+                MaterializationFailureKind::CowUnavailable,
+                PortErrorKind::CapabilityUnavailable,
             ),
         ] {
+            assert_eq!(failure.kind, expected_kind);
             let error = failure.into_port_error();
+            assert_eq!(error.kind(), expected_port_kind);
             let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
             assert_eq!(source.raw_os_error(), Some(expected_errno));
         }

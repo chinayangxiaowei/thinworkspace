@@ -158,6 +158,49 @@ fn source_and_target_containment_disables_the_clone_candidate() {
 }
 
 #[test]
+fn every_pair_of_materialization_roles_rejects_overlap() {
+    for (left, right, expected_reason) in [
+        (0, 1, "source_target_overlap"),
+        (0, 2, "source_staging_overlap"),
+        (0, 3, "source_trash_overlap"),
+        (1, 2, "target_staging_overlap"),
+        (1, 3, "target_trash_overlap"),
+        (2, 3, "staging_trash_overlap"),
+    ] {
+        let temp = controlled_root("pairwise-overlap-");
+        let mut paths = [
+            temp.path().join("source"),
+            temp.path().join("target"),
+            temp.path().join("staging"),
+            temp.path().join("trash"),
+        ];
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        paths[right] = paths[left].clone();
+
+        let report = probe()
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::new(
+                absolute(&paths[0]),
+                absolute(&paths[1]),
+                absolute(&paths[2]),
+                absolute(&paths[3]),
+            ))
+            .unwrap();
+
+        assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+        assert!(
+            report
+                .apfs_clone()
+                .reasons()
+                .iter()
+                .any(|reason| reason == expected_reason),
+            "missing overlap reason {expected_reason}"
+        );
+    }
+}
+
+#[test]
 fn configured_real_cross_volume_report_is_unsupported_not_same_volume() {
     let Some(cross_root) = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT") else {
         eprintln!("skipping: THINWS_P1_CROSS_VOLUME_ROOT is not set");
@@ -194,4 +237,8 @@ fn configured_real_cross_volume_report_is_unsupported_not_same_volume() {
         report.target_root().filesystem().volume_id().known()
     );
     assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+    assert_eq!(
+        MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny),
+        Err(MaterializationPlanError::DifferentVolume)
+    );
 }

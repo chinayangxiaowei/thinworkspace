@@ -672,9 +672,6 @@ impl MaterializationPlan {
         if report.apfs_clone.kind() != MaterializerKind::ApfsFileClone {
             return Err(MaterializationPlanError::WrongCandidate);
         }
-        if report.apfs_clone.state() == SupportState::Unsupported {
-            return Err(MaterializationPlanError::CandidateUnsupported);
-        }
         let source_volume_id = volume_id(report.source())?;
         let target_volume_id = volume_id(report.target_root())?;
         let staging_volume_id = volume_id(report.staging())?;
@@ -684,6 +681,9 @@ impl MaterializationPlan {
             .any(|volume_id| volume_id != source_volume_id)
         {
             return Err(MaterializationPlanError::DifferentVolume);
+        }
+        if report.apfs_clone.state() == SupportState::Unsupported {
+            return Err(MaterializationPlanError::CandidateUnsupported);
         }
         Ok(Self {
             requested_mode: MaterializationMode::CowClone,
@@ -985,6 +985,9 @@ pub enum MaterializationReceiptError {
     /// Successful clone counts do not cover every ordinary file.
     #[error("successful APFS receipt requires one successful clone per ordinary file")]
     CloneCountMismatch,
+    /// A successful receipt must bind identical promised source and target trees.
+    #[error("successful APFS receipt requires matching source and target manifests")]
+    ManifestMismatch,
 }
 
 /// Final or partial evidence emitted by one materialization attempt.
@@ -1058,6 +1061,9 @@ impl MaterializationReceipt {
     ) -> Result<Self, MaterializationReceiptError> {
         if regular_file_count != clone_calls_succeeded {
             return Err(MaterializationReceiptError::CloneCountMismatch);
+        }
+        if source_manifest_digest != target_manifest_digest {
+            return Err(MaterializationReceiptError::ManifestMismatch);
         }
         let cow_evidence = if clone_calls_succeeded == 0 {
             CowEvidence::NotUsed

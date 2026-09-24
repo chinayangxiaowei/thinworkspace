@@ -81,19 +81,26 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
     for directory in [&source, &target, &staging, &trash] {
         fs::create_dir(directory).unwrap();
     }
+    let outside_sentinel = temp.path().join("outside-sentinel");
+    fs::write(&outside_sentinel, b"outside stays unchanged").unwrap();
     fs::create_dir(source.join(".git")).unwrap();
     fs::create_dir(source.join("nested")).unwrap();
     fs::write(source.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+    fs::write(source.join(".gitignore"), b"*.ignored\n").unwrap();
+    fs::write(source.join("cache.ignored"), b"ignored bytes").unwrap();
+    fs::write(source.join("untracked.txt"), b"untracked bytes").unwrap();
     fs::write(source.join("nested/build.cache"), b"cached bytes").unwrap();
     fs::write(source.join("plain.txt"), b"original").unwrap();
     fs::hard_link(source.join("plain.txt"), source.join("hardlink-alias.txt")).unwrap();
     fs::write(source.join("name with spaces-雪.txt"), b"raw name").unwrap();
     fs::set_permissions(source.join("plain.txt"), fs::Permissions::from_mode(0o640)).unwrap();
     symlink(
-        OsStr::from_bytes(b"../plain.txt"),
+        OsStr::from_bytes(b"../../outside-sentinel"),
         source.join("nested/link"),
     )
     .unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o550)).unwrap();
     set_fixed_mtime(&source.join("plain.txt"), 1_700_000_001, 123_456_789);
     set_fixed_mtime(&source.join("nested"), 1_700_000_002, 234_567_890);
     set_fixed_mtime(&source, 1_700_000_003, 345_678_901);
@@ -106,8 +113,8 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
 
     assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
     assert_eq!(receipt.cow_evidence(), CowEvidence::Confirmed);
-    assert_eq!(receipt.regular_file_count(), Some(5));
-    assert_eq!(receipt.clone_calls_succeeded(), 5);
+    assert_eq!(receipt.regular_file_count(), Some(8));
+    assert_eq!(receipt.clone_calls_succeeded(), 8);
     assert_eq!(
         receipt.source_manifest_digest(),
         receipt.target_manifest_digest()
@@ -121,7 +128,19 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
             .unwrap()
             .as_os_str()
             .as_bytes(),
-        b"../plain.txt"
+        b"../../outside-sentinel"
+    );
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+        0o555
+    );
+    assert_eq!(
+        fs::metadata(target.join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o550
     );
     assert_eq!(
         fs::metadata(target.join("plain.txt"))
@@ -147,9 +166,46 @@ fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
         fs::read(target.join("name with spaces-雪.txt")).unwrap(),
         b"raw name"
     );
+    assert_eq!(fs::read(target.join(".gitignore")).unwrap(), b"*.ignored\n");
+    assert_eq!(
+        fs::read(target.join("cache.ignored")).unwrap(),
+        b"ignored bytes"
+    );
+    assert_eq!(
+        fs::read(target.join("untracked.txt")).unwrap(),
+        b"untracked bytes"
+    );
+    assert_eq!(
+        fs::read(&outside_sentinel).unwrap(),
+        b"outside stays unchanged"
+    );
 
     fs::write(target.join("plain.txt"), b"target changed").unwrap();
     assert_eq!(fs::read(source.join("plain.txt")).unwrap(), b"original");
+    fs::write(source.join("plain.txt"), b"source changed").unwrap();
+    assert_eq!(
+        fs::read(target.join("plain.txt")).unwrap(),
+        b"target changed"
+    );
+
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(source.join("nested"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(&source).unwrap();
+    assert_eq!(
+        fs::read(target.join("plain.txt")).unwrap(),
+        b"target changed"
+    );
+    assert_eq!(
+        fs::read(target.join(".git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert_eq!(
+        fs::read(&outside_sentinel).unwrap(),
+        b"outside stays unchanged"
+    );
+
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(target.join("nested"), fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]
@@ -210,32 +266,37 @@ fn directory_and_symlink_only_tree_succeeds_with_cow_not_used() {
 }
 
 #[test]
-fn replacing_a_planned_root_is_detected_before_any_write() {
-    let temp = controlled_root("stale-plan-");
-    let source = temp.path().join("source");
-    let target = temp.path().join("target");
-    let staging = temp.path().join("staging");
-    let trash = temp.path().join("trash");
-    for directory in [&source, &target, &staging, &trash] {
-        fs::create_dir(directory).unwrap();
+fn replacing_each_planned_root_is_detected_before_any_write() {
+    for replaced_role in ["source", "target", "staging", "trash"] {
+        let temp = controlled_root("stale-plan-");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let staging = temp.path().join("staging");
+        let trash = temp.path().join("trash");
+        for directory in [&source, &target, &staging, &trash] {
+            fs::create_dir(directory).unwrap();
+        }
+        fs::write(source.join("source.txt"), b"source").unwrap();
+
+        let host = adapter();
+        let (request, plan) = request_and_plan(&host, &source, &target, &staging, &trash);
+        let replaced = temp.path().join(replaced_role);
+        let displaced = temp.path().join(format!("displaced-{replaced_role}"));
+        fs::rename(&replaced, &displaced).unwrap();
+        fs::create_dir(&replaced).unwrap();
+
+        let failure = ApfsCloneMaterializer::new(host)
+            .materialize(&request, &plan)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::PlanStale),
+            "role {replaced_role}"
+        );
+        assert!(failure.receipt().created().is_empty());
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
     }
-    fs::write(source.join("source.txt"), b"source").unwrap();
-
-    let host = adapter();
-    let (request, plan) = request_and_plan(&host, &source, &target, &staging, &trash);
-    fs::remove_dir(&target).unwrap();
-    fs::create_dir(&target).unwrap();
-
-    let failure = ApfsCloneMaterializer::new(host)
-        .materialize(&request, &plan)
-        .unwrap_err();
-
-    assert_eq!(
-        failure.receipt().failure_kind(),
-        Some(MaterializationFailureKind::PlanStale)
-    );
-    assert!(failure.receipt().created().is_empty());
-    assert!(fs::read_dir(target).unwrap().next().is_none());
 }
 
 #[test]

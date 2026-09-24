@@ -5,9 +5,9 @@ use thinws_core::{
     FallbackPolicy, FileIdentity, FileSystemIdentity, MaterializationAttemptEvidence,
     MaterializationFailureKind, MaterializationMode, MaterializationOutcome,
     MaterializationPathReport, MaterializationPlan, MaterializationPlanError,
-    MaterializationReceipt, MaterializerKind, MountEvidence, PathCapabilityReport, PathResolution,
-    ProbeEvidenceDigest, RelativePath, RollbackEvidence, RollbackStatus, SupportState, TreeDigest,
-    VolumeId,
+    MaterializationReceipt, MaterializationReceiptError, MaterializerKind, MountEvidence,
+    PathCapabilityReport, PathResolution, ProbeEvidenceDigest, RelativePath, RollbackEvidence,
+    RollbackStatus, SupportState, TreeDigest, VolumeId,
 };
 
 fn path(value: &str) -> AbsolutePath {
@@ -92,6 +92,13 @@ fn apfs_plan_requires_one_same_known_volume_and_keeps_the_probe_digest() {
         ),
         Err(MaterializationPlanError::CandidateUnsupported)
     );
+    assert_eq!(
+        MaterializationPlan::for_apfs_clone(
+            &combined(registered, other, SupportState::Unsupported),
+            FallbackPolicy::Deny,
+        ),
+        Err(MaterializationPlanError::DifferentVolume)
+    );
 
     let unknown = MaterializationPlan::for_apfs_clone(
         &combined(registered, registered, SupportState::Unknown),
@@ -149,6 +156,22 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
             None,
         )
         .is_err()
+    );
+
+    let mismatched_manifest = MaterializationReceipt::successful_apfs_clone(
+        &plan,
+        1,
+        1,
+        Vec::new(),
+        TreeDigest::new([3; 32]),
+        TreeDigest::new([4; 32]),
+        5,
+        12,
+        None,
+    );
+    assert_eq!(
+        mismatched_manifest,
+        Err(MaterializationReceiptError::ManifestMismatch)
     );
 }
 

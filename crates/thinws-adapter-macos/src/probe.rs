@@ -618,6 +618,41 @@ mod tests {
     }
 
     #[test]
+    fn probe_digest_binds_reason_bytes_and_list_cardinality() {
+        let report = report(
+            "/Volumes/data/source",
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap()),
+            SupportState::Supported,
+        );
+        let alpha = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            vec!["alpha".to_owned()],
+        );
+        let bravo = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            vec!["bravo".to_owned()],
+        );
+        let no_reasons = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            Vec::new(),
+        );
+        let one_empty_reason = CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            SupportState::Supported,
+            vec![String::new()],
+        );
+
+        assert_ne!(digest_for(&report, &alpha), digest_for(&report, &bravo));
+        assert_ne!(
+            digest_for(&report, &no_reasons),
+            digest_for(&report, &one_empty_reason)
+        );
+    }
+
+    #[test]
     fn combined_clone_support_preserves_an_unknown_path_fact() {
         let volume = VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap();
         let source = report(

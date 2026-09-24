@@ -128,6 +128,9 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
     )
     .unwrap();
     assert_eq!(empty.cow_evidence(), CowEvidence::NotUsed);
+    assert_eq!(empty.source_volume_id(), Some(registered));
+    assert_eq!(empty.target_volume_id(), Some(registered));
+    assert_eq!(empty.elapsed_millis(), 4);
 
     let cloned = MaterializationReceipt::successful_apfs_clone(
         &plan,
@@ -142,6 +145,9 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
     )
     .unwrap();
     assert_eq!(cloned.cow_evidence(), CowEvidence::Confirmed);
+    assert_eq!(cloned.source_volume_id(), Some(registered));
+    assert_eq!(cloned.target_volume_id(), Some(registered));
+    assert_eq!(cloned.elapsed_millis(), 5);
 
     assert!(
         MaterializationReceipt::successful_apfs_clone(

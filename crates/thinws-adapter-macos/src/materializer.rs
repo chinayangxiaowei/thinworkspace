@@ -1831,6 +1831,39 @@ mod tests {
         );
     }
 
+    struct MakeTargetUnwritableAfterProbeHook {
+        target: PathBuf,
+    }
+
+    impl ExecutionHook for MakeTargetUnwritableAfterProbeHook {
+        fn after_probe(&self) -> Result<(), Failure> {
+            fs::set_permissions(&self.target, fs::Permissions::from_mode(0o500)).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clone_failure_before_the_first_write_does_not_claim_rollback_work() {
+        let (temp, request, plan, adapter) = fixture("prewrite-clone-failure-");
+        let target = temp.path().join("target");
+        let hook = MakeTargetUnwritableAfterProbeHook {
+            target: target.clone(),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(failure.receipt().outcome(), MaterializationOutcome::Failed);
+        assert!(failure.receipt().created().is_empty());
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::NotNeeded
+        );
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+        fs::set_permissions(target, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     struct ReplaceCommonParentKeepLeafIdentitiesHook {
         root: PathBuf,
         displaced: PathBuf,
@@ -2235,6 +2268,29 @@ mod tests {
             error.kind,
             MaterializationFailureKind::UnsupportedSourceEntry
         );
+    }
+
+    #[test]
+    fn manifest_digest_binds_each_relative_path() {
+        let mut first = TreeManifest {
+            root_mode: 0o700,
+            root_mtime: (1, 2),
+            entries: vec![ManifestEntry {
+                path: b"a".to_vec(),
+                kind: RawFileKind::RegularFile,
+                mode: Some(0o600),
+                mtime: Some((3, 4)),
+                length: 5,
+                content_digest: Some([6; 32]),
+            }],
+            regular_files: 1,
+            logical_bytes: 5,
+            physical_bytes: 8,
+        };
+        let second = first.clone();
+        first.entries[0].path = b"b".to_vec();
+
+        assert_ne!(first.digest(), second.digest());
     }
 
     #[test]

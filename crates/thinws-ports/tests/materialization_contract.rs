@@ -73,5 +73,10 @@ fn materialization_failure_preserves_typed_error_and_partial_receipt() {
         failure.receipt().rollback().status(),
         RollbackStatus::ConfirmedBaseline
     );
+    assert_eq!(failure.to_string(), "revalidate source failed (Io)");
+    let debug = format!("{failure:?}");
+    assert!(debug.contains("MaterializationFailure"));
+    assert!(debug.contains("revalidate source"));
+    assert!(debug.contains("receipt"));
     assert!(failure.source().is_some());
 }

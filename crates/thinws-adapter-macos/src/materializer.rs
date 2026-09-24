@@ -840,7 +840,8 @@ fn clone_directory(
                 }
                 create_directory_at(target, &component, 0o700)
                     .map_err(|error| Failure::io("create target directory", error))?;
-                let identity = register_created(target, &component, &child, before.kind, context)?;
+                let identity =
+                    register_created(target, &component, &child, before.kind, None, context)?;
                 let target_child = open_directory_at(target, &component)
                     .map_err(|error| Failure::path_open("open created target directory", error))?;
                 ensure_identity(
@@ -879,7 +880,15 @@ fn clone_directory(
                 clone_file_at(&source_file, target, &component)
                     .map_err(|error| Failure::clone_io("clone target file", error))?;
                 context.clone_calls = context.clone_calls.saturating_add(1);
-                let identity = register_created(target, &component, &child, before.kind, context)?;
+                hook.after_file_cloned_before_registration(&child)?;
+                let identity = register_created(
+                    target,
+                    &component,
+                    &child,
+                    before.kind,
+                    Some(expected),
+                    context,
+                )?;
                 let target_file = open_file_read_at(target, &component)
                     .map_err(|error| Failure::path_open("open cloned target file", error))?;
                 ensure_identity(
@@ -911,7 +920,7 @@ fn clone_directory(
                     .map_err(|error| Failure::invalid("encode source symlink", error))?;
                 create_symlink_at(&text, target, &component)
                     .map_err(|error| Failure::io("create target symlink", error))?;
-                register_created(target, &component, &child, before.kind, context)?;
+                register_created(target, &component, &child, before.kind, None, context)?;
                 hook.after_created(&child, context.created.len())?;
             }
             RawFileKind::Fifo
@@ -935,6 +944,7 @@ fn register_created(
     component: &CString,
     relative: &[OsString],
     kind: RawFileKind,
+    forbidden_source_files: Option<&BTreeMap<Vec<u8>, SnapshotEntry>>,
     context: &mut ExecutionContext,
 ) -> Result<FileIdentity, Failure> {
     context.created.push(TrackedCreated {
@@ -948,6 +958,13 @@ fn register_created(
         return Err(target_changed());
     }
     let identity = metadata.identity();
+    if forbidden_source_files.is_some_and(|entries| {
+        entries.values().any(|entry| {
+            entry.metadata.kind == RawFileKind::RegularFile && entry.metadata.identity() == identity
+        })
+    }) {
+        return Err(target_changed());
+    }
     context
         .created
         .last_mut()
@@ -990,6 +1007,10 @@ trait ExecutionHook {
     }
 
     fn after_created(&self, _relative: &[OsString], _created_count: usize) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn after_file_cloned_before_registration(&self, _relative: &[OsString]) -> Result<(), Failure> {
         Ok(())
     }
 
@@ -1972,6 +1993,58 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    struct ReplaceUnregisteredCloneWithSourceHardLinkHook {
+        source_file: PathBuf,
+        target_file: PathBuf,
+        fired: Cell<bool>,
+    }
+
+    impl ExecutionHook for ReplaceUnregisteredCloneWithSourceHardLinkHook {
+        fn after_file_cloned_before_registration(
+            &self,
+            _relative: &[OsString],
+        ) -> Result<(), Failure> {
+            if !self.fired.replace(true) {
+                fs::remove_file(&self.target_file).unwrap();
+                fs::hard_link(&self.source_file, &self.target_file).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn source_hard_link_before_first_identity_registration_is_rejected_and_preserved() {
+        let (temp, request, plan, adapter) = fixture("unregistered-source-hard-link-");
+        let source_file = temp.path().join("source/file.txt");
+        let target_file = temp.path().join("target/file.txt");
+        let hook = ReplaceUnregisteredCloneWithSourceHardLinkHook {
+            source_file: source_file.clone(),
+            target_file: target_file.clone(),
+            fired: Cell::new(false),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(
+            failure.receipt().cow_evidence(),
+            thinws_core::CowEvidence::Unknown
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(
+            fs::metadata(source_file).unwrap().ino(),
+            fs::metadata(target_file).unwrap().ino()
+        );
     }
 
     #[test]

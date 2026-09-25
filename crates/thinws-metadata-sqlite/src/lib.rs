@@ -22,8 +22,8 @@ use thinws_core::{
     WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
-    DataRootLayoutEvidence, MetadataSnapshot, MetadataStore, MetadataStoreFactory, PortConflict,
-    PortError, PortErrorKind,
+    DataRootLayoutEvidence, FinalMaterializationSummary, MetadataSnapshot, MetadataStore,
+    MetadataStoreFactory, PortConflict, PortError, PortErrorKind,
 };
 
 /// SQLite application ID for ASCII `THWS`.
@@ -469,6 +469,31 @@ impl MetadataStore for SqliteMetadataStore {
 
     fn workspace(&self, workspace_id: WorkspaceId) -> Result<Option<WorkspaceRecord>, PortError> {
         read_workspace(&self.connection, workspace_id)
+    }
+
+    fn final_materialization(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<FinalMaterializationSummary>, PortError> {
+        let value: Option<(i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT receipt_schema_version, receipt_json
+                 FROM materialization_receipts WHERE workspace_id = ?1",
+                [workspace_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| storage_error("read final receipt", error))?;
+        value
+            .map(|(version, json)| {
+                receipt_json::decode_final_summary(
+                    version,
+                    &json,
+                    self.installation.identity().volume_id(),
+                )
+            })
+            .transpose()
     }
 
     fn workspaces(&self) -> Result<Vec<WorkspaceRecord>, PortError> {

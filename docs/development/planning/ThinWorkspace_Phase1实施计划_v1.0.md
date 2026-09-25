@@ -282,6 +282,16 @@ P1-09 受控目录定向变异启动记录（2026-09-25 21:51 UTC）：基线 `a
 
 该批实际于 21:51:24–21:51:54 UTC 完成，约 29 秒：13 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `7c8dde8616c0845947808778bf8cf906964653e8a6321fd5d1406e9905375e26`、`2028cc899e7d5c5bf348d1da1118e9612f83b43c1161728438a59f8c463dfeff`。按计划首次主动查看前未轮询或修改冻结候选。仍需全仓库普通门禁与本地提交，此测试不能代替创建链路 E2E。
 
+P1-09 幂等所需回执读取子结果（进行中）：对既有 `MetadataStore` 增加类型化 final receipt 摘要读取，返回请求/实际模式、Adapter、CoW、降级原因与失败尝试数量，不让 Application/CLI 直接解释 SQLite JSON。缺少 receipt 返回 None；未知版本、畸形或与登记卷/成功状态矛盾的 receipt 拒绝，不能猜测已建副本的实际物化事实。CoW 与 Full Copy 的持久读回及畸形数据拒绝已先 RED 后 GREEN；尚未接入公开创建幂等。
+
+P1-09 final receipt 摘要读取定向变异启动记录（2026-09-25 22:02 UTC）：基线 `852ec54` 上已暂存代码/测试差异 SHA-256 `510146a9653d5beb74337d7d80dd35a32f83c76099354b7149f2f150f39941f2`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，只选择读回与解码两函数共 18 个变异，验证包 `thinws-metadata-sqlite`，输出 `target/p1-09-receipt-read-mutants/mutants.out`。同机前次 6 个约 19 秒，考虑构建波动，首次主动查看预计 22:05 UTC；此前不轮询、不修改冻结代码。
+
+该批实际于 22:02:34–22:02:54 UTC 完成，约 20 秒：15 caught、2 unviable、1 missed、0 timeout，退出码 2，不能视为通过。`outcomes.json`/`mutants.json` SHA-256 分别为 `db4be4a8d31565eb362ed97ae1e3a0c991c3285f1ccb02d3f170dc4568344952`、`8bead0b8186cffb8b7234e1f9f58f62f072922813e49d99445daf3d967bbf093`。唯一存活项把 runtime fallback 的失败尝试数量 `==1` 改成 `!=1`；原测试只覆盖了 clone 和预检降级，runtime 输入同时被其他不变量拒绝。将补有效 runtime 回执读取与零次尝试单因素拒绝，再定向补跑。
+
+P1-09 runtime 摘要单变异补跑启动记录（2026-09-25 22:07 UTC）：基线 `852ec54` 上已暂存代码/测试差异 SHA-256 `6b9eae542e1c764082a3e2f2124b246d5caff555a67d06394d0f4d136608b29a`；主 Agent 单独执行，平台/工具/配置同前批，并发 1，按 `receipt_json.rs:48:81` 精确筛选唯一受新增样例影响的变异，输出 `target/p1-09-receipt-read-followup/mutants.out`。前批 18 个约 20 秒，单项含构建估计 10 秒，首次主动查看预计 22:09 UTC；此前不轮询、不修改冻结代码。
+
+补跑实际于 22:07:08–22:07:15 UTC 完成，约 7 秒：唯一变异 caught，0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `51badcceb7da3853027e27563e968ec5180ed66ef5226607c67b8ffe537c6832`、`666ad0a818a514540c55d92f0c9e48e642b2ecf062a8b298bb3f1122c701d5d2`。前批其他 15 项已捕获，2 项不可编译，候选该读取范围无存活变异；尚需全仓库普通门禁和本地提交。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

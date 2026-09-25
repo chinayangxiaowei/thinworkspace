@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use thinws_core::{
-    DeletionTombstone, ErrorCode, InstallationRecord, InstanceId, MaterializationPlan,
-    MaterializationReceipt, RemovalMode, UnixMillis, WorkspaceId, WorkspaceRecord,
-    WorkspaceReservation, WorkspaceState,
+    CowEvidence, DeletionTombstone, ErrorCode, FallbackReason, InstallationRecord, InstanceId,
+    MaterializationMode, MaterializationPlan, MaterializationReceipt, MaterializerKind,
+    RemovalMode, UnixMillis, WorkspaceId, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 
 use crate::{DataRootLayoutEvidence, PortError};
@@ -35,6 +35,84 @@ impl MetadataSnapshot {
     #[must_use]
     pub fn workspaces(&self) -> &[WorkspaceRecord] {
         &self.workspaces
+    }
+}
+
+/// Typed public-facing facts recovered from an immutable final receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalMaterializationSummary {
+    requested_mode: MaterializationMode,
+    effective_mode: MaterializationMode,
+    actual_mode: MaterializationMode,
+    adapter: MaterializerKind,
+    cow: CowEvidence,
+    fallback_reason: Option<FallbackReason>,
+    failed_attempt_count: usize,
+}
+
+impl FinalMaterializationSummary {
+    /// Creates a verified summary from one successful final receipt.
+    #[must_use]
+    pub const fn new(
+        requested_mode: MaterializationMode,
+        effective_mode: MaterializationMode,
+        actual_mode: MaterializationMode,
+        adapter: MaterializerKind,
+        cow: CowEvidence,
+        fallback_reason: Option<FallbackReason>,
+        failed_attempt_count: usize,
+    ) -> Self {
+        Self {
+            requested_mode,
+            effective_mode,
+            actual_mode,
+            adapter,
+            cow,
+            fallback_reason,
+            failed_attempt_count,
+        }
+    }
+
+    /// Returns the caller's requested mode.
+    #[must_use]
+    pub const fn requested_mode(&self) -> MaterializationMode {
+        self.requested_mode
+    }
+
+    /// Returns the mode selected after any permitted fallback.
+    #[must_use]
+    pub const fn effective_mode(&self) -> MaterializationMode {
+        self.effective_mode
+    }
+
+    /// Returns the mode used by the completed materialization.
+    #[must_use]
+    pub const fn actual_mode(&self) -> MaterializationMode {
+        self.actual_mode
+    }
+
+    /// Returns the executed backend.
+    #[must_use]
+    pub const fn adapter(&self) -> MaterializerKind {
+        self.adapter
+    }
+
+    /// Returns evidence for whether ordinary files were cloned.
+    #[must_use]
+    pub const fn cow(&self) -> CowEvidence {
+        self.cow
+    }
+
+    /// Returns the reason for a permitted Full Copy fallback, if used.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+
+    /// Returns the number of failed attempts retained by a runtime fallback.
+    #[must_use]
+    pub const fn failed_attempt_count(&self) -> usize {
+        self.failed_attempt_count
     }
 }
 
@@ -89,6 +167,12 @@ pub trait MetadataStore {
 
     /// Reads one active Workspace without modifying durable state.
     fn workspace(&self, workspace_id: WorkspaceId) -> Result<Option<WorkspaceRecord>, PortError>;
+
+    /// Reads the immutable final receipt as typed facts without exposing storage JSON.
+    fn final_materialization(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<FinalMaterializationSummary>, PortError>;
 
     /// Lists every active Workspace in stable name/ID order.
     fn workspaces(&self) -> Result<Vec<WorkspaceRecord>, PortError>;

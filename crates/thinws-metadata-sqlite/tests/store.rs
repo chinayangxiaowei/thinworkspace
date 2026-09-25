@@ -11,13 +11,13 @@ use std::time::Duration;
 use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::{Builder, TempDir};
 use thinws_core::{
-    AbsolutePath, CandidateEvidence, DirectoryIdentityEvidence, ErrorCode, Evidence,
-    FallbackPolicy, FileIdentity, FileSystemIdentity, InstallationIdentity, InstallationRecord,
-    InstanceId, MaterializationAttemptEvidence, MaterializationFailureKind,
-    MaterializationPathReport, MaterializationPlan, MaterializationReceipt, MaterializerKind,
-    MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest, RemovalMode,
-    RollbackEvidence, RollbackStatus, SupportState, TreeDigest, UnixMillis, VolumeId, WorkspaceId,
-    WorkspaceName, WorkspaceReservation, WorkspaceState,
+    AbsolutePath, CandidateEvidence, CowEvidence, DirectoryIdentityEvidence, ErrorCode, Evidence,
+    FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity, InstallationIdentity,
+    InstallationRecord, InstanceId, MaterializationAttemptEvidence, MaterializationFailureKind,
+    MaterializationMode, MaterializationPathReport, MaterializationPlan, MaterializationReceipt,
+    MaterializerKind, MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest,
+    RemovalMode, RollbackEvidence, RollbackStatus, SupportState, TreeDigest, UnixMillis, VolumeId,
+    WorkspaceId, WorkspaceName, WorkspaceReservation, WorkspaceState,
 };
 use thinws_metadata_sqlite::{
     APPLICATION_ID, SCHEMA_VERSION, SqliteMetadataStore, SqliteMetadataStoreFactory,
@@ -484,6 +484,7 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
     );
     let id = reserved.workspace_id();
     store.reserve_workspace(&reserved).unwrap();
+    assert_eq!(store.final_materialization(id).unwrap(), None);
     let (plan, receipt) = successful_receipt(VolumeId::from_str(VOLUME_ID).unwrap());
     let before_creation = UnixMillis::new(reserved.created_at().get() - 1).unwrap();
     assert!(
@@ -565,6 +566,14 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
         value["source_manifest_digest"],
         value["target_manifest_digest"]
     );
+    let summary = store.final_materialization(id).unwrap().unwrap();
+    assert_eq!(summary.requested_mode(), MaterializationMode::CowClone);
+    assert_eq!(summary.effective_mode(), MaterializationMode::CowClone);
+    assert_eq!(summary.actual_mode(), MaterializationMode::CowClone);
+    assert_eq!(summary.adapter(), MaterializerKind::ApfsFileClone);
+    assert_eq!(summary.cow(), CowEvidence::Confirmed);
+    assert_eq!(summary.fallback_reason(), None);
+    assert_eq!(summary.failed_attempt_count(), 0);
 
     let missing = WorkspaceId::from_str(WORKSPACE_IDS[1]).unwrap();
     assert!(
@@ -694,6 +703,19 @@ fn p1_09_full_copy_receipt_requires_workspace_permission() {
     assert_eq!(value["actual_mode"], "full_copy");
     assert_eq!(value["cow_evidence"], "not_used");
     assert_eq!(value["fallback_reason"], "clone_unsupported_at_preflight");
+    let summary = store
+        .final_materialization(allowed.workspace_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.requested_mode(), MaterializationMode::CowClone);
+    assert_eq!(summary.effective_mode(), MaterializationMode::FullCopy);
+    assert_eq!(summary.actual_mode(), MaterializationMode::FullCopy);
+    assert_eq!(summary.adapter(), MaterializerKind::FullCopy);
+    assert_eq!(summary.cow(), CowEvidence::NotUsed);
+    assert_eq!(
+        summary.fallback_reason(),
+        Some(FallbackReason::CloneUnsupportedAtPreflight)
+    );
 
     let clone_only = reservation(
         3,

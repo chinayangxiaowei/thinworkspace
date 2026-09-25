@@ -16,4 +16,6 @@ pub use error::{PortConflict, PortError, PortErrorKind};
 pub use materialization::{
     MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, WorkspaceMaterializer,
 };
-pub use metadata::{MetadataSnapshot, MetadataStore, MetadataStoreFactory};
+pub use metadata::{
+    FinalMaterializationSummary, MetadataSnapshot, MetadataStore, MetadataStoreFactory,
+};

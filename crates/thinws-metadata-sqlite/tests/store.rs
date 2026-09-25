@@ -11,8 +11,13 @@ use std::time::Duration;
 use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::{Builder, TempDir};
 use thinws_core::{
-    AbsolutePath, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId, RemovalMode,
-    UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceReservation, WorkspaceState,
+    AbsolutePath, CandidateEvidence, DirectoryIdentityEvidence, ErrorCode, Evidence,
+    FallbackPolicy, FileIdentity, FileSystemIdentity, InstallationIdentity, InstallationRecord,
+    InstanceId, MaterializationAttemptEvidence, MaterializationFailureKind,
+    MaterializationPathReport, MaterializationPlan, MaterializationReceipt, MaterializerKind,
+    MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest, RemovalMode,
+    RollbackEvidence, RollbackStatus, SupportState, TreeDigest, UnixMillis, VolumeId, WorkspaceId,
+    WorkspaceName, WorkspaceReservation, WorkspaceState,
 };
 use thinws_metadata_sqlite::{
     APPLICATION_ID, SCHEMA_VERSION, SqliteMetadataStore, SqliteMetadataStoreFactory,
@@ -397,6 +402,335 @@ fn reservation_with_identity(
         index.is_multiple_of(2),
         UnixMillis::new(1_700_000_000_100 + index as i64).unwrap(),
     )
+}
+
+fn materialization_report(
+    volume_id: VolumeId,
+    source: &str,
+    target: &str,
+    clone_support: SupportState,
+    clone_reasons: Vec<String>,
+    probe_byte: u8,
+) -> MaterializationPathReport {
+    let report_for = |requested: &str| {
+        let path = AbsolutePath::try_from_bytes(requested.as_bytes().to_vec()).unwrap();
+        PathCapabilityReport::new(
+            path.clone(),
+            PathResolution::ExistingDirectory,
+            path.clone(),
+            Vec::new(),
+            vec![DirectoryIdentityEvidence::new(
+                path,
+                FileIdentity::new(1, 2),
+            )],
+            FileSystemIdentity::new("apfs", [7, 8], Evidence::Known(volume_id)),
+            MountEvidence::new(0, true),
+            SupportState::Supported,
+            SupportState::Supported,
+            clone_support,
+        )
+        .unwrap()
+    };
+    MaterializationPathReport::new(
+        report_for(source),
+        report_for(target),
+        report_for("/Volumes/data/thinws/staging"),
+        report_for("/Volumes/data/thinws/trash"),
+        CandidateEvidence::new(
+            MaterializerKind::ApfsFileClone,
+            clone_support,
+            clone_reasons,
+        ),
+        CandidateEvidence::new(MaterializerKind::FullCopy, SupportState::Supported, vec![]),
+        ProbeEvidenceDigest::new([probe_byte; 32]),
+    )
+}
+
+fn successful_receipt(volume_id: VolumeId) -> (MaterializationPlan, MaterializationReceipt) {
+    let report = materialization_report(
+        volume_id,
+        "/Volumes/data/source-0",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+        SupportState::Supported,
+        vec![],
+        9,
+    );
+    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let digest = TreeDigest::new([3; 32]);
+    let receipt = MaterializationReceipt::successful_apfs_clone(
+        &plan,
+        1,
+        1,
+        Vec::new(),
+        digest,
+        digest,
+        4,
+        17,
+        Some(17),
+    )
+    .unwrap();
+    (plan, receipt)
+}
+
+#[test]
+fn p1_09_final_receipt_and_ready_are_one_transaction() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    let mut store = open(&database);
+    let reserved = reservation(
+        0,
+        "writer-ready",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+    );
+    let id = reserved.workspace_id();
+    store.reserve_workspace(&reserved).unwrap();
+    let (plan, receipt) = successful_receipt(VolumeId::from_str(VOLUME_ID).unwrap());
+    let before_creation = UnixMillis::new(reserved.created_at().get() - 1).unwrap();
+    assert!(
+        store
+            .complete_materialization(id, &plan, &receipt, before_creation)
+            .is_err()
+    );
+    assert_eq!(
+        store.workspace(id).unwrap().unwrap().state(),
+        WorkspaceState::Creating
+    );
+    let at = UnixMillis::new(reserved.created_at().get() + 1).unwrap();
+    let failed = MaterializationReceipt::failed_apfs_clone(
+        &plan,
+        MaterializationFailureKind::Filesystem,
+        Vec::new(),
+        false,
+        RollbackEvidence::new(RollbackStatus::ConfirmedBaseline, Vec::new(), Vec::new()),
+        MaterializationAttemptEvidence::default(),
+        1,
+    );
+    assert!(
+        store
+            .complete_materialization(id, &plan, &failed, at)
+            .is_err()
+    );
+    let raw = Connection::open(&database).unwrap();
+    let count_before: i64 = raw
+        .query_row("SELECT count(*) FROM materialization_receipts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count_before, 0);
+    assert_eq!(
+        store.workspace(id).unwrap().unwrap().state(),
+        WorkspaceState::Creating
+    );
+    let different_probe = materialization_report(
+        VolumeId::from_str(VOLUME_ID).unwrap(),
+        "/Volumes/data/source-0",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+        SupportState::Supported,
+        vec![],
+        10,
+    );
+    let different_plan =
+        MaterializationPlan::for_apfs_clone(&different_probe, FallbackPolicy::Deny).unwrap();
+    assert!(
+        store
+            .complete_materialization(id, &different_plan, &receipt, at)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .complete_materialization(id, &plan, &receipt, at)
+            .unwrap()
+            .state(),
+        WorkspaceState::Ready
+    );
+    assert!(
+        store
+            .complete_materialization(id, &plan, &receipt, at)
+            .is_err()
+    );
+
+    let (version, json): (i64, String) = raw
+        .query_row(
+            "SELECT receipt_schema_version, receipt_json FROM materialization_receipts WHERE workspace_id = ?1",
+            [id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["actual_mode"], "cow_clone");
+    assert_eq!(value["outcome"], "succeeded");
+    assert_eq!(value["logical_bytes"], 17);
+    assert_eq!(
+        value["source_manifest_digest"],
+        value["target_manifest_digest"]
+    );
+
+    let missing = WorkspaceId::from_str(WORKSPACE_IDS[1]).unwrap();
+    assert!(
+        store
+            .complete_materialization(missing, &plan, &receipt, at)
+            .is_err()
+    );
+    let other = reservation(
+        1,
+        "writer-failed",
+        "/Volumes/data/thinws/workspaces/writer-failed",
+    );
+    store.reserve_workspace(&other).unwrap();
+    assert!(
+        store
+            .complete_materialization(other.workspace_id(), &plan, &receipt, at)
+            .is_err()
+    );
+    assert!(
+        store
+            .complete_materialization(other.workspace_id(), &plan, &failed, at)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .workspace(other.workspace_id())
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkspaceState::Creating
+    );
+    let count_after: i64 = raw
+        .query_row("SELECT count(*) FROM materialization_receipts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count_after, 1);
+}
+
+#[test]
+fn p1_09_full_copy_receipt_requires_workspace_permission() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    let mut store = open(&database);
+    let volume = VolumeId::from_str(VOLUME_ID).unwrap();
+    let fallback_receipt = |source: &str, target: &str| {
+        let report = materialization_report(
+            volume,
+            source,
+            target,
+            SupportState::Unsupported,
+            vec!["clone_capability_unsupported".to_owned()],
+            11,
+        );
+        let plan = MaterializationPlan::for_full_copy_after_preflight(
+            &report,
+            FallbackPolicy::AllowFullCopyOnCowUnsupported,
+        )
+        .unwrap();
+        let digest = TreeDigest::new([4; 32]);
+        let receipt = MaterializationReceipt::successful_full_copy(
+            &plan,
+            1,
+            Vec::new(),
+            digest,
+            digest,
+            5,
+            32,
+            Some(32),
+        )
+        .unwrap();
+        (plan, receipt)
+    };
+
+    let forbidden = reservation(
+        1,
+        "copy-forbidden",
+        "/Volumes/data/thinws/workspaces/copy-forbidden",
+    );
+    store.reserve_workspace(&forbidden).unwrap();
+    let (plan, receipt) = fallback_receipt(
+        "/Volumes/data/source-1",
+        "/Volumes/data/thinws/workspaces/copy-forbidden",
+    );
+    let at = UnixMillis::new(forbidden.created_at().get() + 1).unwrap();
+    assert!(
+        store
+            .complete_materialization(forbidden.workspace_id(), &plan, &receipt, at)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .workspace(forbidden.workspace_id())
+            .unwrap()
+            .unwrap()
+            .state(),
+        WorkspaceState::Creating
+    );
+
+    let allowed = reservation(
+        2,
+        "copy-allowed",
+        "/Volumes/data/thinws/workspaces/copy-allowed",
+    );
+    store.reserve_workspace(&allowed).unwrap();
+    let (plan, receipt) = fallback_receipt(
+        "/Volumes/data/source-2",
+        "/Volumes/data/thinws/workspaces/copy-allowed",
+    );
+    let at = UnixMillis::new(allowed.created_at().get() + 1).unwrap();
+    assert_eq!(
+        store
+            .complete_materialization(allowed.workspace_id(), &plan, &receipt, at)
+            .unwrap()
+            .state(),
+        WorkspaceState::Ready
+    );
+    let raw = Connection::open(&database).unwrap();
+    let json: String = raw
+        .query_row(
+            "SELECT receipt_json FROM materialization_receipts WHERE workspace_id = ?1",
+            [allowed.workspace_id().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["actual_mode"], "full_copy");
+    assert_eq!(value["cow_evidence"], "not_used");
+    assert_eq!(value["fallback_reason"], "clone_unsupported_at_preflight");
+
+    let clone_only = reservation(
+        3,
+        "clone-only",
+        "/Volumes/data/thinws/workspaces/clone-only",
+    );
+    store.reserve_workspace(&clone_only).unwrap();
+    let report = materialization_report(
+        volume,
+        "/Volumes/data/source-3",
+        "/Volumes/data/thinws/workspaces/clone-only",
+        SupportState::Supported,
+        vec![],
+        12,
+    );
+    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let digest = TreeDigest::new([5; 32]);
+    let receipt = MaterializationReceipt::successful_apfs_clone(
+        &plan,
+        1,
+        1,
+        Vec::new(),
+        digest,
+        digest,
+        6,
+        48,
+        Some(48),
+    )
+    .unwrap();
+    let at = UnixMillis::new(clone_only.created_at().get() + 1).unwrap();
+    assert_eq!(
+        store
+            .complete_materialization(clone_only.workspace_id(), &plan, &receipt, at)
+            .unwrap()
+            .state(),
+        WorkspaceState::Ready
+    );
 }
 
 fn open(path: &std::path::Path) -> SqliteMetadataStore {

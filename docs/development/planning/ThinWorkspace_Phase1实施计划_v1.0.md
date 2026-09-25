@@ -268,6 +268,14 @@ P1-09 生命周期 writer 定向变异启动记录（2026-09-25 00:13 UTC）：�
 
 该批实际 8 秒完成（00:13:49–00:13:57 UTC），1 个变异因试图将 `Box<dyn MetadataStore>` 替换为不可构造的 `Default` 而编译失败，结果为 1 unviable、0 caught/missed/timeout，工具退出码 0 但**无有效变异测试结论**；不将其计作门禁通过。`outcomes.json`/`mutants.json` SHA-256 分别为 `30a27d456a6cec005804c7357ab1c392f7189048648a96bf1f42f852aa9cea72`、`2bd84e171fd0f49cd3f5f7f5db6223c9d699746927a06205160584831ca31049`。本边界依赖已通过的缺库、空库、错实例与布局重验回归；后续 final Receipt/Ready 的有效变异另行覆盖。
 
+P1-09 final Receipt/Ready 定向变异启动记录（2026-09-25 00:22 UTC）：基线 `d21f9ce` 上已暂存代码/测试差异 SHA-256 `6301ad9fe06c445facd4a43b9f44e81482dafbd45e7b877781369b19e53ff318`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，只选择 `SqliteMetadataStore::complete_materialization` 枚举出的 40 个变异，验证包 `thinws-metadata-sqlite`，输出 `target/p1-09-final-receipt-mutants/mutants.out`。同机此前 35 个约 55 秒，考虑测试与构建波动，首次主动查看预计 00:25 UTC；此前不轮询、不修改冻结代码。
+
+该批实际于 00:22:31–00:23:24 UTC 完成，约 53 秒：18 caught、1 unviable、21 missed、0 timeout，退出码 2，**不能视为通过**。`outcomes.json`/`mutants.json` SHA-256 分别为 `40eccbefe9e5865da361fa3acb5d64a3a14c27365f30002bae9b88cff62b6996`、`0cff534ca0179d4d1fec74489d8faaab8f3243c08f41c776eb2953fc8d1225bf`。存活变异集中于一个长 `||` 守卫内部替换为 `&&`；当前测试同时触发多项拒绝条件，无法区分每一项是否有效。主 Agent 将按相互独立的不变量重构守卫，补单因素错误与 fallback 许可测试，再只补跑受影响函数；不会用“看似等价”掩盖缺失测试。
+
+P1-09 final Receipt/Ready 守卫补跑启动记录（2026-09-25 21:42 UTC）：基线 `d21f9ce` 上已暂存代码/测试差异 SHA-256 `0fc1d0516d531bdbd608feec9ecf022131141b9216f5a0aef973c227a5c5be25`；主 Agent 单独执行，平台、工具、配置、并发和验证包同前批，按函数筛选缩至 6 个变异，输出 `target/p1-09-final-receipt-followup/mutants.out`。前批 40 个约 53 秒，按 6 个与构建波动估计，首次主动查看预计 21:44 UTC；此前不轮询、不修改冻结代码。
+
+补跑实际于 21:42:17–21:42:37 UTC 完成，约 19 秒：5 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `bad7cda5bbffa076ea80483a474c09eb9504601ceda8f145e04049213f0bfd1c`、`5fe02ce1bc118e952ec68e58ba9221df694f3c460daa2b7d016d16f733673873`。前批长守卫已由分组事实校验替换，补测了成功回执与另一个 Probe、失败回执、回滚、单独 Full Copy 许可和无许可 CoW 成功；受影响函数此候选无存活变异。本子结果尚不包含目录创建、CLI 或 P1-09 审核。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

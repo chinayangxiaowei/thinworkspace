@@ -583,6 +583,7 @@ name = "thinws-metadata-sqlite"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thinws-core",
  "thinws-ports",

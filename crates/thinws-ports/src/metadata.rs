@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use thinws_core::{
-    DeletionTombstone, ErrorCode, InstallationRecord, InstanceId, RemovalMode, UnixMillis,
-    WorkspaceId, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
+    DeletionTombstone, ErrorCode, InstallationRecord, InstanceId, MaterializationPlan,
+    MaterializationReceipt, RemovalMode, UnixMillis, WorkspaceId, WorkspaceRecord,
+    WorkspaceReservation, WorkspaceState,
 };
 
 use crate::{DataRootLayoutEvidence, PortError};
@@ -74,6 +75,16 @@ pub trait MetadataStore {
     fn reserve_workspace(
         &mut self,
         reservation: &WorkspaceReservation,
+    ) -> Result<WorkspaceRecord, PortError>;
+
+    /// Atomically records a successful final receipt and moves Creating to Ready.
+    /// A failed transaction must leave both the receipt and state unchanged.
+    fn complete_materialization(
+        &mut self,
+        workspace_id: WorkspaceId,
+        plan: &MaterializationPlan,
+        receipt: &MaterializationReceipt,
+        recorded_at: UnixMillis,
     ) -> Result<WorkspaceRecord, PortError>;
 
     /// Reads one active Workspace without modifying durable state.

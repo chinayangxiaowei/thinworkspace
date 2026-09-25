@@ -3,6 +3,8 @@
 
 //! SQLite implementation of the Phase 1 MetadataStore boundary.
 
+mod receipt_json;
+
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
@@ -15,7 +17,8 @@ use rusqlite::{
 };
 use thinws_core::{
     AbsolutePath, DeletionTombstone, ErrorCode, InstallationIdentity, InstallationRecord,
-    InstanceId, RemovalMode, UnixMillis, VolumeId, WorkspaceEvent, WorkspaceId, WorkspaceName,
+    InstanceId, MaterializationOutcome, MaterializationPlan, MaterializationReceipt, RemovalMode,
+    RollbackStatus, UnixMillis, VolumeId, WorkspaceEvent, WorkspaceId, WorkspaceName,
     WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
@@ -335,6 +338,133 @@ impl MetadataStore for SqliteMetadataStore {
             reservation.created_at(),
         )
         .map_err(|error| invalid_data("build reserved workspace", error))
+    }
+
+    fn complete_materialization(
+        &mut self,
+        workspace_id: WorkspaceId,
+        plan: &MaterializationPlan,
+        receipt: &MaterializationReceipt,
+        recorded_at: UnixMillis,
+    ) -> Result<WorkspaceRecord, PortError> {
+        let receipt_json = serde_json::to_string(&receipt_json::final_receipt_json(receipt))
+            .map_err(|error| invalid_data("serialize final receipt", error))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| storage_error("begin final receipt transaction", error))?;
+        let record = read_workspace(&transaction, workspace_id)?
+            .ok_or_else(|| PortError::new(PortErrorKind::NotFound, "complete materialization"))?;
+        if record.state() != WorkspaceState::Creating {
+            return Err(PortError::conflict(
+                "complete materialization",
+                PortConflict::ExpectedState,
+            ));
+        }
+        record
+            .state()
+            .transition(WorkspaceEvent::Materialized)
+            .map_err(|error| invalid_data("validate Ready transition", error))?;
+        let reservation = record.reservation();
+        let plan_paths_and_volumes = (
+            plan.source_path(),
+            plan.target_path(),
+            plan.source_volume_id(),
+            plan.target_volume_id(),
+        );
+        let reserved_paths_and_volumes = (
+            reservation.source_path(),
+            reservation.target_path(),
+            reservation.source_volume_id(),
+            reservation.data_volume_id(),
+        );
+        let receipt_plan_evidence = (
+            receipt.probe_evidence_digest(),
+            receipt.requested_mode(),
+            receipt.effective_mode(),
+            receipt.actual_mode(),
+            receipt.actual_adapter(),
+            receipt.source_volume_id(),
+            receipt.target_volume_id(),
+            receipt.fallback_reason(),
+            receipt.failed_attempts(),
+        );
+        let expected_plan_evidence = (
+            plan.probe_evidence_digest(),
+            plan.requested_mode(),
+            plan.effective_mode(),
+            plan.effective_mode(),
+            plan.selected_adapter(),
+            Some(plan.source_volume_id()),
+            Some(plan.target_volume_id()),
+            plan.fallback_reason(),
+            plan.failed_attempts(),
+        );
+        let successful = matches!(
+            (
+                receipt.outcome(),
+                receipt.failure_kind(),
+                receipt.unconfirmed_staging(),
+                receipt.rollback().status()
+            ),
+            (
+                MaterializationOutcome::Succeeded,
+                None,
+                None,
+                RollbackStatus::NotNeeded
+            )
+        );
+        let matching_manifest = matches!(
+            (receipt.source_manifest_digest(), receipt.target_manifest_digest()),
+            (Some(source), Some(target)) if source == target
+        );
+        let checks = [
+            plan_paths_and_volumes == reserved_paths_and_volumes,
+            plan.fallback_reason().is_none() || reservation.allow_full_copy(),
+            receipt_plan_evidence == expected_plan_evidence,
+            successful,
+            matching_manifest,
+        ];
+        if checks.contains(&false) {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "validate final receipt against Workspace and Plan",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO materialization_receipts
+                    (workspace_id, receipt_schema_version, receipt_json, recorded_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    workspace_id.to_string(),
+                    receipt_json::RECEIPT_SCHEMA_VERSION,
+                    receipt_json,
+                    recorded_at.get()
+                ],
+            )
+            .map_err(|error| update_error("insert final receipt", error))?;
+        let changed = transaction
+            .execute(
+                "UPDATE workspaces SET state = 'ready', last_error_code = NULL,
+                     updated_at_unix_ms = ?1
+                 WHERE workspace_id = ?2 AND state = 'creating'",
+                params![recorded_at.get(), workspace_id.to_string()],
+            )
+            .map_err(|error| update_error("complete materialization", error))?;
+        if changed != 1 {
+            return Err(PortError::conflict(
+                "complete materialization",
+                PortConflict::ExpectedState,
+            ));
+        }
+        let ready = read_workspace(&transaction, workspace_id)?.ok_or_else(|| {
+            PortError::conflict("read Ready Workspace", PortConflict::ExpectedState)
+        })?;
+        transaction
+            .commit()
+            .map_err(|error| storage_error("commit final receipt transaction", error))?;
+        Ok(ready)
     }
 
     fn workspace(&self, workspace_id: WorkspaceId) -> Result<Option<WorkspaceRecord>, PortError> {

@@ -185,7 +185,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Done |
-| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | In Progress |
+| P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Done |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
 | P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
 
@@ -255,6 +255,8 @@ P1-07 Core 组合守卫变异重跑启动记录（2026-09-24 23:59 UTC）：相�
 组合守卫补跑实际 8 秒完成：4 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `df792a97b15a33b0b726b64a3acbb15924b6242f1992757ccbeae53b1ce8c0d7`、`1aa5eb7ae815b8531c0a3d564c3fe12eb4501e3d7ba5f3ceb2d831724ec17472`。之后仅按 rustfmt 调整该 `matches!` 模式换行，匹配项、控制流和测试语义不变；核对实际变异位置后复用此批证据，不重启等价范围的变异。精确提交复核前仍须完成普通门禁。
 
 Core 守卫最终门禁（2026-09-25 UTC）：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --release --all-targets`、`cargo doc --workspace --no-deps` 均退出 0，`git diff --check` 通过。仅 Core 回执构造和对应测试/计划有语义变化，Adapter Probe/store、依赖、工具和供应链配置均未变，沿用 `0b98fa9` 的真实 `/Volumes/data` 跨卷、29 项工具测试、`cargo deny check`、离线 `cargo audit --no-fetch` 同环境证据；不宣称本次重复运行了它们。仍未执行线上 CI/PR/push、真实子挂载创建或没有对应 harness 的 syscall 时序 fuzz。P1-07 待修正后的精确候选独立审核，不提前标 Done。
+
+P1-07 完成记录（2026-09-25 UTC）：GPT-6 Astra（`gpt-6-astra` / `xhigh`）只读独立复核完整范围 `38a2500..1428384576192205e90bbffe9dc80d1ef10224b4`，结论 Approve，Critical/High/Normal/Low 均为 0；前次 High、失败回执两项 Normal、幻影 target 与 Core 后端错配 Normal 均已关闭。任务提交为 `d170b20`、`4714b1f`、`0b98fa9`、`1428384`，本任务的真实同卷 APFS Clone/Full Copy、显式受限 fallback、失败回执/回滚和真实 `/Volumes/data` 跨卷拒绝验收均已取得前述证据。未执行项与限制维持前述记录；后续 P1-09 才实现 Workspace create、持久状态和 Ready，因此 P1-07 Done 不表示 P1.c 小阶段或 Phase 1 放行。
 
 ### 4.4 P1.d 查询与路径交付
 

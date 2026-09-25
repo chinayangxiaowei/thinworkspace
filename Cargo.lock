@@ -553,7 +553,10 @@ dependencies = [
 name = "thinws-application"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
+ "thinws-adapter-macos",
  "thinws-core",
+ "thinws-metadata-sqlite",
  "thinws-ports",
 ]
 

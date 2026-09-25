@@ -298,6 +298,16 @@ P1-09 Ready 目录核验定向变异启动记录（2026-09-25 22:12 UTC）：基
 
 该批实际于 22:12:44–22:13:00 UTC 完成，约 16 秒：2 caught、2 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `f3ae078a3d10e8a0ec98ac9a3aed59eee52aa63ecb68d6b61fddd68ea6e63f9d`、`6692aa98330b30d8802c205743f23c8551fbefedc3aef62f25e9dded604e2a2e`。按计划首次主动查看前未轮询或修改候选；本子结果仍需全仓库普通门禁和本地提交。
 
+P1-09 Application 创建编排候选（进行中）：现有 Port 完成实例核验、同名 Ready 幂等、源卷和包含关系预检、Creating 预留、受控 incomplete 容器、四路径 Probe/Plan、CoW 或受限 Full Copy 执行、清除 incomplete、最终 Receipt 与 Ready 持久化。真实 APFS 的非 Git 来源及源移走后的幂等返回、同名参数冲突、特殊文件失败后的未完成状态、跨卷及包含关系的预留前拒绝已 RED/GREEN；没有 Git 操作或命令执行包装。fmt、全目标/全 feature Clippy 和全 workspace 普通测试通过。本候选尚未加入公开 CLI create/dry-run、完整降级 E2E 或 P1-09 终审，不宣称任务完成。
+
+P1-09 Application 定向变异启动记录（2026-09-25 22:24 UTC）：基线 `7084f6f` 上已暂存代码/测试差异 SHA-256 `d6c74d0a65bc3a8b00d2db14205aea0c4b2acf8e68f15ff0557ca6d9cc0949af`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，筛选 `ThinWorkspaceService::create/create_reserved`、路径包含与计划错误映射共 38 个变异，验证包 `thinws-application`，输出 `target/p1-09-application-mutants/mutants.out`。上一批同机 40 个约 53 秒；考虑 Application 集成测试较慢，预计 22:27 UTC 首次主动查看，在此前不轮询或修改冻结候选。
+
+该批实际约 47 秒完成：24 caught、3 unviable、11 missed、0 timeout，退出码 2；`outcomes.json`/`mutants.json` SHA-256 分别为 `f0a79e94970c1db5d7d4df102e8eeea2e9d23097f00606c3a80930cfbec716c4`、`1d5890d553ec781216d87d25526453e7eeefd9e0e53fb89a9b11bfbd0e440e8b`。不可作为通过证据。存活项主要集中在单独错误后端、Ready 提交后错误处理、降级选择、卷双重校验、运行时 CoW 失败条件、路径包含边界与错误映射；先简化提交后返回路径并补单因素测试，再只对未处置的变异及修正影响范围补跑。
+
+P1-09 Application 定向补跑启动记录（2026-09-25 22:31 UTC）：基线 `7084f6f` 上修正后的暂存代码/测试差异 SHA-256 `d90c9fdd5d974c3f6a177f3a0ff6d51088b02c97cb97454e1d1dd616ed963114`；主 Agent 单独执行，平台、工具、配置、验证包及并发 4 同上批，按当前 `create.rs` 的精确行号筛选前次未处置分支和新抽取的双卷不变量，输出 `target/p1-09-application-followup/mutants.out`。上批 38 个约 47 秒，本批预计不超过约 1 分钟，首次主动查看安排在 22:33 UTC；此前不轮询或修改冻结候选。
+
+补跑实际约 32 秒完成：25 caught、0 missed/unviable/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `12edd7c628ad5b15cbef0772222ed4e6245c319aa98c0f0ea061c3f16a7d7104`、`6b97a9d645aed93a967907d319f2493555b731bbcc678b9590ce5229410d4af7`。先前 11 个存活分支均被简化后的逻辑或对应单因素测试覆盖；真实 Application 测试另证明默认 CoW、同名幂等、运行时干净回滚才允许显式 Full Copy、非 CoW 失败不降级、跨卷和包含关系预留前拒绝。此结果只覆盖 Application 子结果，仍须公开 CLI、dry-run、任务终审及阶段门禁。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

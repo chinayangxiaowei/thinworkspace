@@ -3,6 +3,10 @@
 
 //! Phase 1 use-case orchestration without platform or persistence details.
 
+mod create;
+
+pub use create::{CreateOutcome, CreateRequest};
+
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;

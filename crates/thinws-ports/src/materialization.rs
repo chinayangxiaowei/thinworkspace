@@ -112,6 +112,12 @@ impl MaterializationFailure {
     pub fn receipt(&self) -> &MaterializationReceipt {
         self.receipt.as_ref()
     }
+
+    /// Separates the classified failure from its partial attempt evidence.
+    #[must_use]
+    pub fn into_parts(self) -> (PortError, MaterializationReceipt) {
+        (self.error, *self.receipt)
+    }
 }
 
 impl fmt::Debug for MaterializationFailure {

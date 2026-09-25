@@ -10,5 +10,10 @@ publish = false
 thinws-core = { path = "../thinws-core" }
 thinws-ports = { path = "../thinws-ports" }
 
+[dev-dependencies]
+tempfile.workspace = true
+thinws-adapter-macos = { path = "../thinws-adapter-macos" }
+thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
+
 [lints]
 workspace = true

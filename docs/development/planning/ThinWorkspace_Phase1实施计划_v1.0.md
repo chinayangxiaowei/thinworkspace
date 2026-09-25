@@ -276,6 +276,12 @@ P1-09 final Receipt/Ready 守卫补跑启动记录（2026-09-25 21:42 UTC）：�
 
 补跑实际于 21:42:17–21:42:37 UTC 完成，约 19 秒：5 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `bad7cda5bbffa076ea80483a474c09eb9504601ceda8f145e04049213f0bfd1c`、`5fe02ce1bc118e952ec68e58ba9221df694f3c460daa2b7d016d16f733673873`。前批长守卫已由分组事实校验替换，补测了成功回执与另一个 Probe、失败回执、回滚、单独 Full Copy 许可和无许可 CoW 成功；受影响函数此候选无存活变异。本子结果尚不包含目录创建、CLI 或 P1-09 审核。
 
+P1-09 受控目录子结果（进行中）：在既有 `BootstrapStore` 增加由 WorkspaceId 派生的新建容器、`.state/incomplete` 与空 `root/` 的描述符绑定证明，不新增 Port；data-root lifecycle lock 和已验证布局同时在场，已存在的容器不被接管。物化器会将 `root/` 权限改为来源权限，因此只有容器及 `.state` 固定要求 `0700`，`root/` 在后续重验时检查已持有目录身份、名称、类型、属主与卷而不强制其 mode 为 `0700`。错误 lock scope、替换 marker、替换 root 为外部符号链接均有真实文件系统回归；标记清除后保留普通 root 路径。此子结果不含 Application 创建编排。
+
+P1-09 受控目录定向变异启动记录（2026-09-25 21:51 UTC）：基线 `a4d2db0` 上已暂存代码/测试差异 SHA-256 `bd05fedce854668eec890a5a0e327421e558c8ac23f2615578222d095723d154`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，筛选受影响的准备、清标记、锁与目录身份函数共 14 个变异，验证包 `thinws-adapter-macos`，输出 `target/p1-09-workspace-layout-mutants/mutants.out`。同机前次 9 个相关变异约 38 秒，留构建波动余量，首次主动查看预计 21:54 UTC；此前不轮询、不修改冻结代码。
+
+该批实际于 21:51:24–21:51:54 UTC 完成，约 29 秒：13 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `7c8dde8616c0845947808778bf8cf906964653e8a6321fd5d1406e9905375e26`、`2028cc899e7d5c5bf348d1da1118e9612f83b43c1161728438a59f8c463dfeff`。按计划首次主动查看前未轮询或修改冻结候选。仍需全仓库普通门禁与本地提交，此测试不能代替创建链路 E2E。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

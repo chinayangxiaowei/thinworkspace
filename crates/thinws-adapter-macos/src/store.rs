@@ -1,10 +1,12 @@
 use std::ffi::OsStr;
 use std::fs::File;
 
-use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId};
+use thinws_core::{
+    AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId, WorkspaceId,
+};
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
-    PortError, PortErrorKind, PreparedDataRootEvidence, PublishResult,
+    PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
 };
 
 use crate::document::{
@@ -15,8 +17,8 @@ use crate::filesystem::{
     create_private_file, duplicate_validated_directory, entry_identity, io_error,
     open_private_child_directory, open_private_directory, open_private_directory_optional,
     open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
-    require_empty_directory, revalidate_directory, sync_directory, unlink_entry,
-    validate_file_entry,
+    require_empty_directory, revalidate_attached_directory, revalidate_directory, sync_directory,
+    unlink_entry, validate_file_entry,
 };
 use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
@@ -59,6 +61,55 @@ pub struct MacOsDataRootLayout {
     database_identity: FileIdentity,
     database_path: AbsolutePath,
     volume_id: VolumeId,
+}
+
+/// Proof of one newly created Workspace container.
+pub struct MacOsPreparedWorkspace {
+    container: ValidatedDirectory,
+    state: ValidatedDirectory,
+    root: ValidatedDirectory,
+    incomplete_file: File,
+    incomplete_identity: FileIdentity,
+    target_root: AbsolutePath,
+    volume_id: VolumeId,
+}
+
+impl PreparedWorkspaceEvidence for MacOsPreparedWorkspace {
+    fn target_root(&self) -> &AbsolutePath {
+        &self.target_root
+    }
+
+    fn revalidate(&self) -> Result<(), PortError> {
+        self.revalidate_directories()?;
+        validate_file_entry(
+            &self.state.fd,
+            OsStr::new("incomplete"),
+            &self.incomplete_file,
+            self.incomplete_identity,
+        )
+    }
+}
+
+impl MacOsPreparedWorkspace {
+    fn revalidate_directories(&self) -> Result<(), PortError> {
+        for directory in [&self.container, &self.state] {
+            revalidate_directory(directory)?;
+            if volume_id_for_directory(directory)? != self.volume_id {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "revalidate Workspace container volume",
+                ));
+            }
+        }
+        revalidate_attached_directory(&self.container, &self.root, OsStr::new("root"))?;
+        if volume_id_for_directory(&self.root)? != self.volume_id {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "revalidate Workspace root volume",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl DataRootLayoutEvidence for MacOsDataRootLayout {
@@ -108,6 +159,7 @@ impl BootstrapStore for MacOsHostAdapter {
     type PreparedDataRoot = MacOsPreparedDataRoot;
     type InitializingProof = MacOsInitializingProof;
     type DataRootLayout = MacOsDataRootLayout;
+    type PreparedWorkspace = MacOsPreparedWorkspace;
 
     fn prepare_bootstrap(&self) -> Result<(), PortError> {
         prepare_private_directory(&self.bootstrap_dir, false).map(|_| ())
@@ -295,6 +347,69 @@ impl BootstrapStore for MacOsHostAdapter {
         Ok(layout)
     }
 
+    fn prepare_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<Self::PreparedWorkspace, PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        let workspaces = &layout.controlled_directories[2];
+        let name = workspace_id.to_string();
+        let container = create_private_child_directory(workspaces, OsStr::new(&name))?;
+        let state = create_private_child_directory(&container, OsStr::new(".state"))?;
+        let (incomplete_file, incomplete_identity) =
+            create_private_file(&state, OsStr::new("incomplete"))?;
+        let root = create_private_child_directory(&container, OsStr::new("root"))?;
+        require_empty_directory(&root)?;
+        let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
+            PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
+                .with_source(error)
+        })?;
+        let prepared = MacOsPreparedWorkspace {
+            container,
+            state,
+            root,
+            incomplete_file,
+            incomplete_identity,
+            target_root,
+            volume_id: layout.volume_id,
+        };
+        prepared.revalidate()?;
+        layout.revalidate()?;
+        Ok(prepared)
+    }
+
+    fn clear_workspace_incomplete(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        prepared: Self::PreparedWorkspace,
+    ) -> Result<(), PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        prepared.revalidate()?;
+        let workspaces = &layout.controlled_directories[2];
+        if prepared.container.path.parent() != Some(workspaces.path.as_path()) {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "verify prepared Workspace parent",
+            ));
+        }
+        unlink_entry(&prepared.state.fd, OsStr::new("incomplete"))?;
+        sync_directory(&prepared.state.fd)?;
+        prepared.revalidate_directories()?;
+        if read_private_file(&prepared.state.fd, OsStr::new("incomplete"))?.is_some() {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "verify incomplete marker removal",
+            ));
+        }
+        layout.revalidate()?;
+        Ok(())
+    }
+
     fn publish_ready(
         &self,
         lock: &Self::LockGuard,
@@ -464,6 +579,25 @@ impl MacOsHostAdapter {
             return Err(PortError::new(
                 PortErrorKind::InvalidData,
                 "require matching bootstrap lock",
+            ));
+        }
+        lock.revalidate()
+    }
+
+    fn validate_data_root_lock(
+        &self,
+        lock: &MacOsLockGuard,
+        layout: &MacOsDataRootLayout,
+    ) -> Result<(), PortError> {
+        if (
+            lock.scope(),
+            lock.belongs_to(self),
+            lock.protects_directory(&layout.controlled_directories[0]),
+        ) != (LifecycleScope::DataRoot, true, true)
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "require matching data-root lifecycle lock",
             ));
         }
         lock.revalidate()

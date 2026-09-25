@@ -12,7 +12,7 @@ use thinws_core::{
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
     MetadataSnapshot, MetadataStoreFactory, PortError, PortErrorKind, PreparedDataRootEvidence,
-    PublishResult,
+    PreparedWorkspaceEvidence, PublishResult,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -50,6 +50,18 @@ impl PreparedDataRootEvidence for FakePrepared {
 struct FakeLayout {
     state: Rc<RefCell<State>>,
     database_path: AbsolutePath,
+}
+
+struct FakePreparedWorkspace;
+
+impl PreparedWorkspaceEvidence for FakePreparedWorkspace {
+    fn target_root(&self) -> &AbsolutePath {
+        unreachable!("init/doctor never prepares a Workspace")
+    }
+
+    fn revalidate(&self) -> Result<(), PortError> {
+        unreachable!("init/doctor never revalidates a Workspace")
+    }
 }
 
 impl DataRootLayoutEvidence for FakeLayout {
@@ -112,6 +124,7 @@ impl BootstrapStore for FakeBootstrap {
     type PreparedDataRoot = FakePrepared;
     type InitializingProof = InstallationIdentity;
     type DataRootLayout = FakeLayout;
+    type PreparedWorkspace = FakePreparedWorkspace;
 
     fn prepare_bootstrap(&self) -> Result<(), PortError> {
         self.state.borrow_mut().events.push("bootstrap.prepare");
@@ -182,6 +195,24 @@ impl BootstrapStore for FakeBootstrap {
             database_path: AbsolutePath::try_from_bytes(b"/data/metadata/state.db".to_vec())
                 .unwrap(),
         })
+    }
+
+    fn prepare_workspace(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _workspace_id: WorkspaceId,
+    ) -> Result<Self::PreparedWorkspace, PortError> {
+        unreachable!("init/doctor never prepares a Workspace")
+    }
+
+    fn clear_workspace_incomplete(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _prepared: Self::PreparedWorkspace,
+    ) -> Result<(), PortError> {
+        unreachable!("init/doctor never clears an incomplete marker")
     }
 
     fn publish_ready(

@@ -21,7 +21,9 @@ pub use document::{
 };
 pub use lock::MacOsLockGuard;
 pub use materializer::{ApfsCloneMaterializer, FullCopyMaterializer};
-pub use store::{MacOsDataRootLayout, MacOsInitializingProof, MacOsPreparedDataRoot};
+pub use store::{
+    MacOsDataRootLayout, MacOsInitializingProof, MacOsPreparedDataRoot, MacOsPreparedWorkspace,
+};
 use thinws_ports::{PortError, PortErrorKind};
 
 /// macOS implementation shared by BootstrapStore and LifecycleLock.

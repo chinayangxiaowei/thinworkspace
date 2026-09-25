@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, VolumeId};
+use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, VolumeId, WorkspaceId};
 
 use crate::PortError;
 
@@ -65,6 +65,15 @@ pub trait DataRootLayoutEvidence {
     fn revalidate(&self) -> Result<(), PortError>;
 }
 
+/// Descriptor-backed proof of a newly created, incomplete Workspace container.
+pub trait PreparedWorkspaceEvidence {
+    /// Returns the ordinary empty target directory derived from the Workspace ID.
+    fn target_root(&self) -> &AbsolutePath;
+
+    /// Rechecks directory and incomplete-marker identities without modifying them.
+    fn revalidate(&self) -> Result<(), PortError>;
+}
+
 /// Versioned bootstrap config and data-root marker persistence.
 pub trait BootstrapStore {
     /// Lock guard type accepted by mutating bootstrap operations.
@@ -75,6 +84,8 @@ pub trait BootstrapStore {
     type InitializingProof;
     /// Opaque descriptor-backed evidence for the controlled on-disk layout.
     type DataRootLayout: DataRootLayoutEvidence;
+    /// Opaque proof of one newly created Workspace container and incomplete marker.
+    type PreparedWorkspace: PreparedWorkspaceEvidence;
 
     /// Creates or validates the fixed private bootstrap directory.
     fn prepare_bootstrap(&self) -> Result<(), PortError>;
@@ -111,6 +122,23 @@ pub trait BootstrapStore {
         &self,
         identity: &InstallationIdentity,
     ) -> Result<Self::DataRootLayout, PortError>;
+
+    /// Creates a new ID-derived container, incomplete marker, and empty root.
+    /// Requires the matching held data-root lifecycle lock and never adopts an existing entry.
+    fn prepare_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<Self::PreparedWorkspace, PortError>;
+
+    /// Removes only the exact incomplete marker represented by the held proof.
+    fn clear_workspace_incomplete(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        prepared: Self::PreparedWorkspace,
+    ) -> Result<(), PortError>;
 
     /// Consumes same-run evidence and atomically advances that exact marker to Ready.
     fn publish_ready(

@@ -10,7 +10,7 @@ mod metadata;
 
 pub use bootstrap::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
-    PreparedDataRootEvidence, PublishResult,
+    PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
 pub use materialization::{

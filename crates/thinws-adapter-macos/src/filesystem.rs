@@ -472,6 +472,35 @@ pub(crate) fn revalidate_directory(directory: &ValidatedDirectory) -> Result<(),
     Ok(())
 }
 
+/// Revalidates a child whose application-owned mode may change after materialization.
+/// The private parent remains strictly validated; the child is never followed by name.
+pub(crate) fn revalidate_attached_directory(
+    parent: &ValidatedDirectory,
+    child: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<(), PortError> {
+    revalidate_directory(parent)?;
+    if child.path != parent.path.join(name) {
+        return Err(validation_error("attached directory path changed"));
+    }
+    let held = rustix::fs::fstat(&child.fd)
+        .map_err(|error| io_error("inspect held attached directory", error))?;
+    let named = rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| io_error("inspect named attached directory", error))?;
+    let checks = [
+        FileType::from_raw_mode(held.st_mode).is_dir(),
+        FileType::from_raw_mode(named.st_mode).is_dir(),
+        held.st_uid == rustix::process::geteuid().as_raw(),
+        named.st_uid == held.st_uid,
+        identity(&held) == child.identity,
+        identity(&named) == child.identity,
+    ];
+    if checks.contains(&false) {
+        return Err(validation_error("attached directory identity changed"));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_private_file(
     file: &File,
     operation: &'static str,

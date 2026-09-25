@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use tempfile::{Builder, TempDir};
 use thinws_adapter_macos::{MacOsHostAdapter, MacOsPreparedDataRoot};
-use thinws_core::{AbsolutePath, InstallationIdentity, InstanceId, RootMarkerState, VolumeId};
+use thinws_core::{
+    AbsolutePath, InstallationIdentity, InstanceId, RootMarkerState, VolumeId, WorkspaceId,
+};
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, PortConflict, PortErrorKind,
-    PreparedDataRootEvidence, PublishResult,
+    PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -120,6 +122,130 @@ fn p1_03_prepares_private_directories_and_descriptor_bound_layout() {
         .unwrap()
         .revalidate()
         .unwrap();
+}
+
+#[test]
+fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
+    let temp = controlled_tempdir();
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let data_root = temp.path().join("data");
+    adapter.prepare_bootstrap().unwrap();
+    let bootstrap_lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
+    let proof = adapter
+        .create_initializing(&bootstrap_lock, prepared, &identity)
+        .unwrap();
+    let layout = adapter.initialize_layout(&bootstrap_lock, &proof).unwrap();
+    adapter.publish_ready(&bootstrap_lock, proof).unwrap();
+    adapter.publish_config(&bootstrap_lock, &identity).unwrap();
+    drop(bootstrap_lock);
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(500))
+        .unwrap();
+    let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40").unwrap();
+    let workspace = adapter.prepare_workspace(&lock, &layout, id).unwrap();
+    let container = data_root.join("workspaces").join(id.to_string());
+    assert_eq!(
+        workspace.target_root().as_bytes(),
+        container.join("root").as_os_str().as_bytes()
+    );
+    workspace.revalidate().unwrap();
+    for relative in ["", ".state", "root"] {
+        assert_eq!(
+            fs::metadata(container.join(relative))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+    }
+    assert_eq!(
+        fs::metadata(container.join(".state/incomplete"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o600
+    );
+    assert_eq!(fs::read_dir(container.join("root")).unwrap().count(), 0);
+    assert!(adapter.prepare_workspace(&lock, &layout, id).is_err());
+    fs::set_permissions(container.join("root"), fs::Permissions::from_mode(0o750)).unwrap();
+    workspace.revalidate().unwrap();
+    adapter
+        .clear_workspace_incomplete(&lock, &layout, workspace)
+        .unwrap();
+    assert!(!container.join(".state/incomplete").exists());
+    assert!(container.join("root").is_dir());
+    assert_eq!(
+        fs::metadata(container.join("root"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o750
+    );
+
+    let second = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41").unwrap();
+    let wrong_scope = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    assert!(
+        adapter
+            .prepare_workspace(&wrong_scope, &layout, second)
+            .is_err()
+    );
+    assert!(
+        !data_root
+            .join("workspaces")
+            .join(second.to_string())
+            .exists()
+    );
+    drop(wrong_scope);
+
+    let prepared = adapter.prepare_workspace(&lock, &layout, second).unwrap();
+    let marker = data_root
+        .join("workspaces")
+        .join(second.to_string())
+        .join(".state/incomplete");
+    fs::remove_file(&marker).unwrap();
+    fs::write(&marker, b"foreign marker").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(prepared.revalidate().is_err());
+    assert!(
+        adapter
+            .clear_workspace_incomplete(&lock, &layout, prepared)
+            .is_err()
+    );
+    assert_eq!(fs::read(&marker).unwrap(), b"foreign marker");
+
+    let third = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42").unwrap();
+    let prepared = adapter.prepare_workspace(&lock, &layout, third).unwrap();
+    let target = data_root
+        .join("workspaces")
+        .join(third.to_string())
+        .join("root");
+    let victim = temp.path().join("outside-root");
+    private_dir(&victim);
+    fs::write(victim.join("untouched"), b"keep").unwrap();
+    fs::remove_dir(&target).unwrap();
+    symlink(&victim, &target).unwrap();
+    assert!(prepared.revalidate().is_err());
+    assert!(
+        adapter
+            .clear_workspace_incomplete(&lock, &layout, prepared)
+            .is_err()
+    );
+    assert_eq!(fs::read(victim.join("untouched")).unwrap(), b"keep");
+    assert!(
+        data_root
+            .join("workspaces")
+            .join(third.to_string())
+            .join(".state/incomplete")
+            .exists()
+    );
 }
 
 #[test]

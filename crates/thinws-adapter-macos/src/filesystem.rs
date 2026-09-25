@@ -267,6 +267,26 @@ pub(crate) fn open_private_child_directory(
     })
 }
 
+/// Opens an owned ordinary child directory without imposing platform-private mode.
+pub(crate) fn open_owned_child_directory(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<ValidatedDirectory, PortError> {
+    let fd = rustix::fs::openat(&parent.fd, name, DIRECTORY_OPEN_FLAGS, Mode::empty()).map_err(
+        |error| secure_open_error("open Workspace root", error, PortErrorKind::InvalidLayout),
+    )?;
+    let stat = rustix::fs::fstat(&fd).map_err(|error| io_error("inspect Workspace root", error))?;
+    // O_DIRECTORY already rejects non-directories; mode is user data after mirroring.
+    if stat.st_uid != rustix::process::geteuid().as_raw() {
+        return Err(validation_error("Workspace root identity is unsafe"));
+    }
+    Ok(ValidatedDirectory {
+        fd,
+        identity: identity(&stat),
+        path: parent.path.join(name),
+    })
+}
+
 pub(crate) fn duplicate_validated_directory(
     directory: &ValidatedDirectory,
 ) -> Result<ValidatedDirectory, PortError> {

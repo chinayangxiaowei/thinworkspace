@@ -140,6 +140,14 @@ pub trait BootstrapStore {
         prepared: Self::PreparedWorkspace,
     ) -> Result<(), PortError>;
 
+    /// Verifies a previously Ready Workspace still owns a marker-free ordinary root.
+    fn validate_ready_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<AbsolutePath, PortError>;
+
     /// Consumes same-run evidence and atomically advances that exact marker to Ready.
     fn publish_ready(
         &self,

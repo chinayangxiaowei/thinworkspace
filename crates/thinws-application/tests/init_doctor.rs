@@ -215,6 +215,15 @@ impl BootstrapStore for FakeBootstrap {
         unreachable!("init/doctor never clears an incomplete marker")
     }
 
+    fn validate_ready_workspace(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _workspace_id: WorkspaceId,
+    ) -> Result<AbsolutePath, PortError> {
+        unreachable!("init/doctor never validates a Ready Workspace")
+    }
+
     fn publish_ready(
         &self,
         _lock: &Self::LockGuard,

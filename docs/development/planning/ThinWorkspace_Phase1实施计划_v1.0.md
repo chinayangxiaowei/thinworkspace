@@ -292,6 +292,12 @@ P1-09 runtime 摘要单变异补跑启动记录（2026-09-25 22:07 UTC）：基�
 
 补跑实际于 22:07:08–22:07:15 UTC 完成，约 7 秒：唯一变异 caught，0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `51badcceb7da3853027e27563e968ec5180ed66ef5226607c67b8ffe537c6832`、`666ad0a818a514540c55d92f0c9e48e642b2ecf062a8b298bb3f1122c701d5d2`。前批其他 15 项已捕获，2 项不可编译，候选该读取范围无存活变异；尚需全仓库普通门禁和本地提交。
 
+P1-09 Ready 目录核验子结果（进行中）：同名幂等或未来路径查询在数据库 Ready 与 final receipt 之外，还要由既有 `BootstrapStore` 在 data-root lifecycle lock 下验证受控 `workspaces/<id>` 私有容器、无 incomplete 标记、普通 root 的身份/属主/卷与路径。`root/` 不强制 `0700`，因为已经继承来源目录权限；符号链接替换和残留标记由真实文件系统测试拒绝。该核验不自动修复缺损目标，也不取代 P1-10 status 的 Git 检查。
+
+P1-09 Ready 目录核验定向变异启动记录（2026-09-25 22:12 UTC）：基线 `de78cf7` 上已暂存代码/测试差异 SHA-256 `a6628e5a32b578117a745b25ba61cbc08d57162cb64abfb83c63bb3b2619ba70`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，筛选 `validate_ready_workspace` 与 `open_owned_child_directory` 共 4 个变异，验证包 `thinws-adapter-macos`，输出 `target/p1-09-ready-path-mutants/mutants.out`。同机前次 14 个约 29 秒，预计 22:14 UTC 首次主动查看；此前不轮询、不修改冻结代码。
+
+该批实际于 22:12:44–22:13:00 UTC 完成，约 16 秒：2 caught、2 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `f3ae078a3d10e8a0ec98ac9a3aed59eee52aa63ecb68d6b61fddd68ea6e63f9d`、`6692aa98330b30d8802c205743f23c8551fbefedc3aef62f25e9dded604e2a2e`。按计划首次主动查看前未轮询或修改候选；本子结果仍需全仓库普通门禁和本地提交。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

@@ -15,10 +15,11 @@ use crate::document::{
 use crate::filesystem::{
     FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, create_private_child_directory,
     create_private_file, duplicate_validated_directory, entry_identity, io_error,
-    open_private_child_directory, open_private_directory, open_private_directory_optional,
-    open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
-    require_empty_directory, revalidate_attached_directory, revalidate_directory, sync_directory,
-    unlink_entry, validate_file_entry,
+    open_owned_child_directory, open_private_child_directory, open_private_directory,
+    open_private_directory_optional, open_private_file, path_from_absolute,
+    prepare_private_directory, read_private_file, require_empty_directory,
+    revalidate_attached_directory, revalidate_directory, sync_directory, unlink_entry,
+    validate_file_entry,
 };
 use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
@@ -408,6 +409,42 @@ impl BootstrapStore for MacOsHostAdapter {
         }
         layout.revalidate()?;
         Ok(())
+    }
+
+    fn validate_ready_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<AbsolutePath, PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        let workspaces = &layout.controlled_directories[2];
+        let container =
+            open_private_child_directory(workspaces, OsStr::new(&workspace_id.to_string()))?;
+        let state = open_private_child_directory(&container, OsStr::new(".state"))?;
+        if read_private_file(&state.fd, OsStr::new("incomplete"))?.is_some() {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace still has an incomplete marker",
+            ));
+        }
+        let root = open_owned_child_directory(&container, OsStr::new("root"))?;
+        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
+        for directory in [&container, &state, &root] {
+            if volume_id_for_directory(directory)? != layout.volume_id {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Ready Workspace volume changed",
+                ));
+            }
+        }
+        let path = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
+            PortError::new(PortErrorKind::InvalidData, "derive Ready Workspace path")
+                .with_source(error)
+        })?;
+        layout.revalidate()?;
+        Ok(path)
     }
 
     fn publish_ready(

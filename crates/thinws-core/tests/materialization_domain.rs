@@ -731,6 +731,21 @@ fn full_copy_receipt_preserves_fallback_facts_without_claiming_cow() {
     .unwrap();
     let digest = TreeDigest::new([7; 32]);
 
+    assert_eq!(
+        MaterializationReceipt::successful_apfs_clone(
+            &plan,
+            1,
+            1,
+            Vec::new(),
+            digest,
+            digest,
+            0,
+            0,
+            None,
+        ),
+        Err(MaterializationReceiptError::AdapterMismatch)
+    );
+
     let receipt = MaterializationReceipt::successful_full_copy(
         &plan,
         2,

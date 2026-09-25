@@ -244,6 +244,18 @@ P1-07 幻影 target 修正变异补跑启动记录（2026-09-24 23:48 UTC）：�
 
 补跑实际 16 秒完成：5 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `52ad94638e9f6ed37ecf4187e3f3d2b6fee6d67a0ab555e8b8fe7950733e6896`、`8abbe048f586988abc3276d7aafa679f597ad41086f874fefa4b9a291c7a31fb`。此后生产代码未再变化。最终候选提交前本地 `cargo fmt --all -- --check`、Clippy 全目标/全 feature、Debug/Release 全 workspace 测试、rustdoc、29 项仓库工具测试、`cargo deny check`、离线 `cargo audit --no-fetch` 均退出 0；deny 只有既有未命中配置警告。`/Volumes/data` 真实跨卷 Probe 和 store 用例在 Debug/Release 均通过，相关 Probe/store 生产代码在本次回执修正中未变。不存在与本次 syscall 失败时序对应的模糊测试 harness；不以未变更的路径解析 fuzz 证据冒充此项覆盖。仍未执行线上 CI/PR/push 或真实子挂载创建。任务在精确提交独立审核通过前保持 In Progress。
 
+GPT-6 Astra（`gpt-6-astra` / `xhigh`）只读审核精确候选 `0b98fa9a09e4fbc9db50cbd5113f62cf56e72df6`，结论 Changes requested（Critical/High 0、Normal 1、Low 0）。先前 High、两项失败回执 Normal 和幻影 target 均确认关闭；新增 Normal 是 Core 的 `successful_apfs_clone` 未像 `successful_full_copy` 一样拒绝后端不匹配的合法 Full Copy Plan，可构造 `effective=FullCopy / actual=CowClone / cow=Confirmed` 的矛盾成功回执。真实 Adapter 入口已有防护，但 Core API 不变量仍须闭合。主 Agent 已用 Full Copy Plan 生成该矛盾回执的测试先 RED 后 GREEN，增加对称的 `AdapterMismatch` 守卫；修复后的精确候选须重新审核。
+
+P1-07 Core 回执守卫补跑变异启动记录（2026-09-24 23:56 UTC）：相对 `0b98fa9` 的 Core 代码与测试差异 SHA-256 `4a5f8cfa492ec271ceffd5303c517b119014ca2c2368cffdc4d164fe980203d1`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，仅针对新增守卫所属的 `successful_apfs_clone` 7 个变异，验证包 `thinws-core`，输出 `target/p1-07-clone-receipt-guard-mutants/mutants.out`。前次同机 6 个完整变异耗时 16 秒，保留构建波动，预计 23:58 UTC 首次主动查看；此前不轮询或修改候选生产代码。
+
+该批实际 12 秒完成：5 caught、1 unviable、1 missed、0 timeout，退出码 2，不能作为通过结论；`outcomes.json`/`mutants.json` SHA-256 分别为 `5544c93689be414964fdb331f0b0d3f2647d1edb717aa15d3eea17cb67e6cd75`、`81bfa8d02fac1aa2b5b85e113bddc2bba5c6b4fd6537ee157c9ea0cffd70737b`。唯一 missed 为后端与有效模式的拒绝条件 `||→&&`；当前仅有的两种合法 Plan 构造分别固定 Clone/Cow 和 FullCopy/FullCopy，故该变异在当前模型下等价。为使不变量表达更直接并避免留下无用的等价变异，主 Agent 将两项校验改为一个明确的二元组合匹配，原 RED 回归保持绿色。
+
+P1-07 Core 组合守卫变异重跑启动记录（2026-09-24 23:59 UTC）：相对 `0b98fa9` 的 Core 代码与测试差异 SHA-256 `5a2bce7d6e2ffbe66ca5e4f2319fee177a7b84e97d11695dd7f27d4ba8f31222`；执行负责人、平台、工具与配置同上，并发 4、gitignore 开启，仅针对受影响的 `successful_apfs_clone` 5 个变异，验证包 `thinws-core`，输出 `target/p1-07-clone-receipt-pair-mutants/mutants.out`。上次同机 7 个 12 秒，留构建波动，预计 00:01 UTC 首次主动查看；此前不轮询或修改候选生产代码。
+
+组合守卫补跑实际 8 秒完成：4 caught、1 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `df792a97b15a33b0b726b64a3acbb15924b6242f1992757ccbeae53b1ce8c0d7`、`1aa5eb7ae815b8531c0a3d564c3fe12eb4501e3d7ba5f3ceb2d831724ec17472`。之后仅按 rustfmt 调整该 `matches!` 模式换行，匹配项、控制流和测试语义不变；核对实际变异位置后复用此批证据，不重启等价范围的变异。精确提交复核前仍须完成普通门禁。
+
+Core 守卫最终门禁（2026-09-25 UTC）：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --release --all-targets`、`cargo doc --workspace --no-deps` 均退出 0，`git diff --check` 通过。仅 Core 回执构造和对应测试/计划有语义变化，Adapter Probe/store、依赖、工具和供应链配置均未变，沿用 `0b98fa9` 的真实 `/Volumes/data` 跨卷、29 项工具测试、`cargo deny check`、离线 `cargo audit --no-fetch` 同环境证据；不宣称本次重复运行了它们。仍未执行线上 CI/PR/push、真实子挂载创建或没有对应 harness 的 syscall 时序 fuzz。P1-07 待修正后的精确候选独立审核，不提前标 Done。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

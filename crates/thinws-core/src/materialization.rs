@@ -1462,6 +1462,15 @@ impl MaterializationReceipt {
         logical_bytes: u64,
         physical_bytes: Option<u64>,
     ) -> Result<Self, MaterializationReceiptError> {
+        if !matches!(
+            (plan.selected_adapter(), plan.effective_mode()),
+            (
+                MaterializerKind::ApfsFileClone,
+                MaterializationMode::CowClone
+            )
+        ) {
+            return Err(MaterializationReceiptError::AdapterMismatch);
+        }
         if regular_file_count != clone_calls_succeeded {
             return Err(MaterializationReceiptError::CloneCountMismatch);
         }

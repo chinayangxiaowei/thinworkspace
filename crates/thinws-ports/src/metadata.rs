@@ -54,6 +54,15 @@ pub trait MetadataStoreFactory<L: DataRootLayoutEvidence> {
         expected: &InstallationRecord,
         busy_timeout: Duration,
     ) -> Result<MetadataSnapshot, PortError>;
+
+    /// Opens an existing, identity-validated installation for lifecycle writes.
+    /// It must not create or migrate a missing database.
+    fn open_existing(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<Box<dyn MetadataStore>, PortError>;
 }
 
 /// Durable Phase 1 Workspace metadata operations exposed to Application.

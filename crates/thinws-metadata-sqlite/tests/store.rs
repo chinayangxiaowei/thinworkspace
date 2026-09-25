@@ -141,6 +141,89 @@ fn p1_03_factory_initializes_precreated_file_and_inspects_read_only() {
 }
 
 #[test]
+fn p1_09_lifecycle_writer_opens_only_an_existing_validated_database() {
+    let temp = controlled_tempdir();
+    let database = fs::canonicalize(temp.path()).unwrap().join("state.db");
+    let layout = TestLayout {
+        database_path: AbsolutePath::try_from_bytes(database.as_os_str().as_bytes().to_vec())
+            .unwrap(),
+    };
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+
+    assert!(
+        factory
+            .open_existing(&layout, &expected, Duration::from_millis(50))
+            .is_err()
+    );
+    assert!(!database.exists());
+
+    fs::File::create(&database).unwrap();
+    assert!(
+        factory
+            .open_existing(&layout, &expected, Duration::from_millis(50))
+            .is_err()
+    );
+    assert_eq!(fs::metadata(&database).unwrap().len(), 0);
+
+    factory
+        .initialize(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    let mut writer = factory
+        .open_existing(&layout, &expected, Duration::from_millis(50))
+        .unwrap();
+    assert_eq!(writer.installation(), &expected);
+    let value = reservation(
+        0,
+        "writer-open",
+        "/Volumes/data/thinws/workspaces/writer-open",
+    );
+    assert_eq!(
+        writer.reserve_workspace(&value).unwrap().state(),
+        WorkspaceState::Creating
+    );
+}
+
+#[test]
+fn p1_09_lifecycle_writer_revalidates_layout_and_installation() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let stable = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+    factory
+        .initialize(&stable, &expected, Duration::from_millis(50))
+        .unwrap();
+
+    for fail_at in 1..=3 {
+        let layout = FailAtRevalidationLayout::new(&database, fail_at);
+        let error = factory
+            .open_existing(&layout, &expected, Duration::from_millis(50))
+            .err()
+            .expect("layout failure must stop the lifecycle writer");
+        assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+    }
+
+    let wrong = InstallationRecord::new(
+        InstallationIdentity::new(
+            InstanceId::from_str(OTHER_INSTANCE_ID).unwrap(),
+            expected.identity().data_root().clone(),
+            expected.identity().volume_id(),
+        ),
+        expected.created_at(),
+    );
+    let error = factory
+        .open_existing(&stable, &wrong, Duration::from_millis(50))
+        .err()
+        .expect("wrong installation must not be opened for lifecycle writes");
+    assert_eq!(
+        error.conflict_kind(),
+        Some(PortConflict::InstallationIdentity)
+    );
+}
+
+#[test]
 fn p1_03_factory_preserves_layout_failures_at_every_revalidation_boundary() {
     let factory = SqliteMetadataStoreFactory;
     let expected = installation();

@@ -246,6 +246,15 @@ impl MetadataStoreFactory<FakeLayout> for FakeMetadata {
             self.state.borrow().workspaces.clone(),
         ))
     }
+
+    fn open_existing(
+        &self,
+        _layout: &FakeLayout,
+        _expected: &InstallationRecord,
+        _busy_timeout: Duration,
+    ) -> Result<Box<dyn thinws_ports::MetadataStore>, PortError> {
+        unreachable!("init/doctor never opens a lifecycle writer")
+    }
 }
 
 fn service(state: Rc<RefCell<State>>) -> ThinWorkspaceService<FakeBootstrap, FakeMetadata> {

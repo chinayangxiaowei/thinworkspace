@@ -187,7 +187,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Done |
 | P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Done |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
-| P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Backlog |
+| P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | In Progress |
 
 小阶段退出：非 Git 来源、原样目录范围、默认 CoW、显式复制、路径竞态和 partial rollback 通过；未完成目录不被误报 Ready，Ready 不要求 Git clean。
 
@@ -257,6 +257,16 @@ P1-07 Core 组合守卫变异重跑启动记录（2026-09-24 23:59 UTC）：相�
 Core 守卫最终门禁（2026-09-25 UTC）：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --release --all-targets`、`cargo doc --workspace --no-deps` 均退出 0，`git diff --check` 通过。仅 Core 回执构造和对应测试/计划有语义变化，Adapter Probe/store、依赖、工具和供应链配置均未变，沿用 `0b98fa9` 的真实 `/Volumes/data` 跨卷、29 项工具测试、`cargo deny check`、离线 `cargo audit --no-fetch` 同环境证据；不宣称本次重复运行了它们。仍未执行线上 CI/PR/push、真实子挂载创建或没有对应 harness 的 syscall 时序 fuzz。P1-07 待修正后的精确候选独立审核，不提前标 Done。
 
 P1-07 完成记录（2026-09-25 UTC）：GPT-6 Astra（`gpt-6-astra` / `xhigh`）只读独立复核完整范围 `38a2500..1428384576192205e90bbffe9dc80d1ef10224b4`，结论 Approve，Critical/High/Normal/Low 均为 0；前次 High、失败回执两项 Normal、幻影 target 与 Core 后端错配 Normal 均已关闭。任务提交为 `d170b20`、`4714b1f`、`0b98fa9`、`1428384`，本任务的真实同卷 APFS Clone/Full Copy、显式受限 fallback、失败回执/回滚和真实 `/Volumes/data` 跨卷拒绝验收均已取得前述证据。未执行项与限制维持前述记录；后续 P1-09 才实现 Workspace create、持久状态和 Ready，因此 P1-07 Done 不表示 P1.c 小阶段或 Phase 1 放行。
+
+当前领取：P1-09 由主 Agent 于 2026-09-25 UTC 领取，基线 `c62f381`、任务分支 `task/p1-09-workspace-create`、唯一 checkout `/Volumes/data/code/worktree`；基线 fmt 和 Debug 全 workspace 测试通过。风险 R4（真实目录写入、状态与故障边界），主要写入区为现有 Application、MetadataStore、macOS Adapter 与 CLI；不派生开发 Agent 或线上 PR，审核由 GPT-6 Astra（`xhigh`）只读独立完成。范围内是同卷 APFS 来源的 create/dry-run、Creating 与 incomplete 标记、受控空目标、现有 CoW/Full Copy 物化与获准降级、最终 Receipt 和 Ready 同一短事务、失败转 Error、同名幂等/冲突和公开命令输出；范围外是 Git 检查、path/status/list、remove/GC、自动恢复、跨卷复制和执行包装。
+
+P1-09 验收断言：无 Git 来源可以创建可直接访问的普通目录；实际 clone 或显式 Full Copy 的结果与持久 final Receipt 一致，只有完整物化、标记清除并完成最终 SQLite 提交才返回 Ready。同名且源/策略相同的 Ready 请求返回原路径而不重复制；不同参数报冲突，非 Ready 报未完成。dry-run 不分配 ID、不预留名称、不写受控目录或产品状态。默认不静默降级，跨卷/路径变化/源变化/空间不足/回滚未确认时不误报 Ready；Creating 后任一点失败或中断仍可由 doctor 观察为非 Ready，不自动续做。并发名称争用只有一个预留成功；根、卷、WorkspaceId 和目录项归属重验，不能接管外部对象。公开 help、人类/JSON 输出、错误码与用户手册一致；真实 APFS 与 `/Volumes/data` 跨卷、故障注入、锁超时、SQLite 事务失败、受影响变异及适用 fuzz smoke 有记录化证据。P1-12 之前不以尚未实现的 remove 承诺残留可在 CLI 内清理。
+
+P1-09 首个持久化子结果（进行中）：在现有 `MetadataStoreFactory` 增加已验证布局上的生命周期 writer 打开能力，不增加第八个 Port；实际 SQLite 打开使用 no-create/no-follow，前后重验目录与数据库身份，校验既有 schema/installation，不执行 migration。缺失数据库、未初始化空库、布局证明失败或实例错配均拒绝；真实 writer 可预留 Creating。对应测试已按预期先 RED 后 GREEN；fmt、Clippy 与 Debug 全 workspace 基线/增量门禁通过。这只是创建链路的前置边界，不等于 final Receipt/Ready 或公开命令已交付。
+
+P1-09 生命周期 writer 定向变异启动记录（2026-09-25 00:13 UTC）：基线 `c62f381` 上代码/测试差异 SHA-256 `be0e8f8e36ef1b969c3a32e6813b80155dcbcc40e0f800040d76bbd4bd33e097`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 1、gitignore 开启，只选择 `SqliteMetadataStoreFactory::open_existing` 1 个变异，验证包 `thinws-metadata-sqlite`，输出 `target/p1-09-open-existing-mutants/mutants.out`。上一批同机 5 个约 8 秒，考虑 SQLite 测试和构建波动，首次主动查看预计 00:15 UTC；此前不轮询或修改冻结代码。
+
+该批实际 8 秒完成（00:13:49–00:13:57 UTC），1 个变异因试图将 `Box<dyn MetadataStore>` 替换为不可构造的 `Default` 而编译失败，结果为 1 unviable、0 caught/missed/timeout，工具退出码 0 但**无有效变异测试结论**；不将其计作门禁通过。`outcomes.json`/`mutants.json` SHA-256 分别为 `30a27d456a6cec005804c7357ab1c392f7189048648a96bf1f42f852aa9cea72`、`2bd84e171fd0f49cd3f5f7f5db6223c9d699746927a06205160584831ca31049`。本边界依赖已通过的缺库、空库、错实例与布局重验回归；后续 final Receipt/Ready 的有效变异另行覆盖。
 
 ### 4.4 P1.d 查询与路径交付
 

@@ -106,6 +106,30 @@ impl<L: DataRootLayoutEvidence> MetadataStoreFactory<L> for SqliteMetadataStoreF
         layout.revalidate()?;
         Ok(MetadataSnapshot::new(installation, workspaces))
     }
+
+    fn open_existing(
+        &self,
+        layout: &L,
+        expected: &InstallationRecord,
+        busy_timeout: Duration,
+    ) -> Result<Box<dyn MetadataStore>, PortError> {
+        layout.revalidate()?;
+        let path = database_path(layout.database_path());
+        let connection = Connection::open_with_flags(path, DATABASE_EXISTING_WRITE_FLAGS)
+            .map_err(|error| storage_error("open existing metadata writer", error))?;
+        layout.revalidate()?;
+        connection
+            .busy_timeout(busy_timeout)
+            .map_err(|error| storage_error("set lifecycle SQLite busy timeout", error))?;
+        validate_existing_database(&connection, expected)?;
+        configure_connection(&connection, busy_timeout)?;
+        let installation = read_installation(&connection)?;
+        layout.revalidate()?;
+        Ok(Box::new(SqliteMetadataStore {
+            connection,
+            installation,
+        }))
+    }
 }
 
 impl SqliteMetadataStore {

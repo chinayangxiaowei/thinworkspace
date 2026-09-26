@@ -222,7 +222,7 @@ data-root scope: <data-root>/metadata/lifecycle.lock
 
 锁文件内 PID 仅在成功持锁后写入，供诊断使用；不能通过读取 PID 判定锁所有权，也不终止该进程。guard 持有文件描述符，drop/close 释放锁。两个 scope 相互独立：持有 bootstrap lock 不阻止已初始化 data root 的生命周期操作，反之亦然。当前 Phase 1 没有同时持有两把锁的用例；初始化全过程只持 bootstrap lock，创建/删除/GC 只持对应 data-root lock。
 
-查询命令不取得 lifecycle lock，也不写 SQLite。测试可注入 bootstrap 目录、data root 和较短时限；生产位置不能由隐藏环境变量覆盖。
+查询命令（包括 `doctor`、`workspace list/path/status`）不取得 lifecycle lock，也不写 SQLite 产品状态。`path/status` 使用只读快照和路径归属重验；不靠这把锁阻止并发创建或清理，也不保证返回后路径持续存在。测试可注入 bootstrap 目录、data root 和较短时限；生产位置不能由隐藏环境变量覆盖。
 
 ### 4.7 P1-03 初始化调用边界
 

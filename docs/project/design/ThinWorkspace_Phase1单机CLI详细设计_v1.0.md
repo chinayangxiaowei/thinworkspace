@@ -169,7 +169,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 ## 八、查询与未完成状态
 
-list/status 展示全部活跃状态；path 仅 Ready。查询不写 SQLite/Git 产品状态，不自动清理或恢复；Ready 路径验证使用 lifecycle lock，锁实现可能更新其 PID 诊断文件，SQLite read-only 打开也可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
+list/status 展示全部活跃状态；path 仅 Ready。查询不取得 lifecycle lock，不写 SQLite/Git 产品状态，也不自动清理或恢复；Ready 路径在只读快照、受控目录归属核验及再次只读快照一致后返回。检测到的并发状态或路径身份变化必须拒绝可用路径，但检查结束后仍不能保证路径持续存在；P1 不维护跨进程的历史 root inode 证明。SQLite read-only 打开可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
 
 doctor 只读报告不一致及未完成状态，没有 `--repair`。创建中断后不自动重新镜像最新源；调用者可显式强制清理登记的残留 Workspace，再以释放后的名称重新创建。初始化中断的 data root 不属于已登记 Workspace，不能交给 `workspace remove` 删除。
 

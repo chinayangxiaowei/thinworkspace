@@ -2,12 +2,10 @@
 
 use std::str::FromStr;
 
-use thinws_core::{
-    AbsolutePath, ErrorCode, UnixMillis, WorkspaceName, WorkspaceRecord, WorkspaceState,
-};
+use thinws_core::{AbsolutePath, ErrorCode, WorkspaceName, WorkspaceRecord, WorkspaceState};
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, GitInspection,
-    GitInspector, LifecycleLock, LifecycleLockGuard, MetadataSnapshot, MetadataStoreFactory,
+    GitInspector, LifecycleLock, MetadataSnapshot, MetadataStoreFactory,
 };
 
 use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error};
@@ -107,6 +105,11 @@ where
         &self,
         name: &WorkspaceName,
     ) -> Result<(WorkspaceQuery, Option<AbsolutePath>), UseCaseError> {
+        let snapshot = self.inspect_current()?;
+        let workspace = find_workspace(&snapshot, name)?;
+        if workspace.record().state() != WorkspaceState::Ready {
+            return Ok((workspace, None));
+        }
         let identity = self
             .bootstrap
             .read_config()
@@ -117,20 +120,6 @@ where
                     "ThinWorkspace is not initialized",
                 )
             })?;
-        let lock = self
-            .bootstrap
-            .acquire_data_root(identity.data_root(), self.lock_timeout)
-            .map_err(|error| map_port(Stage::Lock, error))?;
-        lock.revalidate()
-            .map_err(|error| map_port(Stage::Lock, error))?;
-        let epoch = UnixMillis::new(0).expect("zero is a valid Unix millisecond timestamp");
-        let snapshot = self.inspect_existing(&identity, epoch)?;
-        let workspace = find_workspace(&snapshot, name)?;
-        if workspace.record().state() != WorkspaceState::Ready {
-            lock.revalidate()
-                .map_err(|error| map_port(Stage::Lock, error))?;
-            return Ok((workspace, None));
-        }
         let layout = self
             .bootstrap
             .validate_layout(&identity)
@@ -138,11 +127,7 @@ where
         self.require_ready_marker(&identity)?;
         let path = self
             .bootstrap
-            .validate_ready_workspace(
-                &lock,
-                &layout,
-                workspace.record().reservation().workspace_id(),
-            )
+            .validate_ready_workspace(&layout, workspace.record().reservation().workspace_id())
             .map_err(|error| map_port(Stage::Layout, error))?;
         if &path != workspace.record().reservation().target_path() {
             return Err(semantic_error(
@@ -153,9 +138,17 @@ where
         layout
             .revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
-        lock.revalidate()
-            .map_err(|error| map_port(Stage::Lock, error))?;
-        Ok((workspace, Some(path)))
+        let current = find_workspace(&self.inspect_current()?, name)?;
+        if current.record().state() != WorkspaceState::Ready {
+            return Ok((current, None));
+        }
+        if current != workspace {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "Ready Workspace changed during path verification",
+            ));
+        }
+        Ok((current, Some(path)))
     }
 }
 

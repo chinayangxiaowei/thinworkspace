@@ -346,9 +346,11 @@ where
                     "Workspace creation is incomplete",
                 ));
             }
+            lock.revalidate()
+                .map_err(|error| map_port(Stage::Layout, error))?;
             let verified_path = self
                 .bootstrap
-                .validate_ready_workspace(&lock, &layout, existing.reservation().workspace_id())
+                .validate_ready_workspace(&layout, existing.reservation().workspace_id())
                 .map_err(|error| map_port(Stage::Layout, error))?;
             if &verified_path != existing.reservation().target_path() {
                 return Err(semantic_error(

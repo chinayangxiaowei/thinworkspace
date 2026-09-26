@@ -140,10 +140,11 @@ pub trait BootstrapStore {
         prepared: Self::PreparedWorkspace,
     ) -> Result<(), PortError>;
 
-    /// Verifies a previously Ready Workspace still owns a marker-free ordinary root.
+    /// Read-only check that a previously Ready Workspace currently has a
+    /// marker-free ordinary root within the validated data-root layout.
+    /// This does not lock out another process or promise future path validity.
     fn validate_ready_workspace(
         &self,
-        lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError>;

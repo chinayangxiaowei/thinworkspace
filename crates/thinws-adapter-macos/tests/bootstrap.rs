@@ -189,7 +189,7 @@ fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
     );
     assert_eq!(
         adapter
-            .validate_ready_workspace(&lock, &layout, id)
+            .validate_ready_workspace(&layout, id)
             .unwrap()
             .as_bytes(),
         container.join("root").as_os_str().as_bytes()
@@ -197,21 +197,13 @@ fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
     let stale_marker = container.join(".state/incomplete");
     fs::write(&stale_marker, b"incomplete").unwrap();
     fs::set_permissions(&stale_marker, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(
-        adapter
-            .validate_ready_workspace(&lock, &layout, id)
-            .is_err()
-    );
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
     fs::remove_file(&stale_marker).unwrap();
     let ready_victim = temp.path().join("ready-victim");
     private_dir(&ready_victim);
     fs::remove_dir(container.join("root")).unwrap();
     symlink(&ready_victim, container.join("root")).unwrap();
-    assert!(
-        adapter
-            .validate_ready_workspace(&lock, &layout, id)
-            .is_err()
-    );
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
 
     let second = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41").unwrap();
     let wrong_scope = adapter

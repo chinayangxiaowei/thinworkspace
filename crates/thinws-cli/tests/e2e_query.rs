@@ -175,7 +175,7 @@ fn list_returns_active_workspaces_in_name_order_without_git_results() {
 
 #[test]
 fn path_is_a_single_ordinary_path_line_and_rejects_json() {
-    let (_temp, bootstrap, data_root, source) = fixture();
+    let (temp, bootstrap, data_root, source) = fixture();
     initialize(&bootstrap, &data_root);
     let created = create(&bootstrap, &source, "plain");
     let expected = created["data"]["path"].as_str().expect("created path");
@@ -205,6 +205,22 @@ fn path_is_a_single_ordinary_path_line_and_rejects_json() {
     );
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["error"]["code"], "E_USAGE");
+
+    let lock_file = data_root.join("metadata/lifecycle.lock");
+    fs::rename(&lock_file, data_root.join("metadata/old-lifecycle.lock"))
+        .expect("remove active lock entry from controlled fixture");
+    symlink(temp.path(), &lock_file).expect("replace lock entry with an invalid symlink");
+    let (code, stdout, stderr) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "workspace".into(),
+            "path".into(),
+            "plain".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(stdout, format!("{expected}\n").as_bytes());
 
     let (code, status) = json(
         &bootstrap,
@@ -352,7 +368,7 @@ fn isolated_status_child() {
 }
 
 #[test]
-fn path_and_status_refuse_replaced_ready_root_and_missing_names() {
+fn path_and_status_refuse_symlink_replacement_and_missing_names() {
     let (temp, bootstrap, data_root, source) = fixture();
     initialize(&bootstrap, &data_root);
     let created = create(&bootstrap, &source, "protected");
@@ -412,8 +428,74 @@ fn path_and_status_refuse_replaced_ready_root_and_missing_names() {
 }
 
 #[test]
-fn non_ready_status_is_diagnostic_and_path_is_rejected() {
+fn path_and_status_classify_a_missing_registered_data_root() {
+    let (temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    create(&bootstrap, &source, "lost-root");
+    fs::rename(&data_root, temp.path().join("data-root-moved"))
+        .expect("move registered data root without replacing it");
+
+    let (code, error) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "lost-root".into(),
+        ],
+    );
+    assert_eq!(code, 32, "{error}");
+    assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+    let (code, stdout, stderr) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "workspace".into(),
+            "path".into(),
+            "lost-root".into(),
+        ],
+    );
+    assert_eq!(code, 32, "{}", String::from_utf8_lossy(&stderr));
+    assert!(stdout.is_empty());
+}
+
+#[test]
+fn path_and_status_classify_a_missing_metadata_directory_as_layout_failure() {
     let (_temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    create(&bootstrap, &source, "lost-metadata");
+    fs::rename(data_root.join("metadata"), data_root.join("metadata-moved"))
+        .expect("move metadata directory without replacing it");
+
+    let (code, status) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "lost-metadata".into(),
+        ],
+    );
+    assert_eq!(code, 33, "{status}");
+    assert_eq!(status["error"]["code"], "E_DATA_ROOT_LAYOUT");
+    let (code, stdout, stderr) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "workspace".into(),
+            "path".into(),
+            "lost-metadata".into(),
+        ],
+    );
+    assert_eq!(code, 33, "{}", String::from_utf8_lossy(&stderr));
+    assert!(stdout.is_empty());
+}
+
+#[test]
+fn non_ready_status_is_diagnostic_and_path_is_rejected() {
+    let (temp, bootstrap, data_root, source) = fixture();
     initialize(&bootstrap, &data_root);
     let created = create(&bootstrap, &source, "failed-later");
     let workspace_id = created["data"]["workspace_id"]
@@ -483,6 +565,34 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     assert_eq!(code, 21);
     assert!(stdout.is_empty());
     assert!(String::from_utf8_lossy(&stderr).contains("E_WORKSPACE_NOT_READY"));
+
+    let lock_file = data_root.join("metadata/lifecycle.lock");
+    fs::rename(&lock_file, data_root.join("metadata/old-lifecycle.lock"))
+        .expect("remove active lock entry from controlled fixture");
+    symlink(temp.path(), &lock_file).expect("replace lock entry with an invalid symlink");
+    let (code, status) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "failed-later".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["data"]["git"]["issues"][0], "workspace-not-ready");
+    let (code, stdout, stderr) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "workspace".into(),
+            "path".into(),
+            "failed-later".into(),
+        ],
+    );
+    assert_eq!(code, 21, "{}", String::from_utf8_lossy(&stderr));
+    assert!(stdout.is_empty());
 }
 
 #[test]

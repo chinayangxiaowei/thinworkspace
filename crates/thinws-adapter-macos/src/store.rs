@@ -413,11 +413,9 @@ impl BootstrapStore for MacOsHostAdapter {
 
     fn validate_ready_workspace(
         &self,
-        lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError> {
-        self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
         let workspaces = &layout.controlled_directories[2];
         let container =
@@ -443,6 +441,13 @@ impl BootstrapStore for MacOsHostAdapter {
             PortError::new(PortErrorKind::InvalidData, "derive Ready Workspace path")
                 .with_source(error)
         })?;
+        revalidate_attached_directory(
+            workspaces,
+            &container,
+            OsStr::new(&workspace_id.to_string()),
+        )?;
+        revalidate_attached_directory(&container, &state, OsStr::new(".state"))?;
+        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
         layout.revalidate()?;
         Ok(path)
     }

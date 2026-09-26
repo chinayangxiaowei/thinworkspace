@@ -5,14 +5,14 @@ use std::time::Duration;
 
 use thinws_application::{InitRequest, InitResult, ThinWorkspaceService};
 use thinws_core::{
-    AbsolutePath, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId, RootMarker,
-    RootMarkerState, UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceRecord,
-    WorkspaceReservation, WorkspaceState,
+    AbsolutePath, CowEvidence, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId,
+    MaterializationMode, MaterializerKind, RootMarker, RootMarkerState, UnixMillis, VolumeId,
+    WorkspaceId, WorkspaceName, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
-    BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
-    MetadataSnapshot, MetadataStoreFactory, PortError, PortErrorKind, PreparedDataRootEvidence,
-    PreparedWorkspaceEvidence, PublishResult,
+    BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, LifecycleLock,
+    LifecycleLockGuard, LifecycleScope, MetadataSnapshot, MetadataStoreFactory, PortError,
+    PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -30,6 +30,8 @@ struct State {
     lock_error: Option<PortErrorKind>,
     lock_revalidate_error: Option<PortErrorKind>,
     workspaces: Vec<WorkspaceRecord>,
+    final_materializations: Vec<(WorkspaceId, FinalMaterializationSummary)>,
+    change_ready_during_validation: bool,
 }
 
 struct FakePrepared {
@@ -217,11 +219,29 @@ impl BootstrapStore for FakeBootstrap {
 
     fn validate_ready_workspace(
         &self,
-        _lock: &Self::LockGuard,
         _layout: &Self::DataRootLayout,
-        _workspace_id: WorkspaceId,
+        workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError> {
-        unreachable!("init/doctor never validates a Ready Workspace")
+        self.state.borrow_mut().events.push("workspace.validate");
+        let record = self
+            .state
+            .borrow()
+            .workspaces
+            .iter()
+            .find(|record| record.reservation().workspace_id() == workspace_id)
+            .cloned()
+            .expect("controlled Ready fixture");
+        if self.state.borrow().change_ready_during_validation {
+            let changed = WorkspaceRecord::new(
+                record.reservation().clone(),
+                WorkspaceState::Error,
+                Some(ErrorCode::Filesystem),
+                UnixMillis::new(record.updated_at().get() + 1).unwrap(),
+            )
+            .unwrap();
+            self.state.borrow_mut().workspaces = vec![changed];
+        }
+        Ok(record.reservation().target_path().clone())
     }
 
     fn publish_ready(
@@ -281,10 +301,10 @@ impl MetadataStoreFactory<FakeLayout> for FakeMetadata {
             .installation
             .clone()
             .unwrap_or_else(|| expected.clone());
-        Ok(MetadataSnapshot::new(
-            installation,
-            self.state.borrow().workspaces.clone(),
-        ))
+        Ok(
+            MetadataSnapshot::new(installation, self.state.borrow().workspaces.clone())
+                .with_final_materializations(self.state.borrow().final_materializations.clone()),
+        )
     }
 
     fn open_existing(
@@ -525,4 +545,40 @@ fn doctor_counts_only_active_non_ready_workspaces() {
 
     let outcome = service(state).doctor().unwrap();
     assert_eq!(outcome.incomplete_workspaces(), 1);
+}
+
+#[test]
+fn path_does_not_publish_ready_when_state_changes_during_read_only_validation() {
+    let state = ready_state();
+    let record = workspace(WorkspaceState::Ready, 0);
+    let id = record.reservation().workspace_id();
+    state.borrow_mut().workspaces = vec![record];
+    state.borrow_mut().final_materializations = vec![(
+        id,
+        FinalMaterializationSummary::new(
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializerKind::ApfsFileClone,
+            CowEvidence::Confirmed,
+            None,
+            0,
+        ),
+    )];
+    state.borrow_mut().change_ready_during_validation = true;
+
+    let error = service(Rc::clone(&state))
+        .workspace_path("workspace-0")
+        .unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::WorkspaceNotReady);
+    let events = &state.borrow().events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| **event == "metadata.inspect")
+            .count(),
+        2
+    );
+    assert!(events.contains(&"workspace.validate"));
+    assert!(!events.contains(&"lock.acquire"));
 }

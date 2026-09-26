@@ -157,6 +157,22 @@ fn assert_object_keys(value: &Value, expected: &[&str]) {
     assert_eq!(actual, expected);
 }
 
+fn assert_ready_materialization_fixture(value: &Value) {
+    assert_eq!(
+        value,
+        &json!({
+            "requested_mode": "cow-clone",
+            "effective_planned_mode": "cow-clone",
+            "actual_mode": "cow-clone",
+            "adapter": "apfs-file-clone",
+            "outcome": "succeeded",
+            "cow": "confirmed",
+            "fallback": {"used": false, "reason": null},
+            "failed_attempt_count": 0,
+        })
+    );
+}
+
 struct FailingCommands(&'static str);
 
 impl Commands for FailingCommands {
@@ -496,6 +512,83 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
         assert_eq!(document["schema_version"], 1);
         assert_eq!(document["ok"], true);
         assert_object_keys(&document["data"], expected_data_keys);
+        let data = &document["data"];
+        match data["command"].as_str().unwrap() {
+            "doctor" => {
+                assert_eq!(
+                    data["host"],
+                    json!({
+                        "platform": "macos",
+                        "architecture": std::env::consts::ARCH,
+                    })
+                );
+                assert_eq!(
+                    data["git_check"],
+                    json!({"available": true, "reason": null})
+                );
+            }
+            "workspace create" if data["dry_run"] == true => {
+                assert_eq!(
+                    data["materialization"],
+                    json!({
+                        "requested_mode": "cow-clone",
+                        "effective_planned_mode": "cow-clone",
+                        "adapter": "apfs-file-clone",
+                        "fallback": {"used": false, "reason": null},
+                    })
+                );
+            }
+            "workspace create" => assert_ready_materialization_fixture(&data["materialization"]),
+            "workspace list" => {
+                let item = &data["workspaces"][0];
+                assert_object_keys(
+                    item,
+                    &[
+                        "workspace_id",
+                        "name",
+                        "state",
+                        "source",
+                        "source_hex",
+                        "last_error_code",
+                        "materialization",
+                    ],
+                );
+                assert_eq!(item["workspace_id"], fixture_workspace_view().workspace_id);
+                assert_eq!(item["name"], "one");
+                assert_eq!(item["state"], "ready");
+                assert_eq!(item["source"], "/Volumes/data/source");
+                assert_eq!(item["last_error_code"], Value::Null);
+                assert_ready_materialization_fixture(&item["materialization"]);
+            }
+            "workspace status" => {
+                assert_ready_materialization_fixture(&data["materialization"]);
+                assert_eq!(
+                    data["git"],
+                    json!({
+                        "scan_complete": true,
+                        "state": "clean",
+                        "issues": [],
+                        "repositories": [{
+                            "relative_path": ".",
+                            "relative_path_hex": "2e",
+                            "state": "clean",
+                            "tracked_changes": 0,
+                            "issues": [],
+                        }],
+                    })
+                );
+                assert_eq!(
+                    data["space"],
+                    json!({
+                        "state": "complete",
+                        "logical_bytes": 8,
+                        "allocated_bytes_estimate": 4096,
+                    })
+                );
+            }
+            "init" | "workspace remove" => {}
+            other => panic!("unexpected public command {other}"),
+        }
     }
 }
 
@@ -535,7 +628,16 @@ fn removed_commands_and_flags_have_no_compatibility_entry_points() {
     let old_forms: &[&[&str]] = &[
         &["repo", "add"],
         &["workspace", "exec", "one", "--", "true"],
-        &["workspace", "create", "--repo", "one", "--name", "one"],
+        &[
+            "workspace",
+            "create",
+            "--source",
+            "/Volumes/data/source",
+            "--name",
+            "one",
+            "--repo",
+            "one",
+        ],
         &[
             "workspace",
             "create",

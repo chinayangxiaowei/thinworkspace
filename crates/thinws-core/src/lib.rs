@@ -9,6 +9,7 @@ mod id;
 mod installation;
 mod materialization;
 mod path;
+mod removal;
 mod time;
 mod volume;
 mod workspace;
@@ -32,6 +33,7 @@ pub use materialization::{
     RelativePath, RelativePathError, RollbackEvidence, RollbackStatus, SupportState, TreeDigest,
 };
 pub use path::{AbsolutePath, AbsolutePathError};
+pub use removal::{ProcessUse, RemovalDecision, RemovalRefusal, RemovalWarning, decide_removal};
 pub use time::{UnixMillis, UnixMillisError};
 pub use volume::{VolumeId, VolumeIdParseError};
 pub use workspace::{

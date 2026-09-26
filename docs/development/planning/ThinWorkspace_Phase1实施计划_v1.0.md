@@ -187,7 +187,7 @@ P1.a 小阶段完成（2026-09-23）：P1-01、P1-02、P1-03 的有效证据组�
 | P1-06 APFS WorkspaceMaterializer | 原始目录、首版保真范围、真实 CoW Receipt | P1-03、P0-06 | R4 | Done |
 | P1-07 Full Copy WorkspaceMaterializer | 独立后端、相同保真范围和受策略限制的显式降级 | P1-06 | R4 | Done |
 | P1-08 Git attach/detach（已取消） | 不注册或注销 Git worktree；只读检查另由 P1-16 交付 | 不再参与依赖 | —（历史 R4） | Cancelled |
-| P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | In Progress |
+| P1-09 Workspace create | 从 source 直接镜像，只有完整物化并持久化后才成为 Ready | P1-06、P1-07 | R4 | Done |
 
 小阶段退出：非 Git 来源、原样目录范围、默认 CoW、显式复制、路径竞态和 partial rollback 通过；未完成目录不被误报 Ready，Ready 不要求 Git clean。
 
@@ -353,6 +353,8 @@ P1-09 第三次精确候选 `2f298de90ed6e2756ed0ff6b26c8ac730d1c7cb1` 经 GPT-6
 P1-09 组合 Probe 错误角色定向变异启动记录（2026-09-26 00:59 UTC）：相对 `2f298de` 的 Ports/Adapter/Application 生产代码及相关测试差异 SHA-256 `07c32c657776639de20bdef8483409a7c050034301d8bec27b20ff3e00d0c957`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，仅选择 PortError 角色存取、Adapter 组合 Probe 入口、Application 新守卫共 8 个变异，验证包为 `thinws-ports`、`thinws-adapter-macos`、`thinws-application`、`thinws-cli`，输出 `target/p1-09-probe-role-mutants/mutants.out`。上一批 7 个跨双包约 40 秒，本批四包预计 2 分钟内完成，首次主动查看 01:01 UTC；此前不轮询、不修改冻结生产候选。
 
 该批实际约 52 秒完成：5 caught、3 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `d7917b5d018a85b465f3008f8ea95f061b3582fd4865a067df1b14ddcf2cf32d`、`b6037cbeddb7572c8a0bfe162aea1da6f6b56b52f01210734edfb9f436dc9135`。Port 角色读取和 Application 来源角色守卫均被测试捕获，三个 unviable 为无法构造默认返回值的整函数替换；Adapter 四角色赋值不生成独立变异，由真实 APFS source 权限变化、Port 契约和分类断言覆盖。当前候选 `cargo fmt --all -- --check`、全目标/全 feature Clippy、带 `/Volumes/data` 的 Debug/Release 全 workspace 测试、rustdoc、30 项工具测试、生产 crate 依赖方向检查、`cargo deny check`、离线 `cargo audit --no-fetch` 及 `git diff --check` 均退出 0；deny 只有既有未命中 allowance/exception 警告，audit 使用本地 1261 条 advisory。P0 显式 ignored 跨卷、输入 fuzz 因实现未变沿用前候选证据，线上 CI/PR/push 和真实子挂载创建未执行。任务仍待精确提交独立复核。
+
+P1-09 完成记录（2026-09-26 UTC）：最终代码/设计候选 `ccc426c277c0251926cff163087b39c698790781` 经 GPT-6 Astra（`gpt-6-astra` / `xhigh`）只读独立终审，结论 Approve；Critical、High、Normal、Low 均为 0。相对目标分支 `main` 的任务提交为 `d21f9ce`、`a4d2db0`、`852ec54`、`de78cf7`、`7084f6f`、`3731cb9`、`d0206b0`、`9bb7486`、`2f298de`、`ccc426c`；提供原始目录的 CoW/显式 Full Copy 创建、只读预览、Creating/Ready 状态和最终回执、同名幂等及普通路径。真实 APFS 的原样 `.git`/未跟踪内容、写隔离、跨卷拒绝、并发名称、锁超时、路径别名、权限变化、失败回执、最终 SQLite 提交故障及无 Ready 误报均有上述可重复证据。终审对本轮 Port、Adapter、Application/CLI 执行短测和差异检查，全仓 Debug/Release 与定向变异沿用主 Agent 同一候选的前述结果；未重复长时门禁。真实子挂载创建、线上 CI/PR/push 未执行。任务级 Done 不表示 P1.c 小阶段收口或 Phase 1 人工放行；该小阶段完整受影响 crate 变异和阶段门禁另按《任务流程》§18 核对。
 
 ### 4.4 P1.d 查询与路径交付
 

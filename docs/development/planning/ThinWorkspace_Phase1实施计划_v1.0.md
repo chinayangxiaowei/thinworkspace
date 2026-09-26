@@ -407,6 +407,8 @@ P1-12 归属实现审核纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `
 
 P1-12 创建链路补充纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `653e0bcce9def4ea39a0652ae6095853cc341b94` 给出 Changes requested（High 1）：暂存发布修正本身未见阻断问题，但既有创建链路在 `prepare_workspace` 后只按公开路径 Probe/Plan，没有把计划目标与所持 root FD 身份绑定，替换后的普通空目录可能被写入。主 Agent 以真实 APFS 注入目标替换，先观察到外来目录 mode 被修改（RED），再在初次及运行时 fallback Probe 后加入原始目录身份核对（GREEN）；另覆盖 Probe 期间替换后恢复原路径的情形，要求仍拒绝旧报告。`cargo fmt --all -- --check`、全目标 Clippy、显式真实跨卷根的全 workspace/all-targets 测试均退出 0；`require_prepared_target` 的 9 个定向变异全部 caught（`target/p1-12-target-binding-mutants/mutants.out`）。GPT-6 Astra / `xhigh` 对精确提交 `de4b4c32c1d5ce3ba8b5cfb592e4eed9a292e0f2` 只读复核为 Approve，未发现该范围新问题；P1-12 完整清理、进程、日志和 CLI 仍未完成，不能据此放行任务或阶段。
 
+P1-12 进程占用探测（2026-09-26 UTC）：首个 macOS libproc 实现 `d181de9` 经 GPT-6 Astra / `xhigh` 只读审核为 Changes requested（High/P1 两项）：把可变化的 FD 数作为进程身份会漏掉占用，且用输入路径直接匹配会漏掉 `/System/Volumes/Data` 与 `/Volumes/data` 的同目录别名。修正为以 PID、UID、启动秒/微秒复核身份；由 no-follow 打开的容器 FD 取 `F_GETPATH`，核验目录设备号和 inode 后按内核路径匹配。真实 macOS 子进程 cwd、open-vnode 与 firmlink 别名，以及 FD 数变化和各身份字段单测通过。`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets` 退出 0；`same_process` 定向 9 个变异全部 caught（`target/p1-12-process-identity-mutants/mutants.out`，25 秒）。GPT-6 Astra / `xhigh` 对精确生产修正提交 `537e964e47a7158c7f636f7ae9705ab9d53c6b61` 只读复核为 Approve，未重复全量门禁或变异。2 秒为合作式扫描预算，不是阻塞系统调用的硬超时；该审核不代表 `remove` 编排、删除、持久日志或 CLI 已完成。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

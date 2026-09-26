@@ -257,6 +257,27 @@ mod tests {
             ..before
         };
         assert!(!same_process(before, reused_pid));
+        assert!(!same_process(
+            before,
+            RawProcessIdentity {
+                pid: before.pid + 1,
+                ..before
+            }
+        ));
+        assert!(!same_process(
+            before,
+            RawProcessIdentity {
+                uid: before.uid + 1,
+                ..before
+            }
+        ));
+        assert!(!same_process(
+            before,
+            RawProcessIdentity {
+                start_seconds: before.start_seconds + 1,
+                ..before
+            }
+        ));
     }
 
     #[test]

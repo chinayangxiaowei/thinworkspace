@@ -411,6 +411,8 @@ P1-12 进程占用探测（2026-09-26 UTC）：首个 macOS libproc 实现 `d181
 
 P1-12 受控删除底层（进行中）：为避免把可由调用者构造的普通路径误当删除授权，现有 `BootstrapStore` 增量提供持 data-root 锁、布局和 WorkspaceId 的清理调用；macOS Adapter 对照创建时位于 `metadata/` 的历史归属。首版 `e8f9759` 直接按名称递归删除，经 GPT-6 Astra / `xhigh` 只读审核为 Changes requested（P1 两项）：stat 后同名对象可被替换，已打开的中间子目录移出后仍可通过旧 FD 删除其内容；审核者用候选生产代码在真实临时目录确定性复现后者，外部位置文件确实被删。主 Agent 改为先以 no-replace 同卷 rename 将整个 ID 容器隔离至私有 `trash/remove-<id>/`，核验历史身份后仅在隔离树递归删除；新显式 force 同时检查原位置与隔离位置，二者冲突拒绝。递归还逐层核验子目录挂载关系，补充移出后保留外部文件回归。真实 APFS 用例覆盖嵌套树、符号链接、原 root/容器替换、证明缺失、未知平台项、root 已缺失后的收口、删除前路径替换、隔离后部分删除重试、双位置冲突及隔离位置替换。归属文件不删除；两处均缺失才返回无路径删除结果。此次职责与隔离调整已同步 ADR-0004、详细设计、跨平台物化设计和用户手册，不新建 Port，也不提供 `destroy_materialization(&WorkspacePath)` 裸路径删除入口。修订候选的 `cargo fmt --all -- --check`、全目标全 feature Clippy、全 workspace/all-targets 测试已通过，仍待精确独立复核；Application 清理策略、持久日志、SQLite 收口、CLI、任务级变异/fuzz 均未完成，P1-12 不放行。
 
+P1-12 隔离清理终态复核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `910358b` 给出 Changes requested（P2 一项，未发现新增 P0/P1）：隔离树清空后未核对原位置与隔离位置均仍缺失。审核者以生产 `BootstrapStore` API 的真实临时目录复现：清理期间原位置重建后返回 `Removed { root_entries: 1000 }`，但原位置仍在；后续若直接写 tombstone 会错误收口。主 Agent 已在成功返回前加持锁、布局及两处 no-follow 缺失重验，任一位置重现即报错且不删除新对象；补两位置缺失/重现的受控目录检查，并把真实并发重建用例连续执行五次均得到 `InvalidLayout`、外来文件保留。此修正仍待完整门禁和精确候选复核。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

@@ -680,6 +680,10 @@ impl BootstrapStore for MacOsHostAdapter {
         rustix::fs::unlinkat(&trash.fd, isolated_name.as_str(), AtFlags::REMOVEDIR)
             .map_err(|error| io_error("remove Workspace container", error))?;
         sync_directory(&trash.fd)?;
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        require_missing_entry(workspaces, OsStr::new(&name))?;
+        require_missing_entry(trash, OsStr::new(&isolated_name))?;
         layout.revalidate()?;
         Ok(WorkspaceRemoval::Removed { root_entries })
     }
@@ -1009,6 +1013,17 @@ fn open_optional_owned_child(
     }
 }
 
+fn require_missing_entry(parent: &ValidatedDirectory, name: &OsStr) -> Result<(), PortError> {
+    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Ok(_) => Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace container path reappeared during removal",
+        )),
+        Err(error) => Err(io_error("verify removed Workspace path", error)),
+    }
+}
+
 fn require_only_entries(directory: &ValidatedDirectory, allowed: &[&str]) -> Result<(), PortError> {
     let names = crate::ffi::read_directory(&directory.fd)
         .map_err(|error| io_error("inspect Workspace platform entries", error))?;
@@ -1124,6 +1139,13 @@ mod tests {
         assert!(directory_path.join("target").exists());
         remove_exact_entry(&directory, OsStr::new("target"), target_identity);
         assert!(!directory_path.join("target").exists());
+        require_missing_entry(&directory, OsStr::new("target")).unwrap();
+        assert_eq!(
+            require_missing_entry(&directory, OsStr::new("other"))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
 
         assert_eq!(
             document_error(DocumentError::UnsupportedVersion).kind(),
@@ -1147,6 +1169,35 @@ mod tests {
         assert!(config_is_current(Some(&requested), &requested));
         assert!(!config_is_current(Some(&conflicting), &requested));
         assert!(!config_is_current(None, &requested));
+    }
+
+    #[test]
+    fn terminal_removal_check_rejects_reappeared_active_and_isolated_entries() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-macos-tests");
+        fs::create_dir_all(&root).unwrap();
+        let temp = Builder::new()
+            .prefix("terminal-removal-")
+            .tempdir_in(fs::canonicalize(root).unwrap())
+            .unwrap();
+        for (directory_name, entry_name) in [
+            ("workspaces", "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42"),
+            ("trash", "remove-ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42"),
+        ] {
+            let directory_path = temp.path().join(directory_name);
+            fs::create_dir(&directory_path).unwrap();
+            fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o700)).unwrap();
+            let directory = open_private_directory(&directory_path).unwrap();
+            require_missing_entry(&directory, OsStr::new(entry_name)).unwrap();
+            let foreign = directory_path.join(entry_name);
+            fs::create_dir(&foreign).unwrap();
+            assert_eq!(
+                require_missing_entry(&directory, OsStr::new(entry_name))
+                    .unwrap_err()
+                    .kind(),
+                PortErrorKind::InvalidLayout
+            );
+            fs::remove_dir(&foreign).unwrap();
+        }
     }
 
     #[test]

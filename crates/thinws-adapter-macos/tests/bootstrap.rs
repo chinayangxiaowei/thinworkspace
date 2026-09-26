@@ -3,7 +3,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tempfile::{Builder, TempDir};
 use thinws_adapter_macos::{
@@ -513,6 +513,30 @@ fn p1_12_refuses_a_replacement_in_the_isolated_location() {
     );
     assert_eq!(fs::read(isolated.join("foreign")).unwrap(), b"keep");
     assert!(original.join("root").exists());
+}
+
+#[test]
+fn p1_12_does_not_report_removed_if_active_name_reappears_during_isolated_cleanup() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    for index in 0..2_000 {
+        fs::write(container.join("root").join(format!("{index:04}")), b"copy").unwrap();
+    }
+    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
+    let concurrent_container = container.clone();
+    let writer = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !isolated.exists() {
+            assert!(Instant::now() < deadline, "Workspace was never isolated");
+            std::thread::yield_now();
+        }
+        private_dir(&concurrent_container);
+        fs::write(concurrent_container.join("foreign"), b"keep").unwrap();
+    });
+
+    let result = adapter.remove_workspace(&lock, &layout, id);
+    writer.join().unwrap();
+    assert_eq!(result.unwrap_err().kind(), PortErrorKind::InvalidLayout);
+    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
 }
 
 #[test]

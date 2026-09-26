@@ -13,7 +13,7 @@ use thinws_ports::{PortError, PortErrorKind, RemovalLogEvent, RemovalLogRecord, 
 
 use crate::filesystem::{
     ValidatedDirectory, absolute_from_path, create_private_file, entry_identity, io_error,
-    revalidate_directory, sync_directory, validate_private_file,
+    revalidate_directory, sync_directory, validate_file_entry, validate_private_file,
 };
 
 const LOG_NAME: &str = "operations.jsonl";
@@ -134,14 +134,7 @@ pub(crate) fn append_removal_record(
         .map_err(|error| io_error("append cleanup log event", error))?;
     file.sync_all()
         .map_err(|error| io_error("sync cleanup log event", error))?;
-    if validate_private_file(&file, "revalidate cleanup log file")? != identity
-        || entry_identity(&logs.fd, name)? != identity
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "cleanup log file changed after append",
-        ));
-    }
+    validate_file_entry(&logs.fd, name, &file, identity)?;
     sync_directory(&logs.fd)?;
     revalidate_directory(logs)?;
     absolute_from_path(&logs.path.join(LOG_NAME)).map_err(|error| {

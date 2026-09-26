@@ -394,7 +394,7 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Progress |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Review |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
@@ -454,6 +454,28 @@ P1-12 任务级候选自测（2026-09-26 UTC，macOS/APFS）：Application remov
 P1-12 任务级首轮独立审核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对干净 `main` 的精确提交 `e18fbc7adb84ed6b74701e339f9d55409b00ea15` 给出 Changes requested：未发现新数据误删问题，但新增 Core 删除策略及 Adapter 持久日志尚缺受影响函数的定向变异证据；归属 TOML 解码尚未进入文档 fuzz harness；普通 Git 拒绝与扫描不完整同时发生时，日志虽记录但用户错误未显示扫描警告。审核者只读运行 68 项 Adapter/Application/CLI 定向测试均通过，核对 Application 存活项闭合与公布哈希；remove 参数 fuzz 的运行量仅能引用主 Agent 记录，审核者未发现原始输出，不能冒称独立复验。已确认 `lifecycle.lock` 仅在 data root 的 `metadata/`，`path/status` 不取锁，镜像 root 不写该文件。任务返回 In Progress；主 Agent 将补上述定向门禁和组合告警，不扩大清理机制。
 
 审核修订候选（2026-09-26 UTC）：先使普通 Git unknown＋进程扫描不完整、非 Ready＋进程扫描不完整的 Application 断言，以及拒绝时人类告警的 CLI 断言按预期失败，再复用现有诊断 context 写 `process_use=scan-incomplete`，人类错误输出该告警；手册 §6.4 同步，日志与拒绝策略不变。定向 Application 13 项与 CLI 单测转绿，全 workspace/all-targets 测试、fmt、全目标全 feature Clippy、`git diff --check` 退出 0。归属 TOML 解析接入既有纯内存 bootstrap document fuzz harness，不新增删除入口；有效与纳秒越界种子各一，Adapter 普通单测验证两者分别进入成功/拒绝分支。固定 nightly/cargo-fuzz 构建通过；首次 smoke 因目标语料输出目录不存在而未启动，不作为结果；创建目录后 30 秒 smoke 运行 563,722 次，退出 0，无 crash/hang。fuzz manifest 的 deny 与本地 advisory 库的离线 audit 退出 0，deny 仅既有未命中例外警告。单文件 fuzz rustfmt 通过，尚待 Core 清理策略、Adapter 日志及本次告警渲染的定向变异；不以目前候选关闭 P1-12。
+
+P1-12 Core 清理策略定向变异启动记录（2026-09-26 19:39 UTC）：主 Agent 在本地精确实现提交 `8dc5fdc`、macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip 下选择 `thinws-core/src/removal.rs` 全部 4 个变异，验证包 `thinws-core`，输出 `target/p1-12-core-removal-mutants/mutants.out`。上次同机 Core 100 项约 4 分钟，本批仅 4 项但含固定构建开销，首次主动查看估计 19:41 UTC；此前不轮询、不修改冻结候选。Adapter 日志与 Application/CLI 告警变异分别启动、记录，不冒称在本批覆盖。
+
+Core 结果：实际 19:38:54–19:39:18 UTC，约 24 秒，按预计 19:41 UTC 一次读取；4 个为 3 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `61272029799f08d34be38a2db8742ba6155c5c56cf1f95374ce17fd3b1e5b76c`、`abd99daa83dd37b4eceac9c8b364363c006e88733d5ea364203de74ec2b8160c`。copy 阶段报告了既有 `experiments/p0/cleanup/target/` 下 FIFO 类型提示，未影响测试结果；后续批次显式使用 `--gitignore true` 避免复制忽略的实验输出。
+
+P1-12 Adapter 清理日志定向变异启动记录（2026-09-26 19:42 UTC）：同一主 Agent、平台、工具版本和实现提交 `8dc5fdc`，copy 模式、`--gitignore true`、4 并发、baseline skip；仅选择 `thinws-adapter-macos/src/operation_log.rs` 的 33 个变异，验证包 `thinws-adapter-macos`，输出 `target/p1-12-operation-log-mutants/mutants.out`。前次同机 36 项底层删除约 1 分 51 秒，日志测试范围不同且含构建开销，保守预计 19:45 UTC 首次主动查看；此前不轮询、不修改候选。
+
+Adapter 日志首次结果：实际 19:42:03–19:45:35 UTC，约 3 分 32 秒；19:45 UTC 首次检查时仍在运行，按已见进度改为 19:47 UTC 读取终态。33 个为 17 caught、1 unviable、15 missed、0 timeout，退出 2，不能记为通过；`outcomes.json` 与 `mutants.json` SHA-256 分别为 `d9f80f0fd73cd4fd2e14203af52334cc45938459910e90b59da5280c2e6f2046`、`ac4cddb8033c7226ebc5fc7964c091f28acf155d6b647dce9ce8e8441aa8549c`。存活项限于 Refused/Started/Failed 字段组合、仓库相对路径、日志身份终验、Git/进程/拒绝原因短名和路径 hex；主 Agent 将仅补精确断言或删除已证明冗余的检查，随后只复测存活位置及同线对照，不重启无关变异。
+
+Adapter 日志存活项复测启动记录（2026-09-26 19:50 UTC）：在真实 bootstrap 测试补非法事件字段组合、`../` 仓库相对路径、Git/进程/拒绝原因短名和路径 hex 的精确断言，30 项 bootstrap 测试通过。末尾身份核验复用已测试的 `validate_file_entry`，移除同一打开文件 FD 的恒定 inode 二次比较，不削弱目录项身份、权限或 no-follow 校验。相对提交 `8dc5fdc` 的该模块与测试差异 SHA-256 为 `919b44e8d25c0cad1727a376dd3b207289dc12f120b8b68a0802aca4988f5e1c`；主 Agent、同机同工具、copy 模式、`--gitignore true`、4 并发、baseline skip，只筛选剩余 14 个存活位置 `32/35/40/54/155/164/172/180`，输出 `target/p1-12-operation-log-mutants-fix/mutants.out`。上次 33 项约 3 分 32 秒，本批预计 19:53 UTC 首次主动查看；此前不轮询、不修改候选。
+
+Adapter 日志复测结果：实际 19:50:11–19:51:33 UTC，约 1 分 22 秒，按预计 19:53 UTC 一次读取；14 个全部 caught、0 missed/unviable/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `b543e5c91df549947e24d5dd746e8ab3fe084cc2a4c8679fa665693f76835ea5`、`4e22182f535516401a72383984fa830836103ee7599d697db75fe9bcf664797a`。与首次 33 项按变异位置及生产差异组合，原存活的日志校验/编码缺口均已处理；原 17 caught、1 unviable 的未改位置不重复跑，不将两批计数相加为独立目标数。仍需本次 Application/CLI 告警差异的定向变异和任务级终审。
+
+P1-12 告警差异定向变异启动记录（2026-09-26 19:54 UTC）：同机同工具、本地实现提交 `8dc5fdc` 加上仅日志模块及测试的未提交差异，copy 模式、`--gitignore true`、4 并发、baseline skip；先选 `thinws-application/src/remove.rs` 新增 `with_process_scan_warning` 的 2 个变异，输出 `target/p1-12-app-warning-mutants/mutants.out`。根据此前同包 16 项约 1 分 35 秒，预计 19:56 UTC 首次主动查看；期间不修改候选。其后单独选 CLI `render_error`/`use_case_error_view` 的 5 个变异。
+
+Application 告警结果：实际 19:54:05–19:54:18 UTC，约 13 秒，按预计 19:56 UTC 一次读取；2 个为 1 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `2867a03543c73f42700091839e4e170cb207ee1b07a12885ecc918423f20d32f`、`42456ec828ed2c0d11cd2b1cb2ae3ac0316b0e4b7420af408b6bf6b0f2c1eb4b`。
+
+P1-12 CLI 告警渲染定向变异启动记录（2026-09-26 19:56 UTC）：同机同工具、同一冻结代码候选、copy 模式、`--gitignore true`、4 并发、baseline skip；选择 `thinws-cli/src/lib.rs` 的 `render_error` 和 `use_case_error_view` 5 个变异，输出 `target/p1-12-cli-warning-mutants/mutants.out`。此前同两函数 4 项约 25 秒，本批新增一处分支，预计 19:58 UTC 首次主动查看；此前不轮询、不修改候选。
+
+CLI 告警结果：实际 19:56:27–19:56:44 UTC，约 16 秒，按预计 19:58 UTC 一次读取；5 个为 4 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `0d1e85e1ae9900a9ad5bd34b0c195c08257b840577008400e42b38b208fcb411`、`bf56f90d826576fe7674833c6cca4eb17a13f7dc6ac7882cf9ecfaf14c457fdf`。本批与前述 Core/Adapter/Application 的定向证据只覆盖 P1-12 本次受影响代码，不取代 P1.e 小阶段或 Phase 1 的全范围门禁。
+
+P1-12 审核修订候选终检（2026-09-26 UTC，macOS/APFS）：`cargo fmt --all -- --check`、`git diff --check`、全目标全 feature Clippy、带 `/Volumes/data` P1 异卷端和 `/private/tmp` P0 异卷参数的全 workspace/all-targets 普通测试均退出 0；P0 的 ignored 异卷实验不会因提供环境变量而在普通测试中自动执行。release 配置的真实 CLI remove E2E 4 项与告警渲染单测 1 项通过；bootstrap 30 项含新增日志异常组合及字段断言通过。根和 fuzz workspace 无新增直接依赖；两 workspace 的 deny 与离线 audit、所改文档 harness 单文件 rustfmt 均通过，deny 只有既有未命中例外/allowance 提示。Core、Adapter 日志、Application、CLI 的受影响变异按本节分批证据闭合，归属 TOML 文档 fuzz 短预算退出 0。专用 submount、P1.e 小阶段受影响 crate 全量变异和阶段长预算 fuzz、线上 CI/PR/push 未执行；它们不作为本任务候选已通过项。此本地提交仍待 GPT-6 Astra / `xhigh` 精确独立复核，通过后才进入 Verification/Done。
 
 ### 4.6 P1.f 契约与发布
 

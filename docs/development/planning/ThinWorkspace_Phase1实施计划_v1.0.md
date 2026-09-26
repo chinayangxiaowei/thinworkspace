@@ -425,6 +425,14 @@ P1-12 Application/CLI 接线（进行中）：在既有 Service、BootstrapStore
 
 P1-12 Application/CLI 首轮独立审核与修订（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `a4c485b509419d2f139c649ab782748fa4b64c6c` 给出 Changes requested（P1 一项、P2 两项）。真实复现表明，一个 Workspace 名称恰好等于另一 Workspace 的完整 ID 时，无前缀 remove 会静默删除 ID 所指的错误对象；已知 ID 的归属/进程预检失败未写持久失败事件；Git 检查不完整的 remove 拒绝未展示具体原因短名。修订为双候选冲突时 E_USAGE 且不删除，并提供仅用于 remove 的 `name:`/`id:` 显式选取；已知 ID 的预检失败追加 Failed 事件且保持原错误类型；JSON 与人类拒绝输出展示仓库 issue。分别先用真实两个 Workspace、注入 ProcessProbe Io、外部 Git metadata 用例确认旧候选错误，再修正转绿；补普通模式 Error 状态拒绝、force 后根目录替换拒删外部内容并可再次显式清理、缺少归属证明拒绝并记录失败的 APFS 回归。修订候选的 `cargo fmt --all -- --check`、全目标全 feature Clippy、全 workspace/all-targets 测试均退出 0；仍待提交后的精确独立复核与适用的耗时门禁，不据此宣布 P1-12 Done。
 
+P1-12 Application/CLI 修订复核：GPT-6 Astra / `xhigh` 对精确提交 `83e21fa0820e62540ef763842c06b7c29b9a8029` 只读审核为 Approve，新增 P0/P1/P2 为零。审核者独立运行 Application remove 11、CLI E2E remove 4、CLI contract 10 项，并复验双 Workspace 冲突、ID tombstone、正常/force 进程探测 Io 失败日志、全局及逐仓库 Git issue，均符合契约；未重复全量门禁、变异/fuzz，结论只关闭此次三项审核意见。
+
+P1-12 底层删除首次定向变异（2026-09-26 UTC）：主 Agent 在 macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0，以 copy 模式、4 并发、baseline skip，选择 `destroy.rs` 与 `store.rs` 的受控删除相关函数 43 个变异；17:41:41 UTC 启动，按首次一小时等待于 18:41:58 UTC 主动查看，工具实际 17:44:24 UTC 已结束，耗时约 2 分 43 秒。结果 27 caught、7 unviable、9 missed，退出 2，证据在 `target/p1-12-removal-mutants/mutants.out`；不能记为通过。存活项分别涉及递归深度上限、两个由同一 inode 身份已蕴含类型的冗余条件、隔离后失败自动还原分支和 ESTALE/EXDEV/ELOOP 归类。主 Agent 已增真实 512/513 层 dirfd 递归边界用例并通过，删去冗余类型比较；隔离后失败不再自动还原，保持私有隔离残留供下一次显式 force 重新证明归属，减少自动恢复分支；底层错误归类抽成可直接验证的小函数并补三种布局错误与 EIO 对照。Adapter 单元 77 通过、1 环境要求 ignored，bootstrap 集成 27 通过；修订后仍需重新执行受影响的精确定向变异、全局普通门禁和独立审核。
+
+P1-12 底层删除定向复测启动记录（2026-09-26 18:49 UTC）：上述生产差异相对 `83e21fa` 的 SHA-256 为 `941fc75b655bcd50faa2b7a4c8226a91734110e7bb8fa24658a0ada09a36b668`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip，仍只选择 `destroy.rs`/`store.rs` 同一删除函数范围，结果位置 `target/p1-12-removal-mutants-fix/mutants.out`。上批同范围 43 项实际约 2 分 43 秒，考虑编译/机器波动，本批首次主动查看预计 18:54 UTC；此前不轮询、不修改冻结生产候选。修订候选在启动前的 fmt、全目标全 feature Clippy、全 workspace/all-targets 普通测试退出 0；未执行 ignored 的环境专属跨卷目标。
+
+定向复测结果：实际 18:49:13–18:51:04 UTC，约 1 分 51 秒，按预计于 18:54 UTC 一次读取终态；36 个变异为 28 caught、8 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `87aa71456225f38cd0a762381fe991952cc3b2c4f0bbd01daab537eb217a2800`、`b5cf24cc7a2f49fca78092a6a25db0f50484908f94e03932fa35465df2e73e11`。第一次存活的深度边界由真实 512/513 层回归捕获；同 inode 必然同文件类型的冗余条件及自动还原分支已移除；错误分类由独立断言验证。此结果只覆盖选中底层函数，不冒称 Application/CLI 变异、小阶段全受影响 crate 变异或阶段放行。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

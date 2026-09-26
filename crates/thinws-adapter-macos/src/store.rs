@@ -621,7 +621,7 @@ impl BootstrapStore for MacOsHostAdapter {
         let isolated_name = format!("remove-{workspace_id}");
         let source = open_optional_private_child(workspaces, OsStr::new(&name))?;
         let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
-        let (container, newly_isolated) = match (source, isolated) {
+        let container = match (source, isolated) {
             (None, None) => return Ok(WorkspaceRemoval::AlreadyAbsent),
             (Some(_), Some(_)) => {
                 return Err(PortError::new(
@@ -629,7 +629,7 @@ impl BootstrapStore for MacOsHostAdapter {
                     "Workspace exists at both active and isolated paths",
                 ));
             }
-            (None, Some(container)) => (container, false),
+            (None, Some(container)) => container,
             (Some(source), None) => {
                 let _ = validate_removal_layout(layout, workspace_id, &source)?;
                 revalidate_attached_directory(workspaces, &source, OsStr::new(&name))?;
@@ -654,7 +654,7 @@ impl BootstrapStore for MacOsHostAdapter {
                         "isolated Workspace identity changed; unsafe to restore or remove",
                     ));
                 }
-                (moved.expect("matched isolated Workspace is open"), true)
+                moved.expect("matched isolated Workspace is open")
             }
         };
         let post_isolation = self
@@ -663,35 +663,9 @@ impl BootstrapStore for MacOsHostAdapter {
                 revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
             })
             .and_then(|()| validate_removal_layout(layout, workspace_id, &container));
-        let (state, root) = match post_isolation {
-            Ok(validated) => validated,
-            Err(error) if newly_isolated => {
-                let restored =
-                    revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
-                        .is_ok()
-                        && rustix::fs::renameat_with(
-                            &trash.fd,
-                            isolated_name.as_str(),
-                            &workspaces.fd,
-                            name.as_str(),
-                            RenameFlags::NOREPLACE,
-                        )
-                        .is_ok_and(|()| {
-                            sync_directory(&trash.fd).is_ok()
-                                && sync_directory(&workspaces.fd).is_ok()
-                        });
-                return Err(PortError::new(
-                    PortErrorKind::InvalidLayout,
-                    if restored {
-                        "isolated Workspace validation failed and was restored"
-                    } else {
-                        "isolated Workspace validation failed; restoration unconfirmed"
-                    },
-                )
-                .with_source(error));
-            }
-            Err(error) => return Err(error),
-        };
+        // A failed recheck leaves the container at its isolated name. A later
+        // explicit request may retry only after proving that same container.
+        let (state, root) = post_isolation?;
         revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))?;
         let mut root_entries = 0;
         if let Some(root) = &root {
@@ -707,14 +681,7 @@ impl BootstrapStore for MacOsHostAdapter {
                     .map_err(|_| std::io::Error::from_raw_os_error(libc::ESTALE))
             };
             root_entries = remove_root_contents(&root.fd, root.identity.as_core(), &verify_scope)
-                .map_err(|error| match error.raw_os_error() {
-                Some(libc::ESTALE | libc::EXDEV | libc::ELOOP) => PortError::new(
-                    PortErrorKind::InvalidLayout,
-                    "Workspace root changed during removal",
-                )
-                .with_source(error),
-                _ => io_error("remove Workspace root contents", error),
-            })?;
+                .map_err(classify_root_removal_error)?;
             revalidate_attached_directory(&container, root, OsStr::new("root"))?;
             rustix::fs::unlinkat(&container.fd, "root", AtFlags::REMOVEDIR)
                 .map_err(|error| io_error("remove Workspace root directory", error))?;
@@ -1130,6 +1097,17 @@ fn document_error(error: DocumentError) -> PortError {
     PortError::new(kind, "decode bootstrap document").with_source(error)
 }
 
+fn classify_root_removal_error(error: std::io::Error) -> PortError {
+    match error.raw_os_error() {
+        Some(libc::ESTALE | libc::EXDEV | libc::ELOOP) => PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace root changed during removal",
+        )
+        .with_source(error),
+        _ => io_error("remove Workspace root contents", error),
+    }
+}
+
 fn classify_layout_revalidation(error: PortError) -> PortError {
     if error.kind() == PortErrorKind::InvalidLayout {
         return error;
@@ -1162,6 +1140,20 @@ mod tests {
     use thinws_core::{AbsolutePath, InstanceId, VolumeId};
 
     use super::*;
+
+    #[test]
+    fn root_removal_classifies_identity_and_depth_failures_as_layout_errors() {
+        for errno in [libc::ESTALE, libc::EXDEV, libc::ELOOP] {
+            assert_eq!(
+                classify_root_removal_error(std::io::Error::from_raw_os_error(errno)).kind(),
+                PortErrorKind::InvalidLayout
+            );
+        }
+        assert_eq!(
+            classify_root_removal_error(std::io::Error::from_raw_os_error(libc::EIO)).kind(),
+            PortErrorKind::Io
+        );
+    }
 
     #[test]
     fn exact_entry_cleanup_and_document_error_mapping_are_observable() {

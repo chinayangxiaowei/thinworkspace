@@ -53,7 +53,7 @@ fn remove_directory_contents(
             let verify_child = || {
                 verify_scope()?;
                 let named = node_metadata_at(directory, &component)?;
-                if named.kind != RawFileKind::Directory || file_identity(named) != child_identity {
+                if file_identity(named) != child_identity {
                     return Err(io::Error::from_raw_os_error(libc::ESTALE));
                 }
                 Ok(())
@@ -72,7 +72,7 @@ fn remove_directory_contents(
         verify_scope()?;
         require_directory(node_metadata(directory)?, expected)?;
         let current = node_metadata_at(directory, &component)?;
-        if file_identity(current) != file_identity(before) || current.kind != before.kind {
+        if file_identity(current) != file_identity(before) {
             return Err(io::Error::from_raw_os_error(libc::ESTALE));
         }
         remove_staged_at(directory, &component, before.kind)?;
@@ -105,10 +105,51 @@ mod tests {
     use std::os::fd::OwnedFd;
     use std::os::unix::fs::{MetadataExt, symlink};
 
+    use rustix::fs::Mode;
     use tempfile::TempDir;
 
     use super::*;
     use crate::ffi::node_metadata;
+
+    #[test]
+    fn accepts_the_depth_limit_and_refuses_one_more_level() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let temp = TempDir::new().unwrap();
+                for (name, depth, succeeds) in [
+                    ("at-limit", MAX_DELETE_DEPTH, true),
+                    ("past-limit", MAX_DELETE_DEPTH + 1, false),
+                ] {
+                    let root = temp.path().join(name);
+                    fs::create_dir(&root).unwrap();
+                    let held: OwnedFd = File::open(&root).unwrap().into();
+                    let mut current: OwnedFd = File::open(&root).unwrap().into();
+                    let component = c_string(b"d").unwrap();
+                    for _ in 0..depth {
+                        rustix::fs::mkdirat(&current, "d", Mode::from_bits_retain(0o700)).unwrap();
+                        current = open_directory_at(&current, &component).unwrap();
+                    }
+                    drop(current);
+                    let metadata = node_metadata(&held).unwrap();
+                    let result = remove_root_contents(
+                        &held,
+                        FileIdentity::new(metadata.device, metadata.inode),
+                        &|| Ok(()),
+                    );
+                    if succeeds {
+                        assert_eq!(result.unwrap(), depth);
+                        assert!(read_directory(&held).unwrap().is_empty());
+                    } else {
+                        assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ELOOP));
+                        assert_eq!(read_directory(&held).unwrap().len(), 1);
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn removes_nested_entries_without_following_external_symlinks() {

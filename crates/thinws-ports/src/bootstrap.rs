@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use thinws_core::{
-    AbsolutePath, FileIdentity, InstallationIdentity, RootMarker, VolumeId, WorkspaceId,
+    AbsolutePath, ErrorCode, FileIdentity, GitState, InstallationIdentity, OperationId, ProcessUse,
+    RemovalMode, RemovalRefusal, RootMarker, UnixMillis, VolumeId, WorkspaceId,
 };
 
-use crate::PortError;
+use crate::{PortError, RepositoryInspection};
 
 /// Lifecycle-lock namespace. The data-root path remains in the concrete guard.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +60,47 @@ pub enum WorkspaceRemoval {
         /// Number of entries removed from the former root tree.
         root_entries: usize,
     },
+}
+
+/// One synchronous, ordinary persistent cleanup-log event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemovalLogEvent {
+    /// A policy protection stopped cleanup before destructive work.
+    Refused,
+    /// A cleanup attempt was durably announced before entering Deleting.
+    Started,
+    /// The controlled container and active metadata were removed.
+    Completed,
+    /// An attempt began but did not reach complete cleanup.
+    Failed,
+}
+
+/// Typed fields for one durable JSONL event outside the Workspace copy.
+pub struct RemovalLogRecord<'a> {
+    /// UTC event time.
+    pub occurred_at: UnixMillis,
+    /// Correlation identifier for this one explicit attempt.
+    pub operation_id: OperationId,
+    /// The exact registered Workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Lifecycle result of this event.
+    pub event: RemovalLogEvent,
+    /// Whether the user explicitly requested force.
+    pub mode: RemovalMode,
+    /// Conservative Git aggregate; Unknown also covers skipped inspection.
+    pub git_state: GitState,
+    /// Whether all relevant Git discovery and queries completed.
+    pub git_check_complete: bool,
+    /// Repository-relative positions and tracked-change counts only.
+    pub repositories: &'a [RepositoryInspection],
+    /// Best-effort external process scan result.
+    pub process_use: ProcessUse,
+    /// Specific protection that refused the attempt, when applicable.
+    pub protection: Option<RemovalRefusal>,
+    /// Stable public error code when the attempt failed.
+    pub error_code: Option<ErrorCode>,
+    /// Actual confirmed cleanup result on completion.
+    pub outcome: Option<WorkspaceRemoval>,
 }
 
 /// Opaque evidence for one prepared data root held by a platform Adapter.
@@ -175,6 +217,16 @@ pub trait BootstrapStore {
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
     ) -> Result<Option<AbsolutePath>, PortError>;
+
+    /// Appends and synchronizes one structured cleanup event in the data root.
+    /// Returns the verified log path for user-facing results. Failure before
+    /// Started prevents destructive work; this does not create an audit service.
+    fn append_removal_log(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        record: &RemovalLogRecord<'_>,
+    ) -> Result<AbsolutePath, PortError>;
 
     /// Removes one proven-owned Workspace container after Application has persisted
     /// its cleanup intent and authorized the destructive operation. Missing

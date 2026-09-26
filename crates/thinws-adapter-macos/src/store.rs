@@ -9,7 +9,7 @@ use thinws_core::{
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
     PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
-    WorkspaceRemoval,
+    RemovalLogRecord, WorkspaceRemoval,
 };
 
 use crate::destroy::remove_root_contents;
@@ -590,6 +590,21 @@ impl BootstrapStore for MacOsHostAdapter {
         layout.revalidate()?;
         self.validate_data_root_lock(lock, layout)?;
         Ok(result)
+    }
+
+    fn append_removal_log(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        record: &RemovalLogRecord<'_>,
+    ) -> Result<AbsolutePath, PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        let path =
+            crate::operation_log::append_removal_record(&layout.controlled_directories[1], record)?;
+        layout.revalidate()?;
+        self.validate_data_root_lock(lock, layout)?;
+        Ok(path)
     }
 
     fn remove_workspace(

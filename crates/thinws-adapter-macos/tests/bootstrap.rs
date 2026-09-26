@@ -10,11 +10,13 @@ use thinws_adapter_macos::{
     MacOsDataRootLayout, MacOsHostAdapter, MacOsLockGuard, MacOsPreparedDataRoot,
 };
 use thinws_core::{
-    AbsolutePath, InstallationIdentity, InstanceId, RootMarkerState, VolumeId, WorkspaceId,
+    AbsolutePath, GitState, InstallationIdentity, InstanceId, OperationId, ProcessUse, RemovalMode,
+    RepositoryState, RootMarkerState, UnixMillis, VolumeId, WorkspaceId,
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, PortConflict, PortErrorKind,
-    PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult, WorkspaceRemoval,
+    PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult, RemovalLogEvent,
+    RemovalLogRecord, RepositoryInspection, WorkspaceRemoval,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -555,6 +557,124 @@ fn p1_12_inspection_follows_the_single_proven_container_location() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn p1_12_force_start_log_is_durable_and_outside_the_workspace_copy() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    let operation_id = OperationId::from_str("op_01890a5d-ac96-774b-bd5b-55c7b8d09f51").unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id,
+        workspace_id: id,
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: false,
+        repositories: &[],
+        process_use: ProcessUse::NoEvidence,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    let log_path = adapter.append_removal_log(&lock, &layout, &record).unwrap();
+    assert_eq!(
+        log_path.as_bytes(),
+        temp.path()
+            .join("data/logs/operations.jsonl")
+            .as_os_str()
+            .as_bytes()
+    );
+    let line = fs::read_to_string(temp.path().join("data/logs/operations.jsonl")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+    assert_eq!(value["operation_id"], operation_id.to_string());
+    assert_eq!(value["workspace_id"], id.to_string());
+    assert_eq!(value["event"], "started");
+    assert_eq!(value["force"], true);
+    assert_eq!(value["git_check_complete"], false);
+    assert!(container.join("root").exists());
+    assert!(!container.join("root/operations.jsonl").exists());
+
+    let repository = RepositoryInspection::new(
+        PathBuf::from("lib\nstrange"),
+        RepositoryState::from_tracked_change_count(2),
+        Vec::new(),
+    );
+    let completed = RemovalLogRecord {
+        event: RemovalLogEvent::Completed,
+        git_state: GitState::Dirty,
+        git_check_complete: true,
+        repositories: std::slice::from_ref(&repository),
+        outcome: Some(WorkspaceRemoval::Removed { root_entries: 3 }),
+        ..record
+    };
+    adapter
+        .append_removal_log(&lock, &layout, &completed)
+        .unwrap();
+    let lines = fs::read_to_string(temp.path().join("data/logs/operations.jsonl")).unwrap();
+    let events = lines
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["event"], "completed");
+    assert_eq!(events[1]["result"], "removed");
+    assert_eq!(
+        events[1]["repositories"][0]["relative_path"],
+        "lib\nstrange"
+    );
+    assert_eq!(events[1]["repositories"][0]["tracked_changes"], 2);
+}
+
+#[test]
+fn p1_12_removal_log_rejects_symlink_without_touching_external_file() {
+    let (temp, adapter, layout, lock, id, _) = removal_fixture();
+    let external = temp.path().join("external-log");
+    fs::write(&external, b"keep").unwrap();
+    symlink(&external, temp.path().join("data/logs/operations.jsonl")).unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: OperationId::from_str("op_01890a5d-ac96-774b-bd5b-55c7b8d09f51").unwrap(),
+        workspace_id: id,
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: false,
+        repositories: &[],
+        process_use: ProcessUse::NoEvidence,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    assert!(adapter.append_removal_log(&lock, &layout, &record).is_err());
+    assert_eq!(fs::read(external).unwrap(), b"keep");
+}
+
+#[test]
+fn p1_12_removal_log_rejects_a_false_completion_before_creating_the_log() {
+    let (temp, adapter, layout, lock, id, _) = removal_fixture();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: OperationId::from_str("op_01890a5d-ac96-774b-bd5b-55c7b8d09f51").unwrap(),
+        workspace_id: id,
+        event: RemovalLogEvent::Completed,
+        mode: RemovalMode::Normal,
+        git_state: GitState::Clean,
+        git_check_complete: true,
+        repositories: &[],
+        process_use: ProcessUse::NoEvidence,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    assert_eq!(
+        adapter
+            .append_removal_log(&lock, &layout, &record)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidData
+    );
+    assert!(!temp.path().join("data/logs/operations.jsonl").exists());
 }
 
 #[test]

@@ -276,6 +276,15 @@ impl BootstrapStore for FakeBootstrap {
         unreachable!("init/doctor never inspects a removal container")
     }
 
+    fn append_removal_log(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _record: &thinws_ports::RemovalLogRecord<'_>,
+    ) -> Result<AbsolutePath, PortError> {
+        unreachable!("init/doctor never writes a removal log")
+    }
+
     fn remove_workspace(
         &self,
         _lock: &Self::LockGuard,

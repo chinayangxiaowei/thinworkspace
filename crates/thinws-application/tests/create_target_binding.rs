@@ -160,6 +160,15 @@ impl BootstrapStore for SwapBeforeTargetProbe {
             .inspect_removal_container(lock, layout, workspace_id)
     }
 
+    fn append_removal_log(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        record: &thinws_ports::RemovalLogRecord<'_>,
+    ) -> Result<AbsolutePath, PortError> {
+        self.inner.append_removal_log(lock, layout, record)
+    }
+
     fn remove_workspace(
         &self,
         lock: &Self::LockGuard,

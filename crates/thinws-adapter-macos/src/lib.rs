@@ -10,6 +10,7 @@ mod ffi;
 mod filesystem;
 mod lock;
 mod materializer;
+mod operation_log;
 mod probe;
 mod process;
 mod store;

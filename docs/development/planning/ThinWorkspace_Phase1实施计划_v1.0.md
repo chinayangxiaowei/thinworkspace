@@ -415,6 +415,8 @@ P1-12 隔离清理终态复核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对�
 
 P1-12 删除编排接入（进行中）：BootstrapStore 增量提供持 data-root 锁的只读容器定位，返回已验证且唯一的原位置或隔离位置供 ProcessProbe 扫描；容器不存在返回 None，两处冲突或归属不符拒绝。先写针对原位置、隔离位置、冲突及不存在的 APFS 用例并确认未实现时失败，再补实现；全工作区普通门禁通过。MetadataStore 增量提供按完整 WorkspaceId 读取最小 tombstone，供重复 remove 返回 already-removed；先验证未实现时测试因缺失 tombstone 失败，再从既有 SQLite 表读取并跨重新打开验证。仍需接入 Application 的 Git/进程决策、持久日志、SQLite 收口编排和 CLI；此阶段不把只读定位或 tombstone 读取当作完成清理。
 
+P1-12 清理日志持久化（进行中）：在既有 BootstrapStore 边界增量实现 `logs/operations.jsonl` 的持锁、no-follow、0600、同步追加与路径身份核验，不在副本内写产品文件，不引入新 Port/审计服务。先用真实 APFS 测试确认未实现时 force 开始事件失败，再补实现；追加两条结构化事件、控制字符 JSON 转义、日志路径符号链接拒绝及不允许无结果的伪完成事件已有回归。`cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过。Application 起止事件编排与异常分支仍待完成；同步调整技术栈中“tracing 诊断”和“必须 fsync 的清理 JSONL”职责，不把单条日志能力视为任务完成。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

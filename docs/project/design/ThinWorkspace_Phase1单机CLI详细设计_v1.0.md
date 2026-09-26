@@ -58,7 +58,7 @@ data root 已存在时必须是当前用户拥有、模式精确为 `0700` 的�
 
 已有 config 时，Application 先将本次 `--data-root` 的规范路径字节与登记值比较；不同立即返回 `E_DATA_ROOT_CHANGE_UNSUPPORTED`，不得访问或创建新路径。相同时，重复 init 只在 Ready marker、当前 data-root Volume ID、受控子目录和 SQLite installation 全部一致时返回 `already-initialized`；它不重写文件、不补建缺失布局。
 
-doctor 使用相同校验的产品状态只读路径和 SQLite read-only 打开，不取得 lifecycle lock、不创建受控目录或配置、不修改主数据库、schema、installation、Workspace 行或 journal mode，也不修复任何对象。SQLite 为读取 WAL 数据库可能创建、更新或删除同目录的 `state.db-wal`/`state.db-shm` 引擎协调文件；这不是产品状态写入，不能宣称文件系统零写入。所需辅助文件无法访问时返回 `E_METADATA`，不得使用 `immutable=1` 绕过锁和变化检测。MetadataStore 的只读快照返回 installation 和按 WorkspaceId 稳定排序的活动 Workspace；doctor 只统计其中非 Ready 项并报告数量，数量大于零本身不是根布局损坏，也不改变 `status=ready`。root marker 仍为 `initializing` 则属于未完成实例初始化并返回 `E_DATA_ROOT_LAYOUT`。P1-03 只报告 Git 检查尚未启用；P1-16 接入 GitInspector 后再改变该能力事实，不在 doctor 内直接启动 Git。
+doctor 使用相同校验的产品状态只读路径和 SQLite read-only 打开，不取得 lifecycle lock、不创建受控目录或配置、不修改主数据库、schema、installation、Workspace 行或 journal mode，也不修复任何对象。SQLite 为读取 WAL 数据库可能创建、更新或删除同目录的 `state.db-wal`/`state.db-shm` 引擎协调文件；这不是产品状态写入，不能宣称文件系统零写入。所需辅助文件无法访问时返回 `E_METADATA`，不得使用 `immutable=1` 绕过锁和变化检测。MetadataStore 的只读快照返回 installation 和按 WorkspaceId 稳定排序的活动 Workspace；doctor 只统计其中非 Ready 项并报告数量，数量大于零本身不是根布局损坏，也不改变 `status=ready`。root marker 仍为 `initializing` 则属于未完成实例初始化并返回 `E_DATA_ROOT_LAYOUT`。P1-03 只报告 Git 检查尚未启用；P1-16 落地 GitInspector 后，由 P1-10 接入公开 status 查询并更新 doctor 的能力事实，doctor 本身不启动 Git。
 
 只接管新目录或空目录；已完整初始化且身份一致时幂等返回。初始化中断留下的非空目录不自动接管，需用户确认后在平台之外显式清理，再重新初始化。没有 reset/migrate。细化的错误行为由手册管理。
 
@@ -169,7 +169,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 ## 八、查询与未完成状态
 
-list/status 展示全部活跃状态；path 仅 Ready。查询不写 SQLite/Git，不自动清理或恢复。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
+list/status 展示全部活跃状态；path 仅 Ready。查询不写 SQLite/Git 产品状态，不自动清理或恢复；Ready 路径验证使用 lifecycle lock，锁实现可能更新其 PID 诊断文件，SQLite read-only 打开也可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
 
 doctor 只读报告不一致及未完成状态，没有 `--repair`。创建中断后不自动重新镜像最新源；调用者可显式强制清理登记的残留 Workspace，再以释放后的名称重新创建。初始化中断的 data root 不属于已登记 Workspace，不能交给 `workspace remove` 删除。
 

@@ -574,6 +574,19 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
     assert_eq!(summary.cow(), CowEvidence::Confirmed);
     assert_eq!(summary.fallback_reason(), None);
     assert_eq!(summary.failed_attempt_count(), 0);
+    let main_database_before_inspection = fs::read(&database).unwrap();
+    let snapshot = SqliteMetadataStoreFactory
+        .inspect(
+            &TestLayout::new(&database),
+            &installation(),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+    assert_eq!(snapshot.final_materialization(id), Some(&summary));
+    assert_eq!(
+        fs::read(&database).unwrap(),
+        main_database_before_inspection
+    );
 
     let missing = WorkspaceId::from_str(WORKSPACE_IDS[1]).unwrap();
     assert!(
@@ -611,6 +624,62 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
         })
         .unwrap();
     assert_eq!(count_after, 1);
+}
+
+#[test]
+fn p1_10_snapshot_rejects_ready_record_with_corrupted_missing_receipt() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    fs::File::create(&database).unwrap();
+    let layout = TestLayout::new(&database);
+    let factory = SqliteMetadataStoreFactory;
+    factory
+        .initialize(&layout, &installation(), Duration::from_millis(50))
+        .unwrap();
+    let mut store = factory
+        .open_existing(&layout, &installation(), Duration::from_millis(50))
+        .unwrap();
+    let reserved = reservation(
+        0,
+        "writer-ready",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+    );
+    store.reserve_workspace(&reserved).unwrap();
+    let (plan, receipt) = successful_receipt(VolumeId::from_str(VOLUME_ID).unwrap());
+    store
+        .complete_materialization(
+            reserved.workspace_id(),
+            &plan,
+            &receipt,
+            UnixMillis::new(reserved.created_at().get() + 1).unwrap(),
+        )
+        .unwrap();
+    drop(store);
+
+    // Simulate on-disk data corruption, then restore the exact schema catalog.
+    let raw = Connection::open(&database).unwrap();
+    let delete_guard: String = raw
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='receipts_no_direct_delete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    raw.execute_batch("DROP TRIGGER receipts_no_direct_delete")
+        .unwrap();
+    raw.execute(
+        "DELETE FROM materialization_receipts WHERE workspace_id=?1",
+        [reserved.workspace_id().to_string()],
+    )
+    .unwrap();
+    raw.execute_batch(&delete_guard).unwrap();
+    drop(raw);
+
+    let error = factory
+        .inspect(&layout, &installation(), Duration::from_millis(50))
+        .unwrap_err();
+    assert_eq!(error.kind(), PortErrorKind::InvalidData);
+    assert!(error.to_string().contains("missing its final receipt"));
 }
 
 #[test]

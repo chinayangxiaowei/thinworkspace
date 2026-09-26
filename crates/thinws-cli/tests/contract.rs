@@ -2,11 +2,32 @@ use std::ffi::OsString;
 
 use serde_json::Value;
 use thinws_cli::{
-    Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, InitView,
-    LocalCommands, run,
+    Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, GitView,
+    InitView, LocalCommands, MaterializationView, RepositoryView, StatusView, WorkspaceView, run,
 };
 
 struct FakeCommands;
+
+fn fixture_workspace_view() -> WorkspaceView {
+    WorkspaceView {
+        workspace_id: "ws_019a0000-0000-7000-8000-000000000001".to_owned(),
+        name: "one".to_owned(),
+        state: "ready".to_owned(),
+        source: b"/Volumes/data/source".to_vec(),
+        path: b"/Volumes/data/thinws-data/workspaces/ws_019a0000-0000-7000-8000-000000000001/root"
+            .to_vec(),
+        last_error_code: None,
+        materialization: Some(MaterializationView {
+            requested_mode: "cow-clone".to_owned(),
+            effective_mode: "cow-clone".to_owned(),
+            actual_mode: "cow-clone".to_owned(),
+            adapter: "apfs-file-clone".to_owned(),
+            cow: "confirmed".to_owned(),
+            fallback_reason: None,
+            failed_attempt_count: 0,
+        }),
+    }
+}
 
 impl Commands for FakeCommands {
     fn init(&self, data_root: Vec<u8>, _now_ms: i64) -> Result<InitView, ErrorView> {
@@ -63,6 +84,31 @@ impl Commands for FakeCommands {
             }))
         }
     }
+
+    fn list(&self) -> Result<Vec<WorkspaceView>, ErrorView> {
+        Ok(vec![fixture_workspace_view()])
+    }
+
+    fn path(&self, _name: String) -> Result<Vec<u8>, ErrorView> {
+        Ok(fixture_workspace_view().path)
+    }
+
+    fn status(&self, _name: String) -> Result<StatusView, ErrorView> {
+        Ok(StatusView {
+            workspace: fixture_workspace_view(),
+            git: Some(GitView {
+                scan_complete: true,
+                state: "clean".to_owned(),
+                issues: Vec::new(),
+                repositories: vec![RepositoryView {
+                    relative_path: b".".to_vec(),
+                    state: "clean".to_owned(),
+                    tracked_changes: Some(0),
+                    issues: Vec::new(),
+                }],
+            }),
+        })
+    }
 }
 
 fn execute(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
@@ -101,6 +147,18 @@ impl Commands for FailingCommands {
         _dry_run: bool,
         _now_ms: i64,
     ) -> Result<CreateView, ErrorView> {
+        Err(error(self.0))
+    }
+
+    fn list(&self) -> Result<Vec<WorkspaceView>, ErrorView> {
+        Err(error(self.0))
+    }
+
+    fn path(&self, _name: String) -> Result<Vec<u8>, ErrorView> {
+        Err(error(self.0))
+    }
+
+    fn status(&self, _name: String) -> Result<StatusView, ErrorView> {
         Err(error(self.0))
     }
 }
@@ -149,7 +207,7 @@ fn init_human_and_json_outputs_match_the_frozen_contract() {
 }
 
 #[test]
-fn doctor_human_and_json_outputs_expose_current_p1_03_capabilities() {
+fn doctor_human_and_json_outputs_expose_current_git_status_capability() {
     let (status, stdout, stderr) = execute(&["thinws", "doctor"]);
     assert_eq!(status, 0);
     assert!(stderr.is_empty());
@@ -157,7 +215,7 @@ fn doctor_human_and_json_outputs_expose_current_p1_03_capabilities() {
     assert!(human.contains("ThinWorkspace doctor\n"));
     assert!(human.contains("Status:              ready\n"));
     assert!(human.contains("Incomplete workspaces: 2\n"));
-    assert!(human.contains("Git check:           unavailable (not implemented)\n"));
+    assert!(human.contains("Git check:           available\n"));
 
     let (status, stdout, stderr) = execute(&["thinws", "--json", "doctor"]);
     assert_eq!(status, 0);
@@ -166,8 +224,8 @@ fn doctor_human_and_json_outputs_expose_current_p1_03_capabilities() {
     assert_eq!(json["data"]["command"], "doctor");
     assert_eq!(json["data"]["status"], "ready");
     assert_eq!(json["data"]["incomplete_workspaces"], 2);
-    assert_eq!(json["data"]["git_check"]["available"], false);
-    assert_eq!(json["data"]["git_check"]["reason"], "not-implemented");
+    assert_eq!(json["data"]["git_check"]["available"], true);
+    assert_eq!(json["data"]["git_check"]["reason"], Value::Null);
 }
 
 #[test]
@@ -279,4 +337,62 @@ fn workspace_create_and_preview_render_distinct_execution_facts() {
             .get("actual_mode")
             .is_none()
     );
+}
+
+#[test]
+fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
+    let (code, stdout, stderr) = execute(&["thinws", "--json", "workspace", "list"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let listed: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(listed["data"]["command"], "workspace list");
+    assert_eq!(listed["data"]["workspaces"][0]["name"], "one");
+    assert_eq!(
+        listed["data"]["workspaces"][0]["materialization"]["actual_mode"],
+        "cow-clone"
+    );
+    assert!(listed["data"]["workspaces"][0].get("git").is_none());
+    assert!(listed["data"]["workspaces"][0].get("path").is_none());
+
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "path", "one"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    assert_eq!(
+        stdout,
+        [fixture_workspace_view().path, b"\n".to_vec()].concat()
+    );
+
+    let (code, stdout, stderr) = execute(&["thinws", "--json", "workspace", "path", "one"]);
+    assert_eq!(code, 2);
+    assert!(stderr.is_empty());
+    let rejected: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(rejected["error"]["code"], "E_USAGE");
+
+    let (code, stdout, stderr) = execute(&["thinws", "--json", "workspace", "status", "one"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let status: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(status["data"]["command"], "workspace status");
+    assert_eq!(status["data"]["state"], "ready");
+    assert_eq!(status["data"]["git"]["scan_complete"], true);
+    assert_eq!(status["data"]["git"]["state"], "clean");
+    assert_eq!(
+        status["data"]["git"]["repositories"][0]["relative_path"],
+        "."
+    );
+    assert_eq!(
+        status["data"]["git"]["repositories"][0]["tracked_changes"],
+        0
+    );
+}
+
+#[test]
+fn workspace_help_lists_the_query_commands() {
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let help = String::from_utf8(stdout).unwrap();
+    assert!(help.contains("list"));
+    assert!(help.contains("path"));
+    assert!(help.contains("status"));
 }

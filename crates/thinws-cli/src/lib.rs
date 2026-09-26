@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, error::ErrorKind};
 use serde_json::{Map, Value, json};
+use thinws_adapter_git_cli::SystemGitInspector;
 use thinws_adapter_macos::{ApfsCloneMaterializer, FullCopyMaterializer, MacOsHostAdapter};
 use thinws_application::{
-    CowEvidence, CreateRequest, FallbackReason, InitRequest, MaterializationMode, MaterializerKind,
-    ThinWorkspaceService,
+    CowEvidence, CreateRequest, DiscoveryCompleteness, FallbackReason, GitInspectionIssue,
+    GitQueryFailureKind, GitState, InitRequest, MaterializationMode, MaterializerKind,
+    RepositoryState, ThinWorkspaceService, WorkspaceQuery, WorkspaceStatus,
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 
@@ -104,6 +106,79 @@ pub enum CreateView {
     Preview(CreatePreviewView),
 }
 
+/// Renderer-facing final receipt facts for a Ready Workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationView {
+    /// Original requested materialization mode.
+    pub requested_mode: String,
+    /// Effective planned mode after permitted fallback.
+    pub effective_mode: String,
+    /// Mode actually executed.
+    pub actual_mode: String,
+    /// Concrete successful backend.
+    pub adapter: String,
+    /// Actual CoW evidence.
+    pub cow: String,
+    /// Stable fallback reason, if any.
+    pub fallback_reason: Option<String>,
+    /// Failed attempts retained before final success.
+    pub failed_attempt_count: usize,
+}
+
+/// Renderer-facing active Workspace record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceView {
+    /// UUIDv7 Workspace identifier.
+    pub workspace_id: String,
+    /// Exact user-facing name.
+    pub name: String,
+    /// Durable lifecycle state.
+    pub state: String,
+    /// Lossless canonical source path bytes.
+    pub source: Vec<u8>,
+    /// Lossless ID-derived target path bytes, which may not be usable when non-Ready.
+    pub path: Vec<u8>,
+    /// Stable last error code for an Error record.
+    pub last_error_code: Option<String>,
+    /// Final receipt facts when a successful materialization occurred.
+    pub materialization: Option<MaterializationView>,
+}
+
+/// One repository's tracked-change summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryView {
+    /// Lossless path relative to the Workspace root; `.` denotes root.
+    pub relative_path: Vec<u8>,
+    /// Stable clean, dirty, or unknown state.
+    pub state: String,
+    /// Distinct tracked path count, absent when unknown.
+    pub tracked_changes: Option<usize>,
+    /// Stable reasons for unknown state.
+    pub issues: Vec<String>,
+}
+
+/// Renderer-facing Git discovery and tracked-change evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitView {
+    /// Whether the bounded repository scan completed.
+    pub scan_complete: bool,
+    /// Stable aggregate state.
+    pub state: String,
+    /// Whole-scan reasons for unknown state.
+    pub issues: Vec<String>,
+    /// Repositories in stable relative-path order.
+    pub repositories: Vec<RepositoryView>,
+}
+
+/// Renderer-facing status of one active Workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusView {
+    /// Durable Workspace and final receipt facts.
+    pub workspace: WorkspaceView,
+    /// Git evidence only for a verified Ready Workspace.
+    pub git: Option<GitView>,
+}
+
 /// Renderer-facing stable failure data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorView {
@@ -134,6 +209,15 @@ pub trait Commands {
         dry_run: bool,
         now_ms: i64,
     ) -> Result<CreateView, ErrorView>;
+
+    /// Lists active Workspaces without starting Git.
+    fn list(&self) -> Result<Vec<WorkspaceView>, ErrorView>;
+
+    /// Returns one verified Ready Workspace path as lossless bytes.
+    fn path(&self, name: String) -> Result<Vec<u8>, ErrorView>;
+
+    /// Returns one Workspace's metadata and on-demand tracked-change evidence.
+    fn status(&self, name: String) -> Result<StatusView, ErrorView>;
 }
 
 /// Local composition root for the macOS/APFS Phase 1 command set.
@@ -273,6 +357,149 @@ impl Commands for LocalCommands {
             }))
         }
     }
+
+    fn list(&self) -> Result<Vec<WorkspaceView>, ErrorView> {
+        let service = ThinWorkspaceService::new(
+            self.adapter()?,
+            SqliteMetadataStoreFactory,
+            self.lock_timeout,
+            self.sqlite_timeout,
+        );
+        service
+            .list_workspaces()
+            .map(|workspaces| workspaces.iter().map(workspace_view).collect())
+            .map_err(use_case_error_view)
+    }
+
+    fn path(&self, name: String) -> Result<Vec<u8>, ErrorView> {
+        let service = ThinWorkspaceService::new(
+            self.adapter()?,
+            SqliteMetadataStoreFactory,
+            self.lock_timeout,
+            self.sqlite_timeout,
+        );
+        service
+            .workspace_path(&name)
+            .map(|path| path.as_bytes().to_vec())
+            .map_err(use_case_error_view)
+    }
+
+    fn status(&self, name: String) -> Result<StatusView, ErrorView> {
+        let service = ThinWorkspaceService::new(
+            self.adapter()?,
+            SqliteMetadataStoreFactory,
+            self.lock_timeout,
+            self.sqlite_timeout,
+        );
+        service
+            .workspace_status(&name, &SystemGitInspector)
+            .map(|status| status_view(&status))
+            .map_err(use_case_error_view)
+    }
+}
+
+fn workspace_view(query: &WorkspaceQuery) -> WorkspaceView {
+    let record = query.record();
+    let reservation = record.reservation();
+    WorkspaceView {
+        workspace_id: reservation.workspace_id().to_string(),
+        name: reservation.name().to_string(),
+        state: record.state().as_str().to_owned(),
+        source: reservation.source_path().as_bytes().to_vec(),
+        path: reservation.target_path().as_bytes().to_vec(),
+        last_error_code: record.last_error_code().map(|code| code.to_string()),
+        materialization: query.materialization().map(|facts| MaterializationView {
+            requested_mode: mode_name(facts.requested_mode()).to_owned(),
+            effective_mode: mode_name(facts.effective_mode()).to_owned(),
+            actual_mode: mode_name(facts.actual_mode()).to_owned(),
+            adapter: adapter_name(facts.adapter()).to_owned(),
+            cow: cow_name(facts.cow()).to_owned(),
+            fallback_reason: facts
+                .fallback_reason()
+                .map(|reason| fallback_name(reason).to_owned()),
+            failed_attempt_count: facts.failed_attempt_count(),
+        }),
+    }
+}
+
+fn status_view(status: &WorkspaceStatus) -> StatusView {
+    StatusView {
+        workspace: workspace_view(status.workspace()),
+        git: status.git().map(|inspection| GitView {
+            scan_complete: inspection.discovery() == DiscoveryCompleteness::Complete,
+            state: git_state_name(inspection.aggregate()).to_owned(),
+            issues: inspection
+                .issues()
+                .iter()
+                .map(|issue| git_issue_name(issue).to_owned())
+                .collect(),
+            repositories: inspection
+                .repositories()
+                .iter()
+                .map(|repository| RepositoryView {
+                    relative_path: if repository.relative_path().as_os_str().is_empty() {
+                        b".".to_vec()
+                    } else {
+                        repository.relative_path().as_os_str().as_bytes().to_vec()
+                    },
+                    state: repository_state_name(repository.state()).to_owned(),
+                    tracked_changes: repository.state().tracked_change_count(),
+                    issues: repository
+                        .issues()
+                        .iter()
+                        .map(|issue| git_issue_name(issue).to_owned())
+                        .collect(),
+                })
+                .collect(),
+        }),
+    }
+}
+
+const fn git_state_name(state: GitState) -> &'static str {
+    match state {
+        GitState::NotApplicable => "not-applicable",
+        GitState::Clean => "clean",
+        GitState::Dirty => "dirty",
+        GitState::Unknown => "unknown",
+    }
+}
+
+const fn repository_state_name(state: RepositoryState) -> &'static str {
+    match state {
+        RepositoryState::Clean => "clean",
+        RepositoryState::Dirty { .. } => "dirty",
+        RepositoryState::Unknown => "unknown",
+    }
+}
+
+const fn git_issue_name(issue: &GitInspectionIssue) -> &'static str {
+    match issue {
+        GitInspectionIssue::InvalidCopyRoot => "invalid-copy-root",
+        GitInspectionIssue::EnvironmentUnsupported => "environment-unsupported",
+        GitInspectionIssue::InvalidExecPath => "invalid-exec-path",
+        GitInspectionIssue::ScanFailed => "scan-failed",
+        GitInspectionIssue::ScanLimitReached => "scan-limit-reached",
+        GitInspectionIssue::DepthLimitReached => "depth-limit-reached",
+        GitInspectionIssue::RepositoryLimitReached => "repository-limit-reached",
+        GitInspectionIssue::UnsafeRepositoryMetadata => "unsafe-repository-metadata",
+        GitInspectionIssue::ExternalRepositoryMetadata => "external-repository-metadata",
+        GitInspectionIssue::UnsupportedConfiguration => "unsupported-configuration",
+        GitInspectionIssue::UnsafeAttributes => "unsafe-attributes",
+        GitInspectionIssue::HiddenIndexFlags => "hidden-index-flags",
+        GitInspectionIssue::SparseCheckout => "sparse-checkout",
+        GitInspectionIssue::QueryFailed { kind, .. } => match kind {
+            GitQueryFailureKind::InvalidInput { .. } => "query-invalid-input",
+            GitQueryFailureKind::Start { .. } => "query-start-failed",
+            GitQueryFailureKind::Io { .. } => "query-io-failed",
+            GitQueryFailureKind::TimedOut => "query-timed-out",
+            GitQueryFailureKind::OutputLimitExceeded { .. } => "query-output-limit",
+        },
+        GitInspectionIssue::QueryNonZeroExit(_) => "query-nonzero-exit",
+        GitInspectionIssue::InvalidGitOutput => "invalid-git-output",
+        GitInspectionIssue::EvidenceChanged => "evidence-changed",
+        GitInspectionIssue::UnsafeDescendant => "unsafe-descendant",
+        GitInspectionIssue::BudgetExpired => "budget-expired",
+    }
 }
 
 /// Parses one argv vector, executes a command, renders output and returns its exit status.
@@ -320,6 +547,22 @@ where
         }
     };
 
+    if cli.json
+        && matches!(
+            &cli.command,
+            Command::Workspace {
+                command: WorkspaceCommand::Path { .. }
+            }
+        )
+    {
+        return render_error(
+            &usage_error("workspace path does not support --json"),
+            true,
+            stdout,
+            stderr,
+        );
+    }
+
     let result = match cli.command {
         Command::Init { data_root } => commands
             .init(data_root.as_os_str().as_bytes().to_vec(), now_ms)
@@ -342,6 +585,15 @@ where
                 now_ms,
             )
             .map(Success::Create),
+        Command::Workspace {
+            command: WorkspaceCommand::List,
+        } => commands.list().map(Success::List),
+        Command::Workspace {
+            command: WorkspaceCommand::Path { name },
+        } => commands.path(name).map(Success::Path),
+        Command::Workspace {
+            command: WorkspaceCommand::Status { name },
+        } => commands.status(name).map(Success::Status),
     };
     match result {
         Ok(success) => {
@@ -403,12 +655,27 @@ enum WorkspaceCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Lists all active Workspace records without scanning Git.
+    List,
+    /// Prints one verified Ready Workspace path as a single line.
+    Path {
+        /// Exact Workspace name.
+        name: String,
+    },
+    /// Inspects one Workspace and its tracked Git changes when Ready.
+    Status {
+        /// Exact Workspace name.
+        name: String,
+    },
 }
 
 enum Success {
     Init(InitView),
     Doctor(DoctorView),
     Create(CreateView),
+    List(Vec<WorkspaceView>),
+    Path(Vec<u8>),
+    Status(StatusView),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -463,7 +730,7 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
                 "Incomplete workspaces: {}",
                 view.incomplete_workspaces
             )?;
-            writeln!(output, "Git check:           unavailable (not implemented)")
+            writeln!(output, "Git check:           available")
         }
         Success::Create(CreateView::Ready(view)) => {
             writeln!(output, "Workspace ready")?;
@@ -512,6 +779,69 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
             )?;
             writeln!(output, "Workspace ID:    not allocated")
         }
+        Success::List(workspaces) => {
+            writeln!(output, "Workspaces")?;
+            for workspace in workspaces {
+                write!(
+                    output,
+                    "{}  {}  {}  ",
+                    workspace.name, workspace.workspace_id, workspace.state
+                )?;
+                output.write_all(&workspace.source)?;
+                writeln!(
+                    output,
+                    "  {}",
+                    workspace
+                        .materialization
+                        .as_ref()
+                        .map_or("not-ready", |facts| facts.actual_mode.as_str())
+                )?;
+            }
+            Ok(())
+        }
+        Success::Path(path) => {
+            output.write_all(path)?;
+            output.write_all(b"\n")
+        }
+        Success::Status(status) => {
+            let workspace = &status.workspace;
+            writeln!(output, "Workspace status")?;
+            writeln!(output, "Name:          {}", workspace.name)?;
+            writeln!(output, "Workspace ID:  {}", workspace.workspace_id)?;
+            writeln!(output, "State:         {}", workspace.state)?;
+            output.write_all(b"Source:        ")?;
+            output.write_all(&workspace.source)?;
+            output.write_all(b"\n")?;
+            if workspace.state == "ready" {
+                output.write_all(b"Path:          ")?;
+                output.write_all(&workspace.path)?;
+                output.write_all(b"\n")?;
+            }
+            if let Some(git) = &status.git {
+                writeln!(output, "Git:           {}", git.state)?;
+                for issue in &git.issues {
+                    writeln!(output, "Git issue:     {issue}")?;
+                }
+                for repository in &git.repositories {
+                    output.write_all(b"Repository:    ")?;
+                    output.write_all(&repository.relative_path)?;
+                    writeln!(
+                        output,
+                        "  {}  {}",
+                        repository.state,
+                        repository
+                            .tracked_changes
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string())
+                    )?;
+                    for issue in &repository.issues {
+                        writeln!(output, "Repo issue:    {issue}")?;
+                    }
+                }
+            } else {
+                writeln!(output, "Git:           not run (Workspace not Ready)")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -538,8 +868,8 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
             "volume_id": view.volume_id,
             "incomplete_workspaces": view.incomplete_workspaces,
             "git_check": {
-                "available": false,
-                "reason": "not-implemented",
+                "available": true,
+                "reason": Value::Null,
             },
         }),
         Success::Create(CreateView::Ready(view)) => json!({
@@ -590,6 +920,41 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
                 },
             },
         }),
+        Success::List(workspaces) => json!({
+            "command": "workspace list",
+            "workspaces": workspaces.iter().map(list_workspace_json).collect::<Vec<_>>(),
+        }),
+        Success::Path(_) => return Err(io::Error::other("workspace path has no JSON output")),
+        Success::Status(status) => {
+            let mut data = workspace_json(&status.workspace);
+            let object = data
+                .as_object_mut()
+                .expect("workspace JSON is always an object");
+            object.insert("command".to_owned(), json!("workspace status"));
+            let git = if let Some(git) = &status.git {
+                json!({
+                    "scan_complete": git.scan_complete,
+                    "state": git.state,
+                    "issues": git.issues,
+                    "repositories": git.repositories.iter().map(|repository| json!({
+                        "relative_path": String::from_utf8_lossy(&repository.relative_path),
+                        "relative_path_hex": hex(&repository.relative_path),
+                        "state": repository.state,
+                        "tracked_changes": repository.tracked_changes,
+                        "issues": repository.issues,
+                    })).collect::<Vec<_>>(),
+                })
+            } else {
+                json!({
+                    "scan_complete": false,
+                    "state": "unknown",
+                    "issues": ["workspace-not-ready"],
+                    "repositories": [],
+                })
+            };
+            object.insert("git".to_owned(), git);
+            data
+        }
     };
     serde_json::to_writer(
         &mut *output,
@@ -600,6 +965,48 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
         }),
     )?;
     output.write_all(b"\n")
+}
+
+fn workspace_json(view: &WorkspaceView) -> Value {
+    let materialization = view.materialization.as_ref().map(|facts| {
+        json!({
+            "requested_mode": facts.requested_mode,
+            "effective_planned_mode": facts.effective_mode,
+            "actual_mode": facts.actual_mode,
+            "adapter": facts.adapter,
+            "outcome": "succeeded",
+            "cow": facts.cow,
+            "fallback": {
+                "used": facts.fallback_reason.is_some(),
+                "reason": facts.fallback_reason,
+            },
+            "failed_attempt_count": facts.failed_attempt_count,
+        })
+    });
+    let ready_path = (view.state == "ready").then(|| String::from_utf8_lossy(&view.path));
+    let ready_path_hex = (view.state == "ready").then(|| hex(&view.path));
+    json!({
+        "workspace_id": view.workspace_id,
+        "name": view.name,
+        "state": view.state,
+        "source": String::from_utf8_lossy(&view.source),
+        "source_hex": hex(&view.source),
+        "path": ready_path,
+        "path_hex": ready_path_hex,
+        "last_error_code": view.last_error_code,
+        "materialization": materialization,
+    })
+}
+
+fn list_workspace_json(view: &WorkspaceView) -> Value {
+    let mut value = workspace_json(view);
+    let object = value
+        .as_object_mut()
+        .expect("workspace JSON is always an object");
+    // Listing does not revalidate Ready path ownership; only path/status may publish it.
+    object.remove("path");
+    object.remove("path_hex");
+    value
 }
 
 fn render_error(
@@ -732,5 +1139,56 @@ const fn fallback_name(reason: FallbackReason) -> &'static str {
     match reason {
         FallbackReason::CloneUnsupportedAtPreflight => "clone-unsupported-at-preflight",
         FallbackReason::CloneUnavailableAtRuntime => "clone-unavailable-at-runtime",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_renderers_keep_raw_path_bytes_and_lossless_hex() {
+        let path = b"/data-\xff/workspaces/ws_1/root".to_vec();
+        let mut plain = Vec::new();
+        render_success_human(&Success::Path(path.clone()), &mut plain).unwrap();
+        assert_eq!(plain, [path.as_slice(), b"\n"].concat());
+
+        let mut encoded = Vec::new();
+        render_success_json(
+            &Success::Status(StatusView {
+                workspace: WorkspaceView {
+                    workspace_id: "ws_1".to_owned(),
+                    name: "one".to_owned(),
+                    state: "ready".to_owned(),
+                    source: b"/source-\xfe".to_vec(),
+                    path,
+                    last_error_code: None,
+                    materialization: Some(MaterializationView {
+                        requested_mode: "cow-clone".to_owned(),
+                        effective_mode: "cow-clone".to_owned(),
+                        actual_mode: "cow-clone".to_owned(),
+                        adapter: "apfs-file-clone".to_owned(),
+                        cow: "confirmed".to_owned(),
+                        fallback_reason: None,
+                        failed_attempt_count: 0,
+                    }),
+                },
+                git: Some(GitView {
+                    scan_complete: true,
+                    state: "not-applicable".to_owned(),
+                    issues: Vec::new(),
+                    repositories: Vec::new(),
+                }),
+            }),
+            &mut encoded,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            value["data"]["path_hex"],
+            "2f646174612dff2f776f726b7370616365732f77735f312f726f6f74"
+        );
+        assert_eq!(value["data"]["source_hex"], "2f736f757263652dfe");
+        assert!(value["data"]["path"].as_str().unwrap().contains('�'));
     }
 }

@@ -13,6 +13,7 @@ use crate::{DataRootLayoutEvidence, PortError};
 pub struct MetadataSnapshot {
     installation: InstallationRecord,
     workspaces: Vec<WorkspaceRecord>,
+    final_materializations: Vec<(WorkspaceId, FinalMaterializationSummary)>,
 }
 
 impl MetadataSnapshot {
@@ -22,7 +23,18 @@ impl MetadataSnapshot {
         Self {
             installation,
             workspaces,
+            final_materializations: Vec::new(),
         }
+    }
+
+    /// Attaches typed final receipts read within the same read-only database snapshot.
+    #[must_use]
+    pub fn with_final_materializations(
+        mut self,
+        final_materializations: Vec<(WorkspaceId, FinalMaterializationSummary)>,
+    ) -> Self {
+        self.final_materializations = final_materializations;
+        self
     }
 
     /// Returns the installation row observed by the read-only connection.
@@ -35,6 +47,18 @@ impl MetadataSnapshot {
     #[must_use]
     pub fn workspaces(&self) -> &[WorkspaceRecord] {
         &self.workspaces
+    }
+
+    /// Returns immutable final materialization facts when a successful receipt exists.
+    #[must_use]
+    pub fn final_materialization(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Option<&FinalMaterializationSummary> {
+        self.final_materializations
+            .iter()
+            .find(|(id, _)| *id == workspace_id)
+            .map(|(_, summary)| summary)
     }
 }
 

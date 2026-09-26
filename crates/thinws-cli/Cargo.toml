@@ -15,10 +15,12 @@ clap.workspace = true
 directories.workspace = true
 serde_json.workspace = true
 thinws-adapter-macos = { path = "../thinws-adapter-macos" }
+thinws-adapter-git-cli = { path = "../thinws-adapter-git-cli" }
 thinws-application = { path = "../thinws-application" }
 thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

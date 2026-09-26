@@ -68,7 +68,7 @@ Volume ID:   550e8400-e29b-41d4-a716-446655440000
 }
 ```
 
-`data_root` 是供人阅读的显示值，`data_root_hex` 才是无损路径字节。doctor 仅在 config、Ready marker、当前卷、受控布局和 SQLite installation 全部一致时成功；P1-03 的成功输出为：
+`data_root` 是供人阅读的显示值，`data_root_hex` 才是无损路径字节。doctor 仅在 config、Ready marker、当前卷、受控布局和 SQLite installation 全部一致时成功；Git 状态查询接入后的成功输出为：
 
 ```text
 ThinWorkspace doctor
@@ -76,10 +76,10 @@ Status:              ready
 Host:                macos/aarch64
 Data root:           /Volumes/data/thinws-data
 Incomplete workspaces: 0
-Git check:           unavailable (not implemented)
+Git check:           available
 ```
 
-doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`host.platform`、`host.architecture`、`instance_id`、`data_root`、`data_root_hex`、`volume_id`、`incomplete_workspaces`，以及 `git_check={"available":false,"reason":"not-implemented"}`。`incomplete_workspaces` 统计已登记但非 Ready 的活动 Workspace；大于零是诊断事实，不使本次只读 doctor 失败。P1-16 接入 GitInspector 前不得把 `git_check` 写成可用；接入后只改变能力事实，不改变字段类型。未初始化返回 E_NOT_INITIALIZED；既有 config 指向另一 data root 时 init 返回 E_DATA_ROOT_CHANGE_UNSUPPORTED；非 APFS/无 Volume UUID 返回 E_CAPABILITY_UNAVAILABLE；非空未归属目录返回 E_DATA_ROOT_NOT_EMPTY；已登记 data root 缺失返回 E_DATA_ROOT_UNAVAILABLE；实例身份、权限、受控布局或 root marker 仍处于 initializing 返回 E_DATA_ROOT_LAYOUT；SQLite/schema 失败返回 E_METADATA；锁等待仍为 E_LOCK_TIMEOUT。
+doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`host.platform`、`host.architecture`、`instance_id`、`data_root`、`data_root_hex`、`volume_id`、`incomplete_workspaces`，以及 `git_check={"available":true,"reason":null}`。`available` 表示公开状态命令已接入 Git 检查，不保证当前系统 Git 或某个仓库可安全查询；实际查询失败由 status 的 `git.state=unknown` 和原因表达。`incomplete_workspaces` 统计已登记但非 Ready 的活动 Workspace；大于零是诊断事实，不使本次只读 doctor 失败。未初始化返回 E_NOT_INITIALIZED；既有 config 指向另一 data root 时 init 返回 E_DATA_ROOT_CHANGE_UNSUPPORTED；非 APFS/无 Volume UUID 返回 E_CAPABILITY_UNAVAILABLE；非空未归属目录返回 E_DATA_ROOT_NOT_EMPTY；已登记 data root 缺失返回 E_DATA_ROOT_UNAVAILABLE；实例身份、权限、受控布局或 root marker 仍处于 initializing 返回 E_DATA_ROOT_LAYOUT；SQLite/schema 失败返回 E_METADATA；锁等待仍为 E_LOCK_TIMEOUT。
 
 ## 四、原始目录镜像
 
@@ -151,9 +151,9 @@ thinws workspace list
 thinws workspace status auth-refresh
 ```
 
-path 成功时 stdout 只有一行绝对路径，可用于 `cd "$(thinws workspace path auth-refresh)"`。工具直接运行，不需要执行包装；终端、Agent 和工具自己管理环境、超时、输出和 Ctrl-C。
+path 成功时 stdout 只有原始绝对路径字节和末尾换行，常见路径可用于 `cd "$(thinws workspace path auth-refresh)"`。文件名本身若含换行，不能按物理行数解析此输出；脚本可改用 `workspace status --json` 的无损 `path_hex` 处理。工具直接运行，不需要执行包装；终端、Agent 和工具自己管理环境、超时、输出和 Ctrl-C。
 
-list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和实际物化模式；不为了列表自动扫描所有仓库。status 返回元数据、空间估算及当前副本内主仓库/子仓库的按需 Git 检查结果。
+list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和已有最终回执的实际物化模式；尚无成功回执时显示 `not-ready`，不为了列表自动扫描所有仓库。status 返回元数据及当前副本内主仓库/子仓库的按需 Git 检查结果；当前空间用量的估算由 P1-13 补入，P1-10 不把创建时回执字节数冒充当前用量。
 
 Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修改、删除、重命名、模式、冲突及子模块引用变化。未跟踪文件和 ignored 文件不展示、不计数、不阻塞。子仓库只有未跟踪文件时不能使父仓库误报有已跟踪修改。已从版本控制移除的历史路径不按“曾经出现过”追溯。
 
@@ -166,7 +166,7 @@ Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修�
 | remove | 仅显式 --force 清理 | 检查后执行 | 仅显式 --force 清理 | 仅显式 --force 清理 |
 | doctor | 只读 | 只读 | 只读 | 只读 |
 
-查询不写平台状态或 Git 元数据。Git unknown 不自行将 Ready 改成 Error。物化未证明完整时不能仅因目录存在返回 Ready。
+查询不写平台产品状态或 Git 元数据；Ready 的 `path/status` 为验证路径归属会取得 lifecycle lock，可能更新锁的 PID 诊断文件，SQLite 只读查询也可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不自行将 Ready 改成 Error。非 Ready 的 status 不启动 Git，返回 `git.state=unknown`、`issues=["workspace-not-ready"]`；`path` 返回 E_WORKSPACE_NOT_READY。Ready 路径当前归属核验失败时 `path/status` 均不输出可用路径。物化未证明完整时不能仅因目录存在返回 Ready。
 
 ## 六、清理工作区
 
@@ -292,14 +292,16 @@ thinws doctor
 | doctor | 支持 | 只读检查结果 |
 | workspace create / create --dry-run | 支持 | source、目标或目标模式、物化证据；dry-run ID 为 null |
 | workspace list | 支持 | 所有活跃记录的稳定排序数组 |
-| workspace status | 支持 | 当前状态、Git 检查完整性、逐仓库摘要和空间估算 |
+| workspace status | 支持 | 当前状态、Git 检查完整性和逐仓库摘要；当前空间估算在 P1-13 接入 |
 | workspace remove（含 --force） | 支持 | ID、operation、forced、removed/already-removed 和日志位置 |
 | gc / gc --dry-run | 支持 | 计划或实际回收结果；执行时还需 --yes |
-| workspace path | 不支持 | stdout 专用一行绝对路径；--json 返回 E_USAGE |
+| workspace path | 不支持 | stdout 专用原始绝对路径字节加末尾换行；--json 返回 E_USAGE |
 
 不支持的子命令或旧参数统一 E_USAGE，不保留首发前旧 Git/Base CLI 的兼容入口。源码实验命令不是本产品契约。
 
 `workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex` 和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target_parent/target_parent_hex`、`target_path_mode=id-derived-under-target-parent`、两端 Volume UUID 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。
+
+`workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`last_error_code` 和 `materialization`，不含 `git` 或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}`；每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。P1-10 不返回当前空间字段，P1-13 再按 §八加入，不把创建时 Receipt 当成实时用量。
 
 status JSON 示例：
 
@@ -308,6 +310,7 @@ status JSON 示例：
   "schema_version": 1,
   "ok": true,
   "data": {
+    "command": "workspace status",
     "workspace_id": "ws_019...",
     "name": "auth-refresh",
     "state": "ready",
@@ -316,8 +319,9 @@ status JSON 示例：
     "git": {
       "scan_complete": true,
       "state": "dirty",
+      "issues": [],
       "repositories": [
-        {"relative_path": ".", "state": "dirty", "tracked_changes": 3}
+        {"relative_path": ".", "relative_path_hex": "2e", "state": "dirty", "tracked_changes": 3, "issues": []}
       ]
     },
     "materialization": {
@@ -328,13 +332,13 @@ status JSON 示例：
       "outcome": "succeeded",
       "cow": "confirmed",
       "fallback": {"used": false, "reason": null},
-      "failed_attempts": []
+      "failed_attempt_count": 0
     }
   }
 }
 ```
 
-整体 git.state：发现不完整或任一仓库 unknown 则 unknown；否则存在 dirty 则 dirty；至少一个仓库且均 clean 则 clean；无仓库则 not-applicable。仓库按相对位置排序；unknown 附稳定原因。tracked_changes 为去重路径数，unknown 时为 null，不以 0 代替未知。
+示例为便于阅读省略了始终返回的 `source_hex`、`path_hex` 与 `last_error_code`。整体 git.state：发现不完整或任一仓库 unknown 则 unknown；否则存在 dirty 则 dirty；至少一个仓库且均 clean 则 clean；无仓库则 not-applicable。仓库按相对位置排序；unknown 原因放在全局或逐仓库 `issues`，用稳定短名表达。tracked_changes 为去重路径数，unknown 时为 null，不以 0 代替未知。非 Ready 的 status 返回 `path/path_hex=null`、`git={"scan_complete":false,"state":"unknown","issues":["workspace-not-ready"],"repositories":[]}`，不启动 Git。
 
 清理拒绝 JSON 示例：
 

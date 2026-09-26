@@ -577,8 +577,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "directories",
+ "rusqlite",
  "serde_json",
  "tempfile",
+ "thinws-adapter-git-cli",
  "thinws-adapter-macos",
  "thinws-application",
  "thinws-metadata-sqlite",

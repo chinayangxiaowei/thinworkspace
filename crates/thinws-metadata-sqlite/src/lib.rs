@@ -103,11 +103,31 @@ impl<L: DataRootLayoutEvidence> MetadataStoreFactory<L> for SqliteMetadataStoreF
         validate_existing_database(&transaction, expected)?;
         let installation = read_installation(&transaction)?;
         let workspaces = read_workspaces_by_workspace_id(&transaction)?;
+        let mut final_materializations = Vec::new();
+        for workspace in &workspaces {
+            let workspace_id = workspace.reservation().workspace_id();
+            let summary = read_final_materialization(
+                &transaction,
+                workspace_id,
+                installation.identity().volume_id(),
+            )?;
+            match summary {
+                Some(summary) => final_materializations.push((workspace_id, summary)),
+                None if workspace.state() == WorkspaceState::Ready => {
+                    return Err(PortError::new(
+                        PortErrorKind::InvalidData,
+                        "Ready workspace is missing its final receipt",
+                    ));
+                }
+                None => {}
+            }
+        }
         transaction
             .commit()
             .map_err(|error| storage_error("finish read-only metadata snapshot", error))?;
         layout.revalidate()?;
-        Ok(MetadataSnapshot::new(installation, workspaces))
+        Ok(MetadataSnapshot::new(installation, workspaces)
+            .with_final_materializations(final_materializations))
     }
 
     fn open_existing(
@@ -475,25 +495,11 @@ impl MetadataStore for SqliteMetadataStore {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Option<FinalMaterializationSummary>, PortError> {
-        let value: Option<(i64, String)> = self
-            .connection
-            .query_row(
-                "SELECT receipt_schema_version, receipt_json
-                 FROM materialization_receipts WHERE workspace_id = ?1",
-                [workspace_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(|error| storage_error("read final receipt", error))?;
-        value
-            .map(|(version, json)| {
-                receipt_json::decode_final_summary(
-                    version,
-                    &json,
-                    self.installation.identity().volume_id(),
-                )
-            })
-            .transpose()
+        read_final_materialization(
+            &self.connection,
+            workspace_id,
+            self.installation.identity().volume_id(),
+        )
     }
 
     fn workspaces(&self) -> Result<Vec<WorkspaceRecord>, PortError> {
@@ -782,6 +788,25 @@ impl RawWorkspace {
         )
         .map_err(|error| invalid_data("validate Workspace row", error))
     }
+}
+
+fn read_final_materialization(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    volume_id: VolumeId,
+) -> Result<Option<FinalMaterializationSummary>, PortError> {
+    let value: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT receipt_schema_version, receipt_json
+             FROM materialization_receipts WHERE workspace_id = ?1",
+            [workspace_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| storage_error("read final receipt", error))?;
+    value
+        .map(|(version, json)| receipt_json::decode_final_summary(version, &json, volume_id))
+        .transpose()
 }
 
 fn read_workspace(

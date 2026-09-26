@@ -362,11 +362,15 @@ P1-09 跨卷环境补验（2026-09-26 UTC）：经用户确认 `/Volumes/data` �
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-10 status/list/path | 状态边界、只读检查和普通路径输出；diff 由用户直接使用 Git | P1-09、P1-16 | R3 | Backlog |
+| P1-10 status/list/path | 状态边界、只读检查和普通路径输出；diff 由用户直接使用 Git | P1-09、P1-16 | R3 | In Review |
 | P1-16 GitInspector | 主/子仓库已跟踪变更、无仓库/不完整检查报告，不写 Git | P1-03、P0-07 | R3 | Done |
 | P1-11 用户命令执行包装（已取消） | 不再实施；已有外部占用检查责任归入 P1-12，无替代执行服务 | 不再参与依赖 | —（历史任务） | Cancelled |
 
 小阶段退出：查询不写状态，非 Ready 行为与用户契约一致；返回的普通路径可供现有工具直接使用，不要求执行包装或工具链环境注入。
+
+P1-10 领取（2026-09-26 UTC）：主 Agent 在本地 `main` 和唯一 checkout 实施，基线 `e9c9353`；不派生开发 Agent、不创建线上 PR，冻结候选只读独立审核使用 GPT-6 Astra / `xhigh`。风险 R3（普通路径的 Ready/归属证明、只读 SQLite 快照、Git unknown 的用户可见表达和 JSON 契约）。验收断言：`list` 名称排序且不触发 Git；`path` 只对完整 Receipt 与当前受控目录均验证为 Ready 的记录输出原始绝对路径字节及末尾换行，`--json` 拒绝；`status` 对 Ready 按需调用 GitInspector，真实 clean/dirty/unknown、无仓库及嵌套仓库的结果与用户手册一致，非 Ready 只诊断不冒报可用；查询不改产品状态或 Git 元数据。公开 CLI 的成功、缺失/未就绪、参数错误、JSON 与退出码均用真实临时 APFS 夹具验证。当前空间用量测量属于 P1-13，本任务不得把创建时 Receipt 的字节数冒充当前用量；P1-13 完成前如需呈现该字段，只能明确为 unknown。范围外是删除/强制日志、GC、自动提交/分支/PR 和语言工具链包装。
+
+P1-10 候选自测（2026-09-26 UTC，macOS/APFS）：先使公开 `list/path/status` 真实 E2E 因 E_USAGE 失败，再实现；真实临时目录覆盖空列表、名称排序、普通路径、无仓库、主/嵌套仓库 clean/dirty/unknown、未跟踪不计数、缺失/非 Ready、Ready 根目录替换拒绝及 SQLite 最终回执数据损坏拒绝。`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data THINWS_P0_CROSS_VOLUME_ROOT=/Volumes/data cargo test --workspace --all-targets`、`RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`、crate 依赖检查及 tools 31 项单测均退出 0；普通测试按设计不运行 P0 两条 ignored 异卷实验，另以 `THINWS_P0_CROSS_VOLUME_ROOT=/private/tmp` 分别显式运行 materialize/probe 的真实异卷专项，均通过。`cargo deny check` 退出 0（只有既有未命中配置提示），`cargo audit --no-fetch --stale` 扫描 92 个依赖退出 0；在线 advisory fetch 未完成，不宣称最新库已更新。四组受影响函数/模块定向变异共 43 个独特变异，补回归后 25 caught、18 unviable、0 missed，原始结果及精确复测见 `target/mutants-p1-10-{query-final,cli,cli-fix,snapshot,sqlite,sqlite-fix}/mutants.out`；不把该任务级定向结果冒称 P1.d 小阶段的全受影响 crate 变异门禁。现有 fuzz harness 针对名称解析/Git 状态解析等未改变的输入解析器，本任务只增加查询编排和输出映射，没有受影响 fuzz target，故未运行 fuzz；P1.d 小阶段门禁、线上 CI/PR/push 均未执行。Ready `path/status` 只读产品状态但 lifecycle lock PID/WAL 协调文件可能变化；含换行路径的原始 stdout 不按物理行数保证。
 
 P1-16 于 2026-09-26 UTC 由主 Agent 领取，基线 `c4a9fbc432012ff3e12d59c207bad06fea0ba94a`；在唯一 checkout `/Volumes/data/code/worktree` 的本地任务分支 `codex/p1-16-git-inspector` 实施，完成后快进合并 `main` 并删除已合并分支。基线 `cargo fmt --all -- --check`、`cargo test --workspace --all-targets` 及受影响产品 crate 的真实 APFS 全目标测试通过。风险 R3（Git 子进程、配置与外部引用），主要写入区为 Core 的纯状态解析、P1-16 才引入的 GitInspector Port、新 `thinws-adapter-git-cli` 及其测试；不派生开发 Agent，最终只读独立审核指定 GPT-6 Astra / `xhigh`。输入为已验证副本的普通目录路径，输出为发现完整性、根与嵌套仓库的相对位置、逐仓库已跟踪变更计数/unknown 原因及 aggregate；不持久化、不更改 Workspace Ready，也不参与创建。P0-07 的已验证解析、子进程和仓库预检代码可作为迁移输入，但生产实现不得依赖 `experiments/p0/`，不得同时保留两套长期分叉的同义实现。范围外是 P1-10 的 status/list/path 公开命令、P1-12 清理策略与日志、自动 commit/branch/PR、Git 修复、联网和任意命令执行包装。
 

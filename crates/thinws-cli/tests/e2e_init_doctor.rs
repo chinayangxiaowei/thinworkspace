@@ -91,7 +91,7 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
     let doctor: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(doctor["data"]["status"], "ready");
     assert_eq!(doctor["data"]["incomplete_workspaces"], 0);
-    assert_eq!(doctor["data"]["git_check"]["available"], false);
+    assert_eq!(doctor["data"]["git_check"]["available"], true);
 
     for directory in ["metadata", "logs", "workspaces", "staging", "trash"] {
         assert_eq!(

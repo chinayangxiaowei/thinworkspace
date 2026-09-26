@@ -15,6 +15,7 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-application": frozenset({"thinws-core", "thinws-ports"}),
     "thinws-cli": frozenset(
         {
+            "thinws-adapter-git-cli",
             "thinws-adapter-macos",
             "thinws-application",
             "thinws-metadata-sqlite",

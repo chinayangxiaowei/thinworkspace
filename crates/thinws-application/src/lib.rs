@@ -4,9 +4,15 @@
 //! Phase 1 use-case orchestration without platform or persistence details.
 
 mod create;
+mod query;
 
 pub use create::{CreateOutcome, CreatePreview, CreateRequest};
-pub use thinws_core::{CowEvidence, FallbackReason, MaterializationMode, MaterializerKind};
+pub use query::{WorkspaceQuery, WorkspaceStatus};
+pub use thinws_core::{
+    CowEvidence, DiscoveryCompleteness, FallbackReason, GitState, MaterializationMode,
+    MaterializerKind, RepositoryState,
+};
+pub use thinws_ports::{GitInspectionIssue, GitQueryFailureKind};
 
 use std::error::Error;
 use std::fmt;
@@ -19,7 +25,7 @@ use thinws_core::{
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard,
-    MaterializationPathRole, MetadataStoreFactory, PortError, PortErrorKind,
+    MaterializationPathRole, MetadataSnapshot, MetadataStoreFactory, PortError, PortErrorKind,
     PreparedDataRootEvidence,
 };
 
@@ -291,10 +297,10 @@ where
                     "changing the initialized data root is unsupported",
                 ));
             }
-            let (installation, _) = self.inspect_existing(&identity, request.now())?;
+            let snapshot = self.inspect_existing(&identity, request.now())?;
             return Ok(InitOutcome {
                 result: InitResult::AlreadyInitialized,
-                installation,
+                installation: snapshot.installation().clone(),
             });
         }
 
@@ -344,6 +350,19 @@ where
 
     /// Inspects the existing installation without mutating product state.
     pub fn doctor(&self) -> Result<DoctorOutcome, UseCaseError> {
+        let snapshot = self.inspect_current()?;
+        let incomplete_workspaces = snapshot
+            .workspaces()
+            .iter()
+            .filter(|workspace| _workspace_state_is_incomplete(workspace.state()))
+            .count();
+        Ok(DoctorOutcome {
+            installation: snapshot.installation().clone(),
+            incomplete_workspaces,
+        })
+    }
+
+    fn inspect_current(&self) -> Result<MetadataSnapshot, UseCaseError> {
         let identity = self
             .bootstrap
             .read_config()
@@ -355,18 +374,14 @@ where
                 )
             })?;
         let epoch = UnixMillis::new(0).expect("zero is a valid Unix millisecond timestamp");
-        let (installation, incomplete_workspaces) = self.inspect_existing(&identity, epoch)?;
-        Ok(DoctorOutcome {
-            installation,
-            incomplete_workspaces,
-        })
+        self.inspect_existing(&identity, epoch)
     }
 
     fn inspect_existing(
         &self,
         identity: &InstallationIdentity,
         placeholder_time: UnixMillis,
-    ) -> Result<(InstallationRecord, usize), UseCaseError> {
+    ) -> Result<MetadataSnapshot, UseCaseError> {
         let layout = self
             .bootstrap
             .validate_layout(identity)
@@ -381,12 +396,7 @@ where
             .revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
         self.require_ready_marker(identity)?;
-        let incomplete = snapshot
-            .workspaces()
-            .iter()
-            .filter(|workspace| _workspace_state_is_incomplete(workspace.state()))
-            .count();
-        Ok((snapshot.installation().clone(), incomplete))
+        Ok(snapshot)
     }
 
     fn require_ready_marker(&self, identity: &InstallationIdentity) -> Result<(), UseCaseError> {

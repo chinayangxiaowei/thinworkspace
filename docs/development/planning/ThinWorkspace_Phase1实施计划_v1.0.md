@@ -403,6 +403,8 @@ P1-12 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main`
 
 P1-12 首轮安全设计审核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `94afe48050fc803011be8c603a69c3fcd05b3ba6` 给出 Changes requested。归属文件置于待删容器内会在删标记后中断时丢失重试证据，历史 `st_dev` 不能跨重挂载等值，预留记录却无标记且目录已不存在时必须能仅收口数据库。主 Agent 已将证据移到 `metadata/` 并在 tombstone 后保留，只持久化卷 UUID、inode 和 birthtime 上界；明确“容器不存在且显式 force”不执行路径删除，只释放记录。另经真实 APFS 测试证实把目录 mtime 调到 2000 年会把 birthtime 调早，故持久出生时间只作为上界，不能相等比较。生产 Adapter 已先补持久文件创建与 Ready 历史归属核验，并有普通目录替换先 RED 后 GREEN、缺失/损坏证明、容器替换和旧 mtime 回归；全 workspace/all-targets 普通测试及 Clippy 通过。此时删除、日志、ProcessProbe、CLI 与任务级定向变异/fuzz 均未实现或未执行，P1-12 保持 In Progress；设计修订及代码须在冻结候选后重新独立审核，不沿用对旧提交的结论。
 
+P1-12 归属实现审核纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `4e827068e74e1c33209ddaae132d0bc76cf7cc4d` 给出 Changes requested：受控目录原先在公开目标名称上 `mkdirat`，再首次 `openat` 认领身份，竞争替换可被错误登记。主 Agent 改为在受控私有父目录下先建立临时目录并打开固定身份，再以 no-replace 发布到目标名称；发布前后重验目录项。真实 APFS 注入竞争目标测试确认目标在发布前不存在、竞争目标阻止发布、外来内容不变且可证明归属的临时目录被清理。普通全 workspace/all-targets 测试、fmt 和 Clippy 已通过；本修订仍待精确候选的独立复核，P1-12 继续 In Progress。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

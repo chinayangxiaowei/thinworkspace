@@ -254,10 +254,72 @@ pub(crate) fn create_private_child_directory(
     parent: &ValidatedDirectory,
     name: &OsStr,
 ) -> Result<ValidatedDirectory, PortError> {
-    rustix::fs::mkdirat(&parent.fd, name, Mode::from_bits_retain(0o700))
-        .map_err(|error| io_error("create controlled directory", error))?;
+    create_private_child_directory_with_hook(parent, name, || {})
+}
+
+fn create_private_child_directory_with_hook(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+    after_staged_open: impl FnOnce(),
+) -> Result<ValidatedDirectory, PortError> {
+    let mut staged = None;
+    for _ in 0..32 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_name =
+            OsString::from(format!(".thinws-dir.tmp-{}-{sequence}", std::process::id()));
+        match rustix::fs::mkdirat(&parent.fd, &temporary_name, Mode::from_bits_retain(0o700)) {
+            Ok(()) => {
+                staged = Some((
+                    temporary_name.clone(),
+                    open_private_child_directory(parent, &temporary_name)?,
+                ));
+                break;
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(io_error("stage controlled directory", error)),
+        }
+    }
+    let (temporary_name, mut directory) = staged
+        .ok_or_else(|| PortError::new(PortErrorKind::Io, "allocate staged controlled directory"))?;
+    after_staged_open();
+    if let Err(error) = revalidate_attached_directory(parent, &directory, &temporary_name) {
+        cleanup_empty_staged_directory(parent, &directory, &temporary_name);
+        return Err(error);
+    }
+    match rustix::fs::renameat_with(
+        &parent.fd,
+        &temporary_name,
+        &parent.fd,
+        name,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => {}
+        Err(error) => {
+            cleanup_empty_staged_directory(parent, &directory, &temporary_name);
+            return Err(if error == rustix::io::Errno::EXIST {
+                PortError::new(PortErrorKind::NotEmpty, "publish controlled directory")
+            } else {
+                io_error("publish controlled directory", error)
+            });
+        }
+    }
+    directory.path = parent.path.join(name);
     sync_directory(&parent.fd)?;
-    open_private_child_directory(parent, name)
+    revalidate_attached_directory(parent, &directory, name)?;
+    Ok(directory)
+}
+
+fn cleanup_empty_staged_directory(
+    parent: &ValidatedDirectory,
+    staged: &ValidatedDirectory,
+    name: &OsStr,
+) {
+    if revalidate_attached_directory(parent, staged, name).is_ok()
+        && require_empty_directory(staged).is_ok()
+        && rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR).is_ok()
+    {
+        let _ = sync_directory(&parent.fd);
+    }
 }
 
 pub(crate) fn open_private_child_directory(
@@ -699,6 +761,32 @@ mod tests {
         drop(temporary);
 
         assert!(!temporary_path.exists());
+    }
+
+    #[test]
+    fn controlled_directory_publish_never_adopts_a_competing_public_entry() {
+        let (_temp, parent_path, parent) = controlled_directory("staged-directory-");
+        let public_path = parent_path.join("workspace");
+
+        let error =
+            create_private_child_directory_with_hook(&parent, OsStr::new("workspace"), || {
+                assert!(!public_path.exists());
+                fs::create_dir(&public_path).unwrap();
+                fs::set_permissions(&public_path, fs::Permissions::from_mode(0o700)).unwrap();
+                fs::write(public_path.join("keep"), b"unrelated").unwrap();
+            })
+            .err()
+            .expect("a competing public entry must block publication");
+
+        assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+        assert_eq!(fs::read(public_path.join("keep")).unwrap(), b"unrelated");
+        assert!(fs::read_dir(&parent_path).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".thinws-dir.tmp-")
+        }));
     }
 
     #[test]

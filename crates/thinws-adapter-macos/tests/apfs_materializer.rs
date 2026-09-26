@@ -373,3 +373,70 @@ fn unsupported_source_entry_is_rejected_before_the_first_target_write() {
     assert!(failure.receipt().created().is_empty());
     assert!(fs::read_dir(&target).unwrap().next().is_none());
 }
+
+#[test]
+#[ignore = "requires THINWS_P1_SUBMOUNT_SOURCE with a dedicated mounted APFS child"]
+fn real_source_submount_is_rejected_before_the_first_target_write() {
+    let source = PathBuf::from(
+        std::env::var_os("THINWS_P1_SUBMOUNT_SOURCE")
+            .expect("THINWS_P1_SUBMOUNT_SOURCE must name the borrowed source"),
+    );
+    assert!(source.is_absolute());
+    let mounted = source.join("mounted");
+    let source_before = fs::symlink_metadata(&source).unwrap();
+    let mounted_before = fs::symlink_metadata(&mounted).unwrap();
+    assert!(source_before.is_dir());
+    assert!(mounted_before.is_dir());
+    assert_ne!(source_before.dev(), mounted_before.dev());
+    let mut entries = fs::read_dir(&source).unwrap();
+    assert_eq!(
+        entries.next().unwrap().unwrap().file_name(),
+        OsStr::new("mounted")
+    );
+    assert!(entries.next().is_none());
+
+    let temp = Builder::new()
+        .prefix("tw-p1-submount-")
+        .tempdir_in(source.parent().unwrap())
+        .unwrap();
+    let target = temp.path().join("target");
+    let staging = temp.path().join("staging");
+    let trash = temp.path().join("trash");
+    for directory in [&target, &staging, &trash] {
+        fs::create_dir(directory).unwrap();
+    }
+    assert_eq!(
+        source_before.dev(),
+        fs::symlink_metadata(&target).unwrap().dev()
+    );
+
+    let host = adapter();
+    let (request, plan) = request_and_plan(&host, &source, &target, &staging, &trash);
+    let failure = ApfsCloneMaterializer::new(host)
+        .materialize(&request, &plan)
+        .unwrap_err();
+
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::UnsupportedSourceEntry)
+    );
+    assert!(failure.receipt().created().is_empty());
+    assert!(fs::read_dir(&target).unwrap().next().is_none());
+    assert!(fs::read_dir(&staging).unwrap().next().is_none());
+    assert_eq!(
+        fs::symlink_metadata(&source).unwrap().ino(),
+        source_before.ino()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&source).unwrap().dev(),
+        source_before.dev()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&mounted).unwrap().ino(),
+        mounted_before.ino()
+    );
+    assert_eq!(
+        fs::symlink_metadata(&mounted).unwrap().dev(),
+        mounted_before.dev()
+    );
+}

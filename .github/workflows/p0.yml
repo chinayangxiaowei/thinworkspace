@@ -37,6 +37,7 @@ jobs:
         run: |
           test -d "$RUNNER_TEMP"
           printf 'THINWS_P0_SUBMOUNT_SOURCE=%s/thinws-p0-submount-source\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'THINWS_P1_SUBMOUNT_SOURCE=%s/thinws-p0-submount-source\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P0_CROSS_VOLUME_ROOT=%s/thinws-p0-submount-source/mounted\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P0_IMAGE=%s/thinws-p0-cross-volume.dmg\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain

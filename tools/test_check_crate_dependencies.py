@@ -22,7 +22,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "thinws-metadata-sqlite",
             },
             "thinws-adapter-git-cli": {"rustix", "thinws-core", "thinws-ports"},
-            "thinws-adapter-macos": {"blake3", "libc", "rustix", "serde", "toml", "thinws-core", "thinws-ports"},
+            "thinws-adapter-macos": {"blake3", "libc", "rustix", "serde", "serde_json", "toml", "thinws-core", "thinws-ports"},
             "thinws-metadata-sqlite": {"rusqlite", "serde_json", "thinws-core", "thinws-ports"},
         }
 
@@ -69,6 +69,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                         "thinws-ports",
                         "rustix",
                         "serde",
+                        "serde_json",
                         "toml",
                     }
                 }

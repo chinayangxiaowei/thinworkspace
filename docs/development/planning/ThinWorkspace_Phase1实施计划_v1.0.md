@@ -526,7 +526,7 @@ P1-12 任务级审核与 Verification（2026-09-26 UTC，macOS/APFS）：GPT-6 A
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | Done |
-| P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | Backlog |
+| P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | In Progress |
 
 小阶段退出：全部公开契约与发布二进制一致，未执行门禁和剩余风险已列出，进入人工阶段放行。
 
@@ -537,6 +537,10 @@ P1-14 候选自测（2026-09-26，macOS/APFS）：`remove --help` 缺少手册�
 P1-14 首轮独立审核纠偏（2026-09-26）：GPT-6 Astra / `xhigh` 对精确提交 `e82a83c02791ab2019ee7ab1da439de4687618b4` 给出 Changes requested，两项 P2 均为测试假阳性风险：旧 `--repo` 拒绝用例同时缺少必填 `--source`；成功 JSON fixture 只核对顶层字段，无法发现 `materialization`、`fallback`、`doctor.host`、list 条目或 Git 仓库摘要的嵌套漂移。主 Agent 已给 `--repo` 用例补齐其他合法创建参数，并对嵌套结构同时断言完整字段和值；修正后 Debug/Release 契约各 15 项、fmt、Clippy 与带真实 P1 异卷参数的全 workspace/all-targets 普通测试均退出 0。审核者对旧提交的 Changes requested 不用于放行；修正候选须重新绑定精确 commit 只读复核，未改变生产代码、依赖或工具配置。
 
 P1-14 任务级收口（2026-09-26）：GPT-6 Astra / `xhigh` 对精确修订提交 `e2fb8e7e20d552b9d4a3cbd9dde7cd632d7b91b4` 只读复核为 Approve，两项 P2 均已关闭；独立运行 CLI 契约 15 项及差异检查通过，未重复全仓或长门禁。主 Agent 随后在同一干净提交上以 `THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --release -p thinws-cli --tests` 进行 Verification：CLI 契约 15、真实创建 3、初始化/doctor 6、查询 13、删除 4 项全部退出 0，含旧命令 E_USAGE、原始路径与真实 APFS/Git 场景。P1-14 当前验收断言已满足，任务 Done；既有依赖白名单错误留给 P1-15 阶段收口前修正，不把本次额外失败检查写成通过，也不宣称 P1.f/Phase 1 已放行。线上 CI/PR/push、完整小阶段变异及阶段长预算 fuzz 未执行。
+
+P1-15 领取（2026-09-26，macOS/APFS）：主 Agent 在干净的本地 `main`（基线 `5265cc4db39e6ecc153daf88f6166b5c50456f65`）实施发布前验收，不派生开发 Agent、不创建线上 PR；独立审核使用 GPT-6 Astra / `xhigh` 只读复核冻结候选。风险 R4（阶段级真实删除/路径边界及高成本门禁）；先修复已证实的依赖检查白名单滞后，再逐项核对架构控制点、P1 小阶段退出条件、release E2E、失败注入、真实 APFS/Git、供应链、变异和 fuzz 证据。不得把任务 Done、普通测试通过或 P0 结果当成 P1 人工放行；无法执行的专用环境与长预算门禁必须列为缺口，而不能降低门槛。完成发布候选证据后才请求维护者放行，不自行打 tag、push 或宣布发布。
+
+P1-15 依赖门禁修复切片（2026-09-26）：既有 macOS Adapter 在清理 JSONL 中使用生产 `serde_json`，但 crate 依赖检查脚本白名单仍拒绝该边，导致先前 P1-14 的额外检查退出 1；技术栈早已允许该日志用途。先把该依赖加入工具的合格图与平台边单测，两项均按预期 RED；仅扩充该 Adapter 的精确外部白名单后 GREEN，未放宽 Core/其他 crate 边界。`python3 -B -m unittest` 的 31 项 CI 辅助测试、`python3 tools/check_crate_dependencies.py`（7 个产品 crate）、fmt、全目标全 feature Clippy 和带真实 P1 异卷参数的全 workspace/all-targets 普通测试均退出 0。此切片仅修复既有门禁规则，不等于完成 P1-15 阶段验收；生产 Rust、依赖清单和公开契约未变，变异/fuzz 不适用，线上 CI 未执行。
 
 ---
 

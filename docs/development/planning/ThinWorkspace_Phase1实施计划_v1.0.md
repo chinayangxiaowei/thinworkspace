@@ -362,7 +362,7 @@ P1-09 跨卷环境补验（2026-09-26 UTC）：经用户确认 `/Volumes/data` �
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-10 status/list/path | 状态边界、只读检查和普通路径输出；diff 由用户直接使用 Git | P1-09、P1-16 | R3 | In Review |
+| P1-10 status/list/path | 状态边界、只读检查和普通路径输出；diff 由用户直接使用 Git | P1-09、P1-16 | R3 | Done |
 | P1-16 GitInspector | 主/子仓库已跟踪变更、无仓库/不完整检查报告，不写 Git | P1-03、P0-07 | R3 | Done |
 | P1-11 用户命令执行包装（已取消） | 不再实施；已有外部占用检查责任归入 P1-12，无替代执行服务 | 不再参与依赖 | —（历史任务） | Cancelled |
 
@@ -375,6 +375,8 @@ P1-10 初次候选 `39512f8` 自测（2026-09-26 UTC，macOS/APFS）：公开 `l
 P1-10 审核修订候选（2026-09-26 UTC）：保留 `lifecycle.lock` 供创建/清理/GC，`path/status` 改为不取锁的只读双快照＋受控目录重验，ADR-0004、详细设计与手册已同步；非 Ready 不受锁文件异常阻塞，Ready 在核验期间转 Error 不输出可用路径。新增真实 APFS 的 data root 消失与 metadata 目录缺失回归，先分别得到错误的 31/31，修订后为手册规定的 32/33；锁文件符号链接时 Ready/非 Ready 查询仍可读。`cargo fmt --all -- --check`、全目标 Clippy、以 `/Volumes/data` 为 P1 异卷端的全 workspace/all-targets 测试退出 0；真实 P0 异卷端仍是 `/private/tmp`。修订查询的 22 个定向变异为 10 caught＋12 unviable，Ready 核验方法 2 个为 1 caught＋1 unviable，均无 missed，证据在 `target/mutants-p1-10-{query-nolock,ready-validator-nolock}/mutants.out`；未改变的 CLI 渲染、SQLite/Port 回执读取沿用初次候选的定向结果，不冒称整个 P1.d 门禁。并发用户工具仍可在查询返回后改变目录；平台不维护跨进程历史 root inode，本任务只保证查询过程中可检测的归属与状态变化被拒绝。
 
 P1-10 第二轮审核纠偏：GPT-6 Astra / `xhigh` 对 `276360c` 提出 Changes requested（P2）：status 在 Git 检查开始前已完成两次快照，Git 检查期间若 Ready 转 Error 仍会输出旧路径。新增可控 GitInspector 回归先确证 `left: Ready, right: Error` 的行为 RED；修订后 Git 检查结束再执行只读状态与归属核验，转为非 Ready 时只返回非 Ready 诊断。第一次定向变异揭示 `current != workspace || current_path != path` 中后半条件在既有“路径必须等于同一记录 target”不变量下冗余，`||→&&` 存活；删除冗余判断而非增加不可达测试，精确定向复测 2 个变异为 1 caught＋1 unviable、0 missed，见 `target/mutants-p1-10-status-post-git-final/mutants.out`。该次审核此前指出的 ADR、错误分类和非 Ready 锁阻塞问题已关闭；历史普通 root inode 替换属当前已声明边界，P1-12 破坏性清理另行核对。
+
+P1-10 任务级完成（2026-09-26 UTC）：最终实现提交 `0f341ebba5abf8040f0d6ae076d5762672a8840b` 经 GPT-6 Astra / `xhigh` 只读独立复核，结论 Approve，未发现新可操作问题；审核者独立重跑 Application 8、CLI 契约 9、真实查询 E2E 10 项均通过，核对最后一批 1 caught＋1 unviable、0 missed/timeout，工作树干净。主 Agent 对同一修订候选的 fmt、全目标 Clippy、`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data THINWS_P0_CROSS_VOLUME_ROOT=/private/tmp cargo test --workspace --all-targets -q` 均取得退出 0。该结论只支持 P1-10 Done；P1.d 全受影响 crate 变异、统一短预算 fuzz、阶段放行、线上 CI/PR/push 均未执行，不据此宣称 P1.d 或 Phase 1 放行。普通 root 历史 inode 替换不在本任务获得持久证明，P1-12 删除前必须单独核对安全边界。
 
 P1-16 于 2026-09-26 UTC 由主 Agent 领取，基线 `c4a9fbc432012ff3e12d59c207bad06fea0ba94a`；在唯一 checkout `/Volumes/data/code/worktree` 的本地任务分支 `codex/p1-16-git-inspector` 实施，完成后快进合并 `main` 并删除已合并分支。基线 `cargo fmt --all -- --check`、`cargo test --workspace --all-targets` 及受影响产品 crate 的真实 APFS 全目标测试通过。风险 R3（Git 子进程、配置与外部引用），主要写入区为 Core 的纯状态解析、P1-16 才引入的 GitInspector Port、新 `thinws-adapter-git-cli` 及其测试；不派生开发 Agent，最终只读独立审核指定 GPT-6 Astra / `xhigh`。输入为已验证副本的普通目录路径，输出为发现完整性、根与嵌套仓库的相对位置、逐仓库已跟踪变更计数/unknown 原因及 aggregate；不持久化、不更改 Workspace Ready，也不参与创建。P0-07 的已验证解析、子进程和仓库预检代码可作为迁移输入，但生产实现不得依赖 `experiments/p0/`，不得同时保留两套长期分叉的同义实现。范围外是 P1-10 的 status/list/path 公开命令、P1-12 清理策略与日志、自动 commit/branch/PR、Git 修复、联网和任意命令执行包装。
 

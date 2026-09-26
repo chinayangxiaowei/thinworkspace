@@ -394,7 +394,7 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Progress |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Review |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
@@ -436,6 +436,20 @@ P1-12 底层删除定向复测启动记录（2026-09-26 18:49 UTC）：上述生
 P1-12 底层修订独立复核：GPT-6 Astra / `xhigh` 对精确提交 `ff563873024fdcafd4fda2cb16b38c9b56fca8c5` 只读审核为 Approve，未发现 P0/P1/P2。审核者真实复验隔离后失去归属证明会停止删除并留下 Error/Started→Failed，修复证明后普通重试仍拒绝、新显式 force 可清理；外来同名对象保留。512/513 层在真实 Application 主线程分别成功/返回布局错误且保留隔离残留，类型替换为外部符号链接不越界；49 项定向测试含单独启用的真实异卷用例通过。审核者核对本批 28 caught、8 unviable、0 missed/timeout 的结果和哈希，但未重跑变异或全量门禁。当前结论仅关闭底层修订，不等于 P1-12 整体完成；Application/CLI 定向变异、适用 fuzz 与任务级收口仍待完成。
 
 P1-12 remove 参数 fuzz（2026-09-26 UTC）：新增纯内存 `thinws_remove_request` harness，对原始 UTF-8 输入及文本种子的无末尾换行版本核对普通名称、完整 ID、`name:`/`id:` 显式目标的接受性，并覆盖 force 标志与负时间错误码；输入不进入文件系统或删除 API。固定 `nightly-2026-08-14`、`cargo-fuzz` 0.12.0 在 macOS arm64 构建通过，以四个仓库种子、独立 `target/p1-12-remove-fuzz-corpus.9xkTQ2` 输出目录运行 `-max_total_time=30 -timeout=5`，31 秒完成 4,573,845 次，exit 0，无 crash/hang；生成语料保留在 target 而不批量提交。fuzz lockfile 仅补齐 Application 既有传递依赖 `serde_json`，没有新增直接依赖；fuzz manifest 的 `cargo deny check` 和本地 advisory 库的离线 `cargo audit` 均退出 0，deny 只有既有未命中例外/allowance 提示。单文件 rustfmt 检查通过；独立 fuzz workspace 的全量 fmt 检查发现两个未修改旧 harness 的既有格式差异，本任务未改动它们。该 smoke 仅验证公开 remove 参数解析，不代替 Git、路径和状态的其它既有 fuzz 目标，也不代表阶段长预算。
+
+P1-12 Application 删除编排定向变异启动记录（2026-09-26 19:06 UTC）：主 Agent 以本地精确提交 `a5171b1` 为候选，在 macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip 下选择 `crates/thinws-application/src/remove.rs` 的全部 35 个变异；验证包为 `thinws-application`，输出 `target/p1-12-app-remove-mutants/mutants.out`。上批 Adapter 36 项约 1 分 51 秒，但本批 Application 集成测试与编译不同，首次主动查看保守估计 19:11 UTC；此前不轮询、不修改冻结候选。CLI 错误渲染的独立 4 个变异随后按差异范围单独验证，不在本批冒称覆盖。
+
+Application 首次变异结果与局部补测：实际 19:06:07–19:08:47 UTC，约 2 分 40 秒，按预计于 19:11 UTC 一次查看；35 个为 14 caught、8 unviable、13 missed、0 timeout，退出 2，`outcomes.json` SHA-256 `89f4da602112373718cd30cf548c748c0261c38e250545c18412e4fd299b45df`。存活项涉及公开 result/forced/warning、tombstone 返回、Git 检查完整性日志、force 不运行 Git 以及拒绝消息/修复建议。主 Agent 在既有 Application remove 测试补精确结果、force 免 Git 的失败型测试双桩、完整发现但仓库 unknown 的日志反例及进程扫描不完整告警；本地定向 13 项通过。尚须复测 13 个存活项；原先 14 caught、8 unviable 的位置未改生产代码，按《任务流程》§18.1 核对后保留原证据，不重跑整个 35 项。
+
+Application 存活项复测启动记录（2026-09-26 19:14 UTC）：本次生产 `remove.rs` 未改，只改对应 Application 测试，精确筛选上次存活行及同一行的 3 个已捕获对照，共 16 个变异；主 Agent、macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip，输出 `target/p1-12-app-remove-mutants-fix/mutants.out`。上批 35 项约 2 分 40 秒，本批首次主动查看预估 19:17 UTC；此前不轮询、不修改冻结候选。
+
+Application 存活项复测结果：实际 19:13:47–19:15:22 UTC，约 1 分 35 秒，按预计 19:17 UTC 一次读取；16 个为 15 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `f8923f06fe2782166d8d8e4a636b3bb1973ae6ea33bf79c1dfa2391f53b0bbcc`、`47b613c16c339d6f3bfdd12fd082dc2cc29042227e93c9754ac94090371b54fb`。与首次 35 项结果按相同生产文件/变异位置合并，全部原存活项已有捕获证据；未重跑无关 19 项，不把两批计数简单相加为独立变异数。仍需 CLI 渲染定向验证与任务级审核。
+
+P1-12 CLI 错误渲染定向变异启动记录（2026-09-26 19:18 UTC）：主 Agent 在本地 `main`、macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip，选择 `thinws-cli/src/lib.rs` 的 `render_error` 与 `use_case_error_view` 共 4 个变异，验证包 `thinws-cli`，输出 `target/p1-12-cli-remove-mutants/mutants.out`。该范围仅衡量已有 CLI 错误输出入口，不声称自动生成新增 JSON 数组字段的变异；真实 E2E 及独立审核另覆盖该字段。根据前两批约 2–3 分钟且本批仅 4 项，首次主动查看预估 19:20 UTC；此前不轮询、不修改候选。
+
+CLI 定向变异结果：实际 19:17:44–19:18:09 UTC，按预计 19:20 UTC 一次读取；4 个为 3 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `ca403f54e4159af4a5205cb5a240e4a236efea93e89b212b79dea6a0da060476`、`abc52000a3b7229f51618dc9c09a91969669c5dd9296db25f13166285c6850a3`。该证据仅覆盖选定函数变异，JSON 拒绝上下文的字段形态由真实 CLI E2E 和契约检查验证。任务级复核与通用门禁仍待完成。
+
+P1-12 任务级候选自测（2026-09-26 UTC，macOS/APFS）：Application remove 13 项、CLI remove 真实 E2E 4 项及同 4 项 release 配置均通过；公开手册的拒绝 JSON 示例修正为现行消息、修复建议、`issues` 与无损仓库相对路径字段，并在真实 CLI E2E 精确断言，JSON 示例用 `jq` 解析通过。`cargo fmt --all -- --check`、全目标全 feature Clippy、带 `/Volumes/data` P1 异卷端的全 workspace/all-targets 普通测试及 `git diff --check` 均退出 0。相关底层、Application、CLI 定向变异与 remove 参数 30 秒 fuzz 结果见本节上方；未执行 P1.e 小阶段全受影响 crate 变异、阶段长预算 fuzz、专用 submount 和线上 CI/PR/push，这些不冒称任务级通过证据。任务风险仍为 R4，需对精确本地 commit 完成独立审核；审核通过后再进入 Verification/Done，不以本段自行放行。
 
 ### 4.6 P1.f 契约与发布
 

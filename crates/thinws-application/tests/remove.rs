@@ -10,8 +10,8 @@ use thinws_application::{
     CreateRequest, InitRequest, RemoveRequest, RemoveResult, ThinWorkspaceService,
 };
 use thinws_core::{
-    AbsolutePath, DiscoveryCompleteness, ErrorCode, ProcessUse, UnixMillis, WorkspaceId,
-    WorkspaceName, WorkspaceState,
+    AbsolutePath, DiscoveryCompleteness, ErrorCode, ProcessUse, RemovalWarning, RepositoryState,
+    UnixMillis, WorkspaceId, WorkspaceName, WorkspaceState,
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 use thinws_ports::{
@@ -112,7 +112,10 @@ fn p1_12_normal_remove_deletes_only_registered_copy_and_records_durable_events()
         )
         .unwrap();
     assert_eq!(outcome.result(), RemoveResult::Removed);
+    assert_eq!(outcome.result().as_str(), "removed");
     assert_eq!(outcome.workspace_id(), workspace_id);
+    assert!(!outcome.forced());
+    assert_eq!(outcome.warning(), None);
     assert!(!target.exists());
     assert_eq!(
         fs::read(temp.path().join("source/note.txt")).unwrap(),
@@ -121,6 +124,8 @@ fn p1_12_normal_remove_deletes_only_registered_copy_and_records_durable_events()
     let events = log_events(&temp);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["event"], "started");
+    assert_eq!(events[0]["git_state"], "not-applicable");
+    assert_eq!(events[0]["git_check_complete"], true);
     assert_eq!(events[1]["event"], "completed");
 }
 
@@ -146,13 +151,25 @@ fn p1_12_tracked_dirty_refuses_ordinary_remove_but_explicit_force_succeeds() {
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::WorkspaceDirty);
+    assert_eq!(
+        error.diagnostic().message(),
+        "Workspace has tracked changes"
+    );
+    assert_eq!(
+        error.diagnostic().remediation(),
+        Some(
+            "Preserve and commit required work, or use workspace remove <name-or-id> --force to discard the copy."
+        )
+    );
     assert!(target(&temp, id).join("root/note.txt").is_file());
-    assert_eq!(log_events(&temp)[0]["event"], "refused");
+    let refused = log_events(&temp);
+    assert_eq!(refused[0]["event"], "refused");
+    assert_eq!(refused[0]["git_check_complete"], true);
 
     let outcome = service
         .remove(
             RemoveRequest::try_from_raw("remove-case", true, 1_700_000_000_002).unwrap(),
-            &dirty,
+            &NeverInspectGit,
             &NoExternalUse,
         )
         .unwrap();
@@ -202,6 +219,14 @@ struct FixedGit(GitInspection);
 impl GitInspector for FixedGit {
     fn inspect(&self, _copy_root: &AbsolutePath) -> GitInspection {
         self.0.clone()
+    }
+}
+
+struct NeverInspectGit;
+
+impl GitInspector for NeverInspectGit {
+    fn inspect(&self, _copy_root: &AbsolutePath) -> GitInspection {
+        panic!("force must not run Git inspection")
     }
 }
 
@@ -256,10 +281,60 @@ fn p1_12_repeated_exact_id_returns_tombstone_without_reselecting_a_name() {
         .unwrap();
     assert_eq!(repeated.workspace_id(), id);
     assert_eq!(repeated.result(), RemoveResult::AlreadyRemoved);
+    assert_eq!(repeated.result().as_str(), "already-removed");
+    assert!(!repeated.forced());
     assert!(!target(&temp, id).exists());
     let events = log_events(&temp);
     assert_eq!(events.len(), 4);
     assert_eq!(events[3]["result"], "already-absent");
+}
+
+#[test]
+fn p1_12_complete_discovery_with_unknown_repository_is_not_logged_as_a_complete_check() {
+    let (temp, service, id) = ready_fixture();
+    let unknown = FixedGit(GitInspection::new(
+        DiscoveryCompleteness::Complete,
+        vec![thinws_ports::RepositoryInspection::new(
+            PathBuf::new(),
+            RepositoryState::Unknown,
+            Vec::new(),
+        )],
+        Vec::new(),
+    ));
+    let error = service
+        .remove(
+            RemoveRequest::try_from_raw("remove-case", false, 1_700_000_000_001).unwrap(),
+            &unknown,
+            &NoExternalUse,
+        )
+        .unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::GitCheckIncomplete);
+    assert_eq!(
+        error.diagnostic().message(),
+        "tracked-change check is incomplete"
+    );
+    assert_eq!(log_events(&temp)[0]["git_check_complete"], false);
+    assert!(target(&temp, id).join("root/note.txt").is_file());
+}
+
+#[test]
+fn p1_12_incomplete_process_scan_warns_without_claiming_no_evidence() {
+    let (temp, service, id) = ready_fixture();
+    let outcome = service
+        .remove(
+            RemoveRequest::try_from_raw("remove-case", false, 1_700_000_000_001).unwrap(),
+            &NoRepositories,
+            &FixedProcess(ProcessUse::ScanIncomplete),
+        )
+        .unwrap();
+    assert_eq!(outcome.workspace_id(), id);
+    assert_eq!(
+        outcome.warning(),
+        Some(RemovalWarning::ProcessScanIncomplete)
+    );
+    let events = log_events(&temp);
+    assert_eq!(events[0]["process_use"], "scan-incomplete");
+    assert_eq!(events[1]["process_use"], "scan-incomplete");
 }
 
 #[test]

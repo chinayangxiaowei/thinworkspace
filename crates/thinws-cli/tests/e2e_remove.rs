@@ -181,14 +181,28 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
     fs::write(dirty_copy.join("tracked.txt"), b"changed").unwrap();
     let (code, refused) = remove("tracked-dirty", false);
     assert_eq!(refused["error"]["code"], "E_WORKSPACE_DIRTY");
+    assert_eq!(refused["error"]["message"], "Workspace has tracked changes");
+    assert_eq!(refused["error"]["context"]["issues"], serde_json::json!([]));
     assert_ne!(code, 0);
     assert_eq!(
         refused["error"]["context"]["repositories"][0]["relative_path"],
         "."
     );
     assert_eq!(
+        refused["error"]["context"]["repositories"][0]["relative_path_hex"],
+        "2e"
+    );
+    assert_eq!(
         refused["error"]["context"]["repositories"][0]["tracked_changes"],
         1
+    );
+    assert_eq!(
+        refused["error"]["context"]["repositories"][0]["issues"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        refused["error"]["remediation"],
+        "Preserve and commit required work, or use workspace remove <name-or-id> --force to discard the copy."
     );
     assert!(dirty_copy.is_dir());
     let commands = LocalCommands::new(Some(bootstrap.clone()))

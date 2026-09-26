@@ -348,19 +348,20 @@ status JSON 示例：
   "ok": false,
   "error": {
     "code": "E_WORKSPACE_DIRTY",
-    "message": "tracked changes prevent normal removal",
+    "message": "Workspace has tracked changes",
     "context": {
       "workspace_id": "ws_019...",
+      "issues": [],
       "repositories": [
-        {"relative_path": ".", "state": "dirty", "tracked_changes": 3}
+        {"relative_path": ".", "relative_path_hex": "2e", "state": "dirty", "tracked_changes": 3, "issues": []}
       ]
     },
-    "remediation": "preserve the required work, or explicitly rerun remove with --force"
+    "remediation": "Preserve and commit required work, or use workspace remove <name-or-id> --force to discard the copy."
   }
 }
 ```
 
-JSON 模式 stdout 只输出一个文档，诊断写 stderr，持久异常日志写入约定文件。参数错误也保持 envelope；全局 --json 预识别在 -- 处停止。--help/--version 与 --json 互斥。脚本依据 ok、error.code 和版本化字段，不解析人类 message。首次发布前重订 schema_version=1 草案，不代表支持已撤销的旧字段。
+JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一个 JSON 文档；非 JSON 模式的错误诊断写入 stderr，持久异常日志写入约定文件。参数错误也保持 envelope；全局 --json 预识别在 -- 处停止。--help/--version 与 --json 互斥。脚本依据 ok、error.code 和版本化字段，不解析人类 message。首次发布前重订 schema_version=1 草案，不代表支持已撤销的旧字段。
 
 ### 10.2 退出码
 

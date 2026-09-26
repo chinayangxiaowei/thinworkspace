@@ -1,0 +1,46 @@
+name: P1 release fuzz
+
+# Phase gate only. Ordinary pushes and PRs keep the short smoke in p0.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Load pinned fuzz tools
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          pins = tomllib.loads(Path('tools/quality-tools.toml').read_text())['tools']
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f"THINWS_CARGO_FUZZ={pins['cargo_fuzz']}\n")
+              output.write(f"THINWS_FUZZ_NIGHTLY={pins['fuzz_nightly']}\n")
+          PY
+      - name: Install pinned fuzz tools
+        run: |
+          cargo install --locked cargo-fuzz --version "$THINWS_CARGO_FUZZ"
+          rustup toolchain install "$THINWS_FUZZ_NIGHTLY" --profile minimal --component rust-src
+      - name: Build every fuzz target
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz build
+      - name: Run every target with the release budget
+        run: python3 -B tools/ci_release_fuzz.py
+      - name: Preserve crash samples on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: p1-release-fuzz-failures
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

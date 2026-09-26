@@ -550,6 +550,8 @@ P1-15 当前不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚
 
 P1-15 CI fuzz 清单修正（2026-09-26）：既有 `P0/P1 quality` 工作流只对 10 个已声明 fuzz target 中的 6 个安排短预算 smoke。先增加从 fuzz manifest 对照工作流实际目标及次数的辅助测试并确认因缺 4 项而 RED，再为 init/create/remove 请求和物化路径补 4 个固定 nightly、60 秒预算的步骤并转 GREEN；32 项 CI 辅助测试、工作流 YAML 语法和差异检查通过。新增目标中 create/remove 各有上文 30 秒本机结果，init/路径各有 1 秒启动 smoke，均退出 0；这些不代替工作流的 60 秒在线运行或阶段长预算。GPT-6 Astra / `xhigh` 对精确提交 `cbd97449cefaf0e2afdd1ab8cc9bfba218e4c1aa` 只读审核为 Approve，独立重跑 32 项辅助测试，并验证清单测试能拒绝缺失、重复和未知目标；未运行在线 CI 或 fuzz。本修正只关闭 CI 短预算目标遗漏，不解决 P1-15 的全量变异、长预算和发布黑盒缺口。
 
+P1-15 发布二进制黑盒 CI 切片（2026-09-26）：现有流程已用发布配置运行进程内 CLI 集成测试，但未从真实 `target/release/thinws` 进程完成状态变更闭环。新增仅供一次性 GitHub-hosted macOS runner 使用的 CI 用例，在独立 `RUNNER_TEMP` 下以 release 二进制执行 init、doctor、非 Git 来源 CoW 创建、普通路径输出、副本写入隔离及普通删除；每次子进程有 60 秒上限，运行前拒绝已有 bootstrap config 或符号链接。初版只核对 `GITHUB_ACTIONS`，无法排除持久自托管 runner；补 `RUNNER_ENVIRONMENT=github-hosted` 守卫，回归测试先对旧实现 RED，再对修订实现 GREEN。主 Agent 本机运行 33 项 CI 辅助测试、Python 语法、工作流 YAML、fmt、Clippy 和全 workspace/all-targets 普通测试均通过；本机入口按预期拒绝运行，当前用户的 ThinWorkspace config 未创建。GPT-6 Astra / `xhigh` 对完整提交范围 `b17e093..946074f3892d903dc2e0c6374e5322df2e8f463e` 只读复核为 Approve，独立重跑 33 项辅助测试并核对进程参数、字段及守卫；未执行会写真实配置的 E2E。CI 尚未触发，本切片只是补齐可执行验收入口，不是黑盒验收通过，也不放行 P1.f 或 Phase 1。
+
 ---
 
 ## 五、依赖摘要

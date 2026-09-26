@@ -546,7 +546,9 @@ P1-15 十副本控制点切片（2026-09-26，macOS/APFS）：新增注入 boots
 
 P1-15 发布候选门禁盘点（2026-09-26，当前提交 `bfd2e2686ceca8baae7629a1b1de5efe3e6875b0`）：GPT-6 Astra / `xhigh` 对十副本证据措辞修正提交只读复核为 Approve，确认其前次 P2 已关闭；这只批准该文档修正，不等于 P1-15 终审。`cargo build --release --workspace` 退出 0，产物 `target/release/thinws` 为 arm64 Mach-O，SHA-256 为 `f27833346fa2a1e3e7e7e5fda403cf5bcb470a9d7f8fa912c3c60a390c6f9dea`；直接运行该二进制的 `--help`、`--version`、`--json gc` 分别为正常帮助、`thinws 0.1.0`、退出 2 的 `E_USAGE`。这三项仅是无产品写入的黑盒入口检查，不覆盖真实创建/删除。主 workspace 与 fuzz workspace 的 `cargo deny check`、离线 `cargo audit` 均退出 0，仅有未命中许可配置警告；固定 nightly 下全部 fuzz target 的构建通过。`thinws_remove_request` 和 `thinws_create_request` 各运行 30 秒，分别约 460 万和 662 万次输入，均退出 0、无 crash/hang；这是两个短预算目标，不是所有目标的长预算阶段门禁。本次自动生成的未跟踪 fuzz 样本已从仓库清走，既有种子保留。
 
-P1-15 当前不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚未形成有效闭合证据；阶段全量变异仅枚举出约 3029 项，未执行，也没有相应的 P1 CI 承担该批次；其余 fuzz target 的阶段长预算、发布二进制真实状态变更黑盒 E2E、专用子挂载环境、外置卷稳定性复核、正式分发所需签名/公证及人工放行均未完成或尚未适用。不得以先前任务级定向变异、上述短预算 fuzz、进程内 CLI 集成测试或二进制帮助检查代替这些门禁；当前状态维持 In Progress，不打 tag、不推送、不宣称 Phase 1 发布。
+P1-15 当前不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚未形成有效闭合证据；阶段全量变异仅枚举出约 3029 项，未执行；既有工作流虽提供显式 `workspace` 选择，但尚无该批次的有效 CI 结果，现行 120 分钟 job 上限是否足够也未经证明。其余 fuzz target 的阶段长预算、发布二进制真实状态变更黑盒 E2E、专用子挂载环境、外置卷稳定性复核、正式分发所需签名/公证及人工放行均未完成或尚未适用。不得以先前任务级定向变异、上述短预算 fuzz、进程内 CLI 集成测试或二进制帮助检查代替这些门禁；当前状态维持 In Progress，不打 tag、不推送、不宣称 Phase 1 发布。
+
+P1-15 CI fuzz 清单修正（2026-09-26）：既有 `P0/P1 quality` 工作流只对 10 个已声明 fuzz target 中的 6 个安排短预算 smoke。先增加从 fuzz manifest 对照工作流实际目标及次数的辅助测试并确认因缺 4 项而 RED，再为 init/create/remove 请求和物化路径补 4 个固定 nightly、60 秒预算的步骤并转 GREEN；32 项 CI 辅助测试、工作流 YAML 语法和差异检查通过。新增目标中 create/remove 各有上文 30 秒本机结果，init/路径各有 1 秒启动 smoke，均退出 0；这些不代替工作流的 60 秒在线运行或阶段长预算。GPT-6 Astra / `xhigh` 对精确提交 `cbd97449cefaf0e2afdd1ab8cc9bfba218e4c1aa` 只读审核为 Approve，独立重跑 32 项辅助测试，并验证清单测试能拒绝缺失、重复和未知目标；未运行在线 CI 或 fuzz。本修正只关闭 CI 短预算目标遗漏，不解决 P1-15 的全量变异、长预算和发布黑盒缺口。
 
 ---
 

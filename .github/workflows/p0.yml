@@ -25,9 +25,10 @@ permissions:
 jobs:
   probe:
     runs-on: macos-15
-    # P0-07 run 34760370580 hit the 60-minute job limit during 712 mutations.
-    # Allow the expanded suite to finish without reducing any gate or test budget.
-    timeout-minutes: 120
+    # P0-07 run 34760370580 hit 60 minutes during 712 mutations. Give only
+    # explicitly dispatched workspace-wide mutation the hosted 6-hour ceiling;
+    # ordinary and narrower runs keep the 120-minute bound.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.mutation_scope == 'workspace' && 360 || 120 }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

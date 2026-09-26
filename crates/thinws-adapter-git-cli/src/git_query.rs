@@ -320,7 +320,10 @@ fn git_command(
         }
         GitQuery::TrackedStatus { .. } => {
             command.arg(git_dir_argument(cwd, prevalidated_git_dir));
+            // A copied repository may disable mode tracking; inspection must still see chmod changes.
             command.args([
+                "-c",
+                "core.filemode=true",
                 "--no-optional-locks",
                 "status",
                 "--porcelain=v2",
@@ -977,6 +980,8 @@ mod tests {
                 },
                 vec![
                     OsStr::new("--git-dir=/tmp/thinws-p0-07-query-cwd/.git"),
+                    OsStr::new("-c"),
+                    OsStr::new("core.filemode=true"),
                     OsStr::new("--no-optional-locks"),
                     OsStr::new("status"),
                     OsStr::new("--porcelain=v2"),

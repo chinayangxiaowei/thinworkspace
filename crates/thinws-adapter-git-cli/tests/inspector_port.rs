@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -95,8 +96,9 @@ fn real_repository_port_distinguishes_untracked_from_tracked_changes() {
         .expect("isolated inspector child");
     assert!(
         output.status.success(),
-        "inspector child failed: {}",
-        String::from_utf8_lossy(&output.stdout)
+        "inspector child failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -124,4 +126,25 @@ fn isolated_git_inspection_child() {
         Some(1)
     );
     assert!(dirty.repositories()[0].issues().is_empty());
+
+    fs::write(copy_root.join("tracked.txt"), b"baseline\n").expect("restore tracked baseline");
+    assert_eq!(inspect().aggregate(), GitState::Clean);
+    fixture_git(copy_root, copy_root, &["config", "core.filemode", "false"]);
+    let tracked = copy_root.join("tracked.txt");
+    let mut permissions = fs::metadata(&tracked)
+        .expect("tracked metadata")
+        .permissions();
+    assert_eq!(
+        permissions.mode() & 0o111,
+        0,
+        "fixture starts non-executable"
+    );
+    permissions.set_mode(permissions.mode() | 0o111);
+    fs::set_permissions(&tracked, permissions).expect("tracked executable-bit change");
+    let mode_dirty = inspect();
+    assert_eq!(mode_dirty.aggregate(), GitState::Dirty);
+    assert_eq!(
+        mode_dirty.repositories()[0].state().tracked_change_count(),
+        Some(1)
+    );
 }

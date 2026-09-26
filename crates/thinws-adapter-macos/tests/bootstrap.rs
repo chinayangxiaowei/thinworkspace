@@ -572,7 +572,7 @@ fn p1_12_force_start_log_is_durable_and_outside_the_workspace_copy() {
         git_state: GitState::Unknown,
         git_check_complete: false,
         repositories: &[],
-        process_use: ProcessUse::NoEvidence,
+        process_use: Some(ProcessUse::NoEvidence),
         protection: None,
         error_code: None,
         outcome: None,
@@ -641,7 +641,7 @@ fn p1_12_removal_log_rejects_symlink_without_touching_external_file() {
         git_state: GitState::Unknown,
         git_check_complete: false,
         repositories: &[],
-        process_use: ProcessUse::NoEvidence,
+        process_use: Some(ProcessUse::NoEvidence),
         protection: None,
         error_code: None,
         outcome: None,
@@ -662,7 +662,7 @@ fn p1_12_removal_log_rejects_a_false_completion_before_creating_the_log() {
         git_state: GitState::Clean,
         git_check_complete: true,
         repositories: &[],
-        process_use: ProcessUse::NoEvidence,
+        process_use: Some(ProcessUse::NoEvidence),
         protection: None,
         error_code: None,
         outcome: None,
@@ -675,6 +675,36 @@ fn p1_12_removal_log_rejects_a_false_completion_before_creating_the_log() {
         PortErrorKind::InvalidData
     );
     assert!(!temp.path().join("data/logs/operations.jsonl").exists());
+}
+
+#[test]
+fn p1_12_new_start_event_is_a_separate_jsonl_line_after_an_interrupted_tail() {
+    let (temp, adapter, layout, lock, id, _) = removal_fixture();
+    let path = temp.path().join("data/logs/operations.jsonl");
+    fs::write(&path, b"{\"interrupted\":").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: OperationId::from_str("op_01890a5d-ac96-774b-bd5b-55c7b8d09f51").unwrap(),
+        workspace_id: id,
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: false,
+        repositories: &[],
+        process_use: Some(ProcessUse::NoEvidence),
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    adapter.append_removal_log(&lock, &layout, &record).unwrap();
+    let content = fs::read_to_string(path).unwrap();
+    let lines = content.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "{\"interrupted\":");
+    let started: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(started["event"], "started");
+    assert_eq!(started["operation_id"], record.operation_id.to_string());
 }
 
 #[test]

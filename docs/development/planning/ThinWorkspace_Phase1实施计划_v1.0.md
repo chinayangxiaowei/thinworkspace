@@ -417,6 +417,8 @@ P1-12 删除编排接入（进行中）：BootstrapStore 增量提供持 data-ro
 
 P1-12 清理日志持久化（进行中）：在既有 BootstrapStore 边界增量实现 `logs/operations.jsonl` 的持锁、no-follow、0600、同步追加与路径身份核验，不在副本内写产品文件，不引入新 Port/审计服务。先用真实 APFS 测试确认未实现时 force 开始事件失败，再补实现；追加两条结构化事件、控制字符 JSON 转义、日志路径符号链接拒绝及不允许无结果的伪完成事件已有回归。`cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过。Application 起止事件编排与异常分支仍待完成；同步调整技术栈中“tracing 诊断”和“必须 fsync 的清理 JSONL”职责，不把单条日志能力视为任务完成。
 
+P1-12 日志部分写入审核纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `dd0bd5f` 给出 Changes requested（P2 一项）：已有 JSONL 尾行不完整时，下一开始事件直接粘连，fsync 成功也不构成独立可解析事件。审核者用精确提交独立构建及 `RLIMIT_FSIZE` 真实短写复现：首次 Io 留下无换行的 128 字节，第二次返回成功但有效 JSONL 事件数为零。主 Agent 补半行尾字节检测与新事件换行隔离，先写测试复现旧行为（一行而非两行）再转绿；不完整旧片段保留，不解释为成功；新事件完整同步之前不能开始删除。开发规范 §13.1 同步明确此边界。本地 `cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过；独立复核仍待完成。日志写入与 Application 删除先后顺序尚未集成。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

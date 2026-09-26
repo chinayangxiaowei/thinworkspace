@@ -93,8 +93,8 @@ pub struct RemovalLogRecord<'a> {
     pub git_check_complete: bool,
     /// Repository-relative positions and tracked-change counts only.
     pub repositories: &'a [RepositoryInspection],
-    /// Best-effort external process scan result.
-    pub process_use: ProcessUse,
+    /// Best-effort external process scan result, absent if no container was scanned.
+    pub process_use: Option<ProcessUse>,
     /// Specific protection that refused the attempt, when applicable.
     pub protection: Option<RemovalRefusal>,
     /// Stable public error code when the attempt failed.

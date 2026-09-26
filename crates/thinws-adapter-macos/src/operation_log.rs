@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Component;
 
@@ -17,7 +17,7 @@ use crate::filesystem::{
 };
 
 const LOG_NAME: &str = "operations.jsonl";
-const APPEND_FLAGS: OFlags = OFlags::WRONLY
+const APPEND_FLAGS: OFlags = OFlags::RDWR
     .union(OFlags::APPEND)
     .union(OFlags::CLOEXEC)
     .union(OFlags::NOFOLLOW)
@@ -87,7 +87,7 @@ pub(crate) fn append_removal_record(
         "git_state": git_state_name(record.git_state),
         "git_check_complete": record.git_check_complete,
         "repositories": repositories,
-        "process_use": process_use_name(record.process_use),
+        "process_use": record.process_use.map(process_use_name),
         "protection_reason": record.protection.map(refusal_name),
         "error_code": record.error_code.map(|code| code.as_str()),
         "result": result,
@@ -115,6 +115,20 @@ pub(crate) fn append_removal_record(
             PortErrorKind::InvalidLayout,
             "cleanup log file entry changed before append",
         ));
+    }
+    let length = file
+        .metadata()
+        .map_err(|error| io_error("inspect cleanup log length", error))?
+        .len();
+    if length != 0 {
+        file.seek(SeekFrom::End(-1))
+            .map_err(|error| io_error("inspect cleanup log tail", error))?;
+        let mut tail = [0_u8; 1];
+        file.read_exact(&mut tail)
+            .map_err(|error| io_error("read cleanup log tail", error))?;
+        if tail[0] != b'\n' {
+            bytes.insert(0, b'\n');
+        }
     }
     file.write_all(&bytes)
         .map_err(|error| io_error("append cleanup log event", error))?;

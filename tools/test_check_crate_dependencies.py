@@ -20,7 +20,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "thinws-application",
                 "thinws-metadata-sqlite",
             },
-            "thinws-adapter-git-cli": {"thinws-core", "thinws-ports"},
+            "thinws-adapter-git-cli": {"rustix", "thinws-core", "thinws-ports"},
             "thinws-adapter-macos": {"blake3", "libc", "rustix", "serde", "toml", "thinws-core", "thinws-ports"},
             "thinws-metadata-sqlite": {"rusqlite", "serde_json", "thinws-core", "thinws-ports"},
         }
@@ -77,6 +77,18 @@ class CrateDependencyDirectionTests(unittest.TestCase):
         self.assertEqual(
             validate_dependency_graph({"thinws-adapter-macos": {"rusqlite"}}),
             ["thinws-adapter-macos must not depend on rusqlite"],
+        )
+
+    def test_git_adapter_has_only_reviewed_process_dependencies(self) -> None:
+        self.assertEqual(
+            validate_dependency_graph(
+                {"thinws-adapter-git-cli": {"rustix", "thinws-core", "thinws-ports"}}
+            ),
+            [],
+        )
+        self.assertEqual(
+            validate_dependency_graph({"thinws-adapter-git-cli": {"rusqlite"}}),
+            ["thinws-adapter-git-cli must not depend on rusqlite"],
         )
 
     def test_cli_can_wire_adapters_but_not_depend_on_core_or_sqlite_api(self) -> None:

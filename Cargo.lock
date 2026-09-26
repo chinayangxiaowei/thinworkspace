@@ -536,6 +536,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinws-adapter-git-cli"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "tempfile",
+ "thinws-core",
+ "thinws-ports",
+]
+
+[[package]]
 name = "thinws-adapter-macos"
 version = "0.1.0"
 dependencies = [
@@ -600,6 +611,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "thinws-core",
 ]
 
 [[package]]

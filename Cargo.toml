@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/thinws-adapter-git-cli",
     "crates/thinws-adapter-macos",
     "crates/thinws-application",
     "crates/thinws-cli",

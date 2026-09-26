@@ -4,6 +4,7 @@
 //! Pure Phase 1 domain types for ThinWorkspace.
 
 mod diagnostic;
+mod git;
 mod id;
 mod installation;
 mod materialization;
@@ -14,6 +15,10 @@ mod workspace;
 mod workspace_name;
 
 pub use diagnostic::{ContextValue, CoreError, ErrorCode, ErrorCodeParseError};
+pub use git::{
+    DiscoveryCompleteness, GitState, RepositoryState, StatusField, StatusParseError,
+    aggregate_git_state, parse_tracked_change_count,
+};
 pub use id::{IdParseError, InstanceId, OperationId, WorkspaceId};
 pub use installation::{InstallationIdentity, InstallationRecord, RootMarker, RootMarkerState};
 pub use materialization::{

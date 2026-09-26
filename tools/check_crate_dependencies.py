@@ -27,6 +27,7 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
 
 # Production dependency edges only; integration-test adapters remain dev dependencies.
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "thinws-adapter-git-cli": frozenset({"rustix"}),
     "thinws-adapter-macos": frozenset(
         {"blake3", "libc", "rustix", "serde", "toml"}
     ),

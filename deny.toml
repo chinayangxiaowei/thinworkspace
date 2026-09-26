@@ -37,6 +37,11 @@ version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [[licenses.exceptions]]
+name = "thinws-adapter-git-cli"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
 name = "thinws-application"
 version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]

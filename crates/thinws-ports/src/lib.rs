@@ -5,6 +5,7 @@
 
 mod bootstrap;
 mod error;
+mod git;
 mod materialization;
 mod metadata;
 
@@ -13,6 +14,11 @@ pub use bootstrap::{
     PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
+pub use git::{
+    CleanupIoFailure, CleanupOperation, DirectChildExit, GitExit, GitInspection,
+    GitInspectionIssue, GitInspector, GitQueryFailureKind, InputField, IoOperation, OutputStream,
+    RepositoryInspection,
+};
 pub use materialization::{
     MaterializationFailure, MaterializationPathProbeRequest, MaterializationPathRole,
     PlatformProbe, WorkspaceMaterializer,

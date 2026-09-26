@@ -12,13 +12,17 @@ use std::time::{Duration, Instant};
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RawMode};
 
+#[cfg(test)]
+use super::{CleanupIoFailure, DirectChildExit, GitExit, GitQueryFailureKind};
 use super::{
-    CleanupIoFailure, DirectChildExit, GitExit, GitQuery, GitQueryFailure, GitQueryFailureKind,
-    GitQueryOutput, PreservedGitEnvironment, run_bootstrap, run_prevalidated_repository,
+    GitQuery, GitQueryFailure, GitQueryOutput, PreservedGitEnvironment, run_bootstrap,
+    run_prevalidated_repository,
 };
-use crate::{
-    DiscoveryCompleteness, GitState, RepositoryState, aggregate_git_state,
-    parse_tracked_change_count,
+#[cfg(test)]
+use thinws_core::GitState;
+use thinws_core::{DiscoveryCompleteness, RepositoryState, parse_tracked_change_count};
+pub use thinws_ports::{
+    GitInspection, GitInspectionIssue as InspectionIssue, RepositoryInspection,
 };
 
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -28,58 +32,10 @@ const MAX_REPOSITORIES: usize = 256;
 const MAX_DEPTH: usize = 128;
 const MAX_TEXT_BYTES: usize = 1024 * 1024;
 
-/// A structured reason that inspection evidence is incomplete or unknown.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InspectionIssue {
-    InvalidCopyRoot,
-    EnvironmentUnsupported,
-    InvalidExecPath,
-    ScanFailed,
-    ScanLimitReached,
-    DepthLimitReached,
-    RepositoryLimitReached,
-    UnsafeRepositoryMetadata,
-    ExternalRepositoryMetadata,
-    UnsupportedConfiguration,
-    UnsafeAttributes,
-    HiddenIndexFlags,
-    SparseCheckout,
-    /// Bounded collection failed; retains only safe structured process evidence.
-    QueryFailed {
-        kind: GitQueryFailureKind,
-        direct_child_exit: DirectChildExit,
-        cleanup_io: Option<CleanupIoFailure>,
-    },
-    /// The direct Git child completed with a nonzero code or terminating signal.
-    QueryNonZeroExit(GitExit),
-    InvalidGitOutput,
-    EvidenceChanged,
-    UnsafeDescendant,
-    BudgetExpired,
-}
-
-/// One discovered repository and its tracked-content evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepositoryInspection {
-    /// Path relative to the copy root; an empty path denotes the root itself.
-    pub relative_path: PathBuf,
-    pub state: RepositoryState,
-    pub issues: Vec<InspectionIssue>,
-}
-
-/// Bounded inspection evidence for an entire copy root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GitInspection {
-    pub discovery: DiscoveryCompleteness,
-    pub repositories: Vec<RepositoryInspection>,
-    pub aggregate: GitState,
-    pub issues: Vec<InspectionIssue>,
-}
-
 /// Discovers and inspects repositories rooted inside `copy_root`.
 ///
 /// The caller must already have authorized `copy_root` as the controlled copy
-/// being evaluated. This experiment revalidates no-follow filesystem evidence,
+/// being evaluated. The adapter revalidates no-follow filesystem evidence,
 /// but does not claim hard real-time interruption of filesystem calls or
 /// protection against replacement by a malicious process with the same UID.
 pub fn inspect(copy_root: &Path) -> GitInspection {
@@ -455,16 +411,7 @@ fn finish_inspection(
     repositories: Vec<RepositoryInspection>,
     issues: Vec<InspectionIssue>,
 ) -> GitInspection {
-    let states = repositories
-        .iter()
-        .map(|repository| repository.state)
-        .collect::<Vec<_>>();
-    GitInspection {
-        discovery,
-        aggregate: aggregate_git_state(discovery, &states),
-        repositories,
-        issues,
-    }
+    GitInspection::new(discovery, repositories, issues)
 }
 
 fn discover(
@@ -2121,7 +2068,10 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_nanos();
-            let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .expect("crate is beneath the workspace root")
                 .join("target")
                 .join("p0-07-inspect-fixtures")
                 .join(format!("{label}-{}-{nanos}-{unique}", std::process::id()));
@@ -2231,7 +2181,10 @@ mod tests {
         let root = PathBuf::from(
             env::var_os(FIFO_PROBE_ROOT).expect("FIFO probe root accompanies probe mode"),
         );
-        let fixture_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let fixture_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crate is beneath the workspace root")
             .join("target")
             .join("p0-07-inspect-fixtures");
         assert!(root.is_absolute(), "FIFO probe root must be absolute");

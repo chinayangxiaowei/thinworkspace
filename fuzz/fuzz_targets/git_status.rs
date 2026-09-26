@@ -4,10 +4,13 @@ use libfuzzer_sys::fuzz_target;
 use thinws_p0_cleanup::removal_log::{
     EventOutcome, RemovalLogEvent, RepositoryEvidence, RepositoryRelativePath, SafeId,
 };
-use thinws_p0_cleanup::{
-    DiscoveryCompleteness, GitState, PathValidation, ProcessUse, RemovalDecision, RemovalMode,
-    RemovalPreflight, RepositoryState, VolumeValidation, aggregate_git_state, decide_removal,
+use thinws_core::{
+    DiscoveryCompleteness, GitState, RepositoryState, aggregate_git_state,
     parse_tracked_change_count,
+};
+use thinws_p0_cleanup::{
+    PathValidation, ProcessUse, RemovalDecision, RemovalMode, RemovalPreflight, VolumeValidation,
+    decide_removal,
 };
 
 const ORDINARY: &[u8] = b"1 .M N... 100644 100644 100644 0123456789012345678901234567890123456789 0123456789012345678901234567890123456789 ";
@@ -16,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
     // Raw bytes exercise malformed records without filesystem or Git access.
     let _ = parse_tracked_change_count(data);
     #[cfg(fuzzing)]
-    thinws_p0_cleanup::git_query::exercise_pure_parsers(data);
+    thinws_adapter_git_cli::exercise_pure_parsers(data);
 
     // Exercise the event's bounded field types and JSON escaping in memory.
     // No fuzz input is passed to File, Git, a filesystem path, or deletion.

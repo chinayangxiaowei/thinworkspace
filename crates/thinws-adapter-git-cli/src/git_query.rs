@@ -1,4 +1,4 @@
-//! Bounded collection for the fixed internal Git query shapes used by P0-07.
+//! Bounded collection for the fixed internal Git query shapes.
 //!
 //! A successful [`run`] means only that the direct child exited and both output
 //! pipes closed within their bounds. Callers must inspect [`GitExit`] and must
@@ -6,7 +6,8 @@
 //! Git inspection. [`inspect`] is the sole entry that connects bounded no-follow
 //! discovery, source and repository preflight, index-flag checks, leaf-first
 //! status queries, evidence revalidation, and the existing aggregate model.
-//! Neither entry is a Phase 1 Port or a sandbox for user commands.
+//! The adapter implements the Phase 1 Port above this module. This module is
+//! not a sandbox for user commands.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -20,12 +21,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{FileType, OFlags};
+pub use thinws_ports::{
+    CleanupIoFailure, CleanupOperation, DirectChildExit, GitExit, GitQueryFailureKind, InputField,
+    IoOperation, OutputStream,
+};
 
 mod inspect;
 
 #[cfg(fuzzing)]
 pub use inspect::exercise_pure_parsers;
-pub use inspect::{GitInspection, InspectionIssue, RepositoryInspection, inspect};
+pub(super) use inspect::inspect;
 
 const GIT_EXECUTABLE: &str = "/usr/bin/git";
 const RUN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,9 +40,10 @@ const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 256 * 1024;
 const MAX_DRAIN_READS: usize = 16;
 
-/// One of the only Git command shapes accepted by this experiment.
+/// One of the fixed Git command shapes accepted by the inspector.
 pub enum GitQuery<'a> {
-    /// Query the fixed system Git version.
+    /// Query the fixed system Git version in bounded-runner tests.
+    #[cfg(test)]
     Version,
     /// Query the fixed system Git's runtime executable directory.
     ExecPath,
@@ -47,22 +53,6 @@ pub enum GitQuery<'a> {
     TrackedStatus { filter_drivers: &'a [OsString] },
     /// Read stable index flags without changing them.
     IndexFlags,
-}
-
-/// The direct child's real termination status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GitExit {
-    /// The exit code, or `None` if the process ended by signal.
-    pub code: Option<i32>,
-    /// The terminating Unix signal, or `None` for a normal exit.
-    pub signal: Option<i32>,
-}
-
-impl GitExit {
-    /// Whether the direct child reported a zero exit code.
-    pub fn success(self) -> bool {
-        self.code == Some(0)
-    }
 }
 
 /// Fully collected, separately bounded process output.
@@ -84,77 +74,6 @@ impl fmt::Debug for GitQueryOutput {
             .field("stderr_len", &self.stderr.len())
             .finish()
     }
-}
-
-/// Output stream whose byte budget was exceeded.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutputStream {
-    Stdout,
-    Stderr,
-}
-
-/// Step at which bounded process I/O failed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IoOperation {
-    ConfigureStdout,
-    ConfigureStderr,
-    ReadStdout,
-    ReadStderr,
-    PollExit,
-}
-
-/// Public input field rejected before a child was started.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputField {
-    Cwd,
-    ConfigFile,
-    ConfigIsolationDevice,
-}
-
-/// Structured reason why output collection did not complete.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GitQueryFailureKind {
-    InvalidInput {
-        field: InputField,
-    },
-    Start {
-        error_kind: io::ErrorKind,
-        raw_os_error: Option<i32>,
-    },
-    Io {
-        operation: IoOperation,
-        error_kind: io::ErrorKind,
-        raw_os_error: Option<i32>,
-    },
-    TimedOut,
-    OutputLimitExceeded {
-        stream: OutputStream,
-        limit: usize,
-    },
-}
-
-/// What was confirmed about the directly spawned child during cleanup.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DirectChildExit {
-    NotStarted,
-    Confirmed(GitExit),
-    Unconfirmed,
-}
-
-/// Cleanup operation whose first I/O error was retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CleanupOperation {
-    InitialPoll,
-    Kill,
-    ConfirmPoll,
-}
-
-/// First direct-child cleanup error, independent of exit confirmation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CleanupIoFailure {
-    pub operation: CleanupOperation,
-    pub error_kind: io::ErrorKind,
-    pub raw_os_error: Option<i32>,
 }
 
 /// Bounded bytes and direct-child cleanup evidence for a failed collection.
@@ -210,6 +129,7 @@ const PRODUCTION_BUDGET: Budget = Budget {
 };
 
 /// Run one fixed Git query with a caller-supplied, explicit working directory.
+#[cfg(test)]
 pub fn run(cwd: &Path, query: GitQuery<'_>) -> Result<GitQueryOutput, GitQueryFailure> {
     run_bootstrap(cwd, query, RUN_TIMEOUT)
 }
@@ -385,6 +305,7 @@ fn git_command(
     }
 
     match query {
+        #[cfg(test)]
         GitQuery::Version => {
             command.arg("--version");
         }
@@ -822,7 +743,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crate is beneath the workspace root")
             .join("target")
             .join("p0-07-git-query-timeout-fixtures")
             .join(format!("{}-{nanos}-{unique}", process::id()));

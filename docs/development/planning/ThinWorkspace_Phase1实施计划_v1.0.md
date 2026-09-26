@@ -395,7 +395,7 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | Done |
-| P1-13 当前空间统计 | Ready 副本的当前逻辑字节和已分配字节估算；不将估算冒充可回收量 | P1-12 | R4 | In Review |
+| P1-13 当前空间统计 | Ready 副本的当前逻辑字节和已分配字节估算；不将估算冒充可回收量 | P1-12 | R4 | Done |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护不被绕过；Ready 当前空间统计如实区分完整估算与 unknown，首版不暴露 GC 命令或候选标记。
 
@@ -438,6 +438,8 @@ P1-13 GC 入口核验（2026-09-26 UTC）：真实 Adapter 定向测试 `failed_
 P1-13 当前范围决定（2026-09-26 UTC）：维护者明确“GC 先不实现，继续”。[ADR-0005](../../project/architecture/adr/ADR-0005_Phase1暂不实现GC.md) 已将 Phase 1 收敛为当前空间统计和显式 Workspace 清理；本节旧“GC 与空间统计”领取记录及 GC 验收断言仅是当时的过程历史，不再构成 P1-13 当前退出条件。当前还须核对 `thinws gc` 为 E_USAGE、全局残留未被 `remove` 越界删除、空间估算不冒充可释放量，并完成本任务的文档/契约复核。未为后续 GC 指定阶段或预建候选机制。P1-14 仍以本任务收口为依赖，P1-15 仍以所有活跃 P1 任务收口为依赖。
 
 P1-13 范围收缩候选自测（2026-09-26，macOS/APFS）：仅修改权威文档、CLI 契约/E2E 测试，生产代码、依赖、fixture 和工具配置未变；既有空间扫描定向变异证据沿用上述经审核的代码候选，本次不重新运行变异或 fuzz，也不冒称 P1.e 小阶段门禁完成。`cargo fmt --all -- --check`、全目标全 feature Clippy、`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --workspace --all-targets`、release CLI 的 GC 拒绝契约与显式删除保留未知 staging/trash 的真实 E2E、`cargo deny check`、`cargo audit --no-fetch` 均退出 0；deny 保留既有未命中许可例外/allowance warning。全仓普通测试中的专用 P0 异卷与 submount ignored 用例、本次未运行的长预算变异/fuzz、线上 CI/PR/push 均不计为通过。一次测试环境误把 P1 异卷目标设为与源同卷的 `/private/tmp`，该用例按预期失败；修正为真实异卷 `/Volumes/data` 后整套重跑退出 0。独立审核的未提交差异预审为 Approve，但任务级 Done 须等待本地精确 commit 复核及 Verification。
+
+P1-13 任务级收口（2026-09-26）：GPT-6 Astra / `xhigh` 对本地精确提交 `a668bfecda6aa4196480440cf1be778642768821` 相对 `f75f05043c13c6e5cc1b4a3ed9f8f2076f1a2633` 只读终审为 Approve，无可操作问题；独立重跑 release CLI 契约 11 项、真实 APFS 删除 E2E 1 项、二进制 help 与 `gc` 拒绝，并核对干净工作树，未重跑全仓/Clippy/供应链/变异/fuzz 或阶段门禁。审核后主 Agent 在相同干净提交上进入 Verification，release CLI 契约 11 项及显式删除保留全局残留的真实 E2E 1 项均再次退出 0。当前空间统计切片、GC 范围收缩和公开拒绝契约因此满足 P1-13 当前退出条件，任务标为 Done；这不宣称 P1.e 小阶段或 Phase 1 已放行。专用 submount、完整小阶段变异、长预算 fuzz 和线上 CI/PR/push 未执行，留待相应收口门禁。
 
 P1-12 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main` 实施，基线 `6d9bb75`；不派生开发 Agent、不创建线上 PR，冻结候选使用 GPT-6 Astra / `xhigh` 只读独立审核。风险 R4（递归删除、跨进程路径竞态、进程占用 FFI）。先补 ADR-0004 的 Workspace 历史目录归属证明，再实现受控删除，避免仅凭当前同名普通 `root/` 推定可删除。验收断言：真实 APFS 上替换原 root/容器、缺失或损坏证明均拒绝且不触碰替换目录；普通清理对 tracked dirty/unknown 拒绝，不因 untracked-only 拒绝；显式 force 绕过前两项但不绕过身份/卷/确认占用；日志在目标删除后可读且起止事件如实；中途失败保留非 Ready 与受控残留，再次 force 只清理仍可证明归属的对象；重复 ID 由 tombstone 返回 already-removed。真实 Git、进程、CLI/JSON、错误注入、定向变异和受影响 fuzz 均需执行，任务完成不自动代表 P1.e 小阶段放行。
 

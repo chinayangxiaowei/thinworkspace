@@ -63,6 +63,10 @@ impl PreparedWorkspaceEvidence for FakePreparedWorkspace {
         unreachable!("init/doctor never prepares a Workspace")
     }
 
+    fn target_identity(&self) -> thinws_core::FileIdentity {
+        unreachable!("init/doctor never inspects a prepared Workspace")
+    }
+
     fn revalidate(&self) -> Result<(), PortError> {
         unreachable!("init/doctor never revalidates a Workspace")
     }

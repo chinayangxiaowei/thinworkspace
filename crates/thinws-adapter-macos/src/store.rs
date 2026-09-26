@@ -86,6 +86,10 @@ impl PreparedWorkspaceEvidence for MacOsPreparedWorkspace {
         &self.target_root
     }
 
+    fn target_identity(&self) -> thinws_core::FileIdentity {
+        self.root.identity.as_core()
+    }
+
     fn revalidate(&self) -> Result<(), PortError> {
         self.revalidate_directories()?;
         validate_file_entry(

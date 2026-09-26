@@ -144,6 +144,8 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 写 Creating → 建立 incomplete → Probe/Plan → 对空目标物化原始目录 → 验证最终 Receipt 和来源观察结果 → 移除 incomplete → 写 Ready。
 
+物化前的目标 Probe 报告必须与 `prepare_workspace` 持有的原始 `root/` 目录身份一致；运行时 CoW 失败后重新 Probe、选择 Full Copy 时也必须重新核对。同名空目录或同卷路径不能替代该身份。Materializer 的 Plan 重验继续防止核对之后的路径替换。
+
 同名重复请求的公开规则由手册管理；不会隐式刷新已有副本。失败保留可解释的非 Ready 状态；无法确认回滚时不继续第二后端。重启后不续做创建，目录存在也不等于成功。
 
 ### 7.2 清理

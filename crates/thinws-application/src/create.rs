@@ -499,6 +499,7 @@ where
             .bootstrap
             .inspect_materialization_paths(&probe)
             .map_err(|error| map_port(Stage::Layout, error))?;
+        require_prepared_target(&prepared, &report)?;
         require_existing_source(report.source())?;
         let data_root_report = self
             .bootstrap
@@ -554,6 +555,8 @@ where
                         .map_err(|error| {
                             map_port(Stage::Layout, error).with_partial_receipt(partial.clone())
                         })?;
+                    require_prepared_target(&prepared, &fresh)
+                        .map_err(|error| error.with_partial_receipt(partial.clone()))?;
                     plan = MaterializationPlan::for_full_copy_after_cow_unavailable(
                         &fresh, &plan, &partial,
                     )
@@ -594,6 +597,28 @@ where
         );
         Ok(CreateOutcome::new(record, summary, true))
     }
+}
+
+fn require_prepared_target(
+    prepared: &impl PreparedWorkspaceEvidence,
+    report: &MaterializationPathReport,
+) -> Result<(), UseCaseError> {
+    prepared
+        .revalidate()
+        .map_err(|error| map_port(Stage::Layout, error))?;
+    let target = report.target_root();
+    let matches = target.resolution() == PathResolution::ExistingDirectory
+        && target.requested_path() == prepared.target_root()
+        && target.ancestry().last().is_some_and(|entry| {
+            entry.path() == prepared.target_root() && entry.identity() == prepared.target_identity()
+        });
+    if !matches {
+        return Err(semantic_error(
+            ErrorCode::DataRootLayout,
+            "materialization target differs from prepared Workspace root",
+        ));
+    }
+    Ok(())
 }
 
 fn select_plan(

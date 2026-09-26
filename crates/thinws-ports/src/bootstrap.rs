@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use thinws_core::{AbsolutePath, InstallationIdentity, RootMarker, VolumeId, WorkspaceId};
+use thinws_core::{
+    AbsolutePath, FileIdentity, InstallationIdentity, RootMarker, VolumeId, WorkspaceId,
+};
 
 use crate::PortError;
 
@@ -69,6 +71,9 @@ pub trait DataRootLayoutEvidence {
 pub trait PreparedWorkspaceEvidence {
     /// Returns the ordinary empty target directory derived from the Workspace ID.
     fn target_root(&self) -> &AbsolutePath;
+
+    /// Returns the same-run identity of the root held since its creation.
+    fn target_identity(&self) -> FileIdentity;
 
     /// Rechecks directory and incomplete-marker identities without modifying them.
     fn revalidate(&self) -> Result<(), PortError>;

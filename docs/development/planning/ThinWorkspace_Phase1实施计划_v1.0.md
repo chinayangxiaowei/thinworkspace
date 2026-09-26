@@ -405,6 +405,8 @@ P1-12 首轮安全设计审核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `
 
 P1-12 归属实现审核纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `4e827068e74e1c33209ddaae132d0bc76cf7cc4d` 给出 Changes requested：受控目录原先在公开目标名称上 `mkdirat`，再首次 `openat` 认领身份，竞争替换可被错误登记。主 Agent 改为在受控私有父目录下先建立临时目录并打开固定身份，再以 no-replace 发布到目标名称；发布前后重验目录项。真实 APFS 注入竞争目标测试确认目标在发布前不存在、竞争目标阻止发布、外来内容不变且可证明归属的临时目录被清理。普通全 workspace/all-targets 测试、fmt 和 Clippy 已通过；本修订仍待精确候选的独立复核，P1-12 继续 In Progress。
 
+P1-12 创建链路补充纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `653e0bcce9def4ea39a0652ae6095853cc341b94` 给出 Changes requested（High 1）：暂存发布修正本身未见阻断问题，但既有创建链路在 `prepare_workspace` 后只按公开路径 Probe/Plan，没有把计划目标与所持 root FD 身份绑定，替换后的普通空目录可能被写入。主 Agent 以真实 APFS 注入目标替换，先观察到外来目录 mode 被修改（RED），再在初次及运行时 fallback Probe 后加入原始目录身份核对（GREEN）；另覆盖 Probe 期间替换后恢复原路径的情形，要求仍拒绝旧报告。修订尚待全量普通门禁、受影响变异和新的精确候选独立复核；不沿用对 `653e0bc` 的结论。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

@@ -38,6 +38,12 @@ pub(crate) struct FileIdentity {
     inode: u64,
 }
 
+impl FileIdentity {
+    pub(crate) const fn as_core(self) -> thinws_core::FileIdentity {
+        thinws_core::FileIdentity::new(self.device, self.inode)
+    }
+}
+
 /// Directory identity stable across APFS remounts on the same Volume UUID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HistoricalDirectoryIdentity {

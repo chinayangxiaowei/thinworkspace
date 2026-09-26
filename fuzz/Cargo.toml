@@ -67,6 +67,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "thinws_create_request"
+path = "fuzz_targets/create_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "thinws_materialization_path"
 path = "fuzz_targets/materialization_path.rs"
 test = false

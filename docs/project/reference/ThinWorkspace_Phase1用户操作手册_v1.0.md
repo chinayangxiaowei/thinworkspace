@@ -96,16 +96,19 @@ source 和 data-root 参数使用本机绝对目录路径；来源可以位于 d
 ```text
 Workspace ready
 
+Result:          created
 Name:            auth-refresh
 Workspace ID:    ws_019...
 Source:          /Volumes/data/code/my-app
 Path:            /Volumes/data/thinws-data/workspaces/ws_019.../root
 Actual mode:     cow-clone
 CoW:             confirmed
+Fallback:        none
 Git setup:       not performed
 ```
 
 加 `--dry-run` 只展示当前 source/target 卷关系、目标路径模式、后端计划和降级原因，不分配 WorkspaceId、不预留名称、不保留可执行 plan token。正式创建重新检测。
+预览中的目标位置是已存在的 `workspaces/` 父目录，正式路径仍由新 WorkspaceId 派生；预览不生成实际复制结果或 CoW 证明。重复创建已 Ready 的同名同参数工作区时，人类输出的 Result 为 `already-ready`，JSON 的 result 同名。
 
 名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称全局唯一，实际目录只由 WorkspaceId 推导。后续命令可以用名称或完整 ID；Workspace ID 为 `ws_` 加标准小写 UUIDv7。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
 
@@ -294,6 +297,8 @@ thinws doctor
 | workspace path | 不支持 | stdout 专用一行绝对路径；--json 返回 E_USAGE |
 
 不支持的子命令或旧参数统一 E_USAGE，不保留首发前旧 Git/Base CLI 的兼容入口。源码实验命令不是本产品契约。
+
+`workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex` 和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target_parent/target_parent_hex`、`target_path_mode=id-derived-under-target-parent`、两端 Volume UUID 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。
 
 status JSON 示例：
 

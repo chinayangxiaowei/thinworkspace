@@ -3,6 +3,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +72,38 @@ fn lock_scopes_are_independent_timeout_is_bounded_and_release_allows_reacquire()
     adapter
         .acquire_bootstrap(Duration::from_millis(100))
         .unwrap();
+}
+
+#[test]
+fn concurrent_first_data_root_lock_open_serializes_without_spurious_not_found() {
+    for _ in 0..12 {
+        let temp = controlled_tempdir();
+        let bootstrap = temp.path().join("bootstrap");
+        let data_root = temp.path().join("data");
+        private_dir(&bootstrap);
+        private_dir(&data_root);
+        private_dir(&data_root.join("metadata"));
+        let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let adapter = adapter.clone();
+            let data_root = absolute(&data_root);
+            let barrier = barrier.clone();
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                let guard = adapter
+                    .acquire_data_root(&data_root, Duration::from_secs(2))
+                    .unwrap();
+                guard.revalidate().unwrap();
+            }));
+        }
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(data_root.join("metadata/lifecycle.lock").exists());
+    }
 }
 
 #[test]

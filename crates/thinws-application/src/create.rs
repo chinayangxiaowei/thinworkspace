@@ -3,7 +3,8 @@
 use std::str::FromStr;
 
 use thinws_core::{
-    AbsolutePath, ErrorCode, FallbackPolicy, InstallationRecord, MaterializationFailureKind,
+    AbsolutePath, ErrorCode, FallbackPolicy, FallbackReason, InstallationRecord,
+    MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
     MaterializationPlan, MaterializationPlanError, MaterializeRequest, MaterializerKind,
     SupportState, UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceRecord,
     WorkspaceReservation, WorkspaceState,
@@ -127,11 +128,122 @@ impl CreateOutcome {
     }
 }
 
+/// Read-only, non-executable creation facts without a Workspace identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatePreview {
+    target_parent: AbsolutePath,
+    source_volume_id: VolumeId,
+    target_volume_id: VolumeId,
+    effective_mode: MaterializationMode,
+    selected_adapter: MaterializerKind,
+    fallback_reason: Option<FallbackReason>,
+}
+
+impl CreatePreview {
+    /// Returns the private parent under which an ID-derived target would be placed.
+    #[must_use]
+    pub const fn target_parent(&self) -> &AbsolutePath {
+        &self.target_parent
+    }
+
+    /// Returns the source volume observed by the current probe.
+    #[must_use]
+    pub const fn source_volume_id(&self) -> VolumeId {
+        self.source_volume_id
+    }
+
+    /// Returns the registered target volume observed by the current probe.
+    #[must_use]
+    pub const fn target_volume_id(&self) -> VolumeId {
+        self.target_volume_id
+    }
+
+    /// Returns the mode that a new create would currently attempt.
+    #[must_use]
+    pub const fn effective_mode(&self) -> MaterializationMode {
+        self.effective_mode
+    }
+
+    /// Returns the backend selected by current read-only evidence.
+    #[must_use]
+    pub const fn selected_adapter(&self) -> MaterializerKind {
+        self.selected_adapter
+    }
+
+    /// Returns a preflight fallback reason, if one is currently required.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback_reason
+    }
+}
+
 impl<B, M> ThinWorkspaceService<B, M>
 where
     B: BootstrapStore + LifecycleLock<Guard = <B as BootstrapStore>::LockGuard> + PlatformProbe,
     M: MetadataStoreFactory<<B as BootstrapStore>::DataRootLayout>,
 {
+    /// Previews current APFS materialization facts without any product-state write.
+    pub fn preview_create(&self, request: &CreateRequest) -> Result<CreatePreview, UseCaseError> {
+        let identity = self
+            .bootstrap
+            .read_config()
+            .map_err(|error| map_port(Stage::Bootstrap, error))?
+            .ok_or_else(|| {
+                semantic_error(
+                    ErrorCode::NotInitialized,
+                    "ThinWorkspace is not initialized",
+                )
+            })?;
+        if paths_overlap(request.source(), identity.data_root()) {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "source and data root must not overlap",
+            ));
+        }
+        let layout = self
+            .bootstrap
+            .validate_layout(&identity)
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        self.require_ready_marker(&identity)?;
+        self.metadata
+            .inspect(
+                &layout,
+                &InstallationRecord::new(identity.clone(), request.now()),
+                self.sqlite_timeout,
+            )
+            .map_err(|error| map_port(Stage::Metadata, error))?;
+        let target_parent = derived_path(identity.data_root(), &[b"workspaces"])?;
+        let paths = MaterializationPathProbeRequest::new(
+            request.source().clone(),
+            target_parent.clone(),
+            derived_path(identity.data_root(), &[b"staging"])?,
+            derived_path(identity.data_root(), &[b"trash"])?,
+        );
+        let report = self
+            .bootstrap
+            .inspect_materialization_paths(&paths)
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        let plan = select_plan(&report, request.allow_full_copy())?;
+        if plan.target_volume_id() != identity.volume_id() {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "preview target volume differs from registered data root",
+            ));
+        }
+        layout
+            .revalidate()
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        self.require_ready_marker(&identity)?;
+        Ok(CreatePreview {
+            target_parent,
+            source_volume_id: plan.source_volume_id(),
+            target_volume_id: plan.target_volume_id(),
+            effective_mode: plan.effective_mode(),
+            selected_adapter: plan.selected_adapter(),
+            fallback_reason: plan.fallback_reason(),
+        })
+    }
+
     /// Creates an ordinary Workspace directory using injected APFS and Full Copy backends.
     pub fn create<C, F>(
         &self,
@@ -337,19 +449,7 @@ where
             .bootstrap
             .inspect_materialization_paths(&probe)
             .map_err(|error| map_port(Stage::Layout, error))?;
-        let policy = if request.allow_full_copy() {
-            FallbackPolicy::AllowFullCopyOnCowUnsupported
-        } else {
-            FallbackPolicy::Deny
-        };
-        let mut plan = if report.apfs_clone().state() == SupportState::Unsupported
-            && request.allow_full_copy()
-        {
-            MaterializationPlan::for_full_copy_after_preflight(&report, policy)
-        } else {
-            MaterializationPlan::for_apfs_clone(&report, policy)
-        }
-        .map_err(map_plan_error)?;
+        let mut plan = select_plan(&report, request.allow_full_copy())?;
         if !matches_reserved_volumes(
             plan.source_volume_id(),
             plan.target_volume_id(),
@@ -425,6 +525,22 @@ where
             receipt.failed_attempts().len(),
         );
         Ok(CreateOutcome::new(record, summary, true))
+    }
+}
+
+fn select_plan(
+    report: &MaterializationPathReport,
+    allow_full_copy: bool,
+) -> Result<MaterializationPlan, UseCaseError> {
+    let policy = if allow_full_copy {
+        FallbackPolicy::AllowFullCopyOnCowUnsupported
+    } else {
+        FallbackPolicy::Deny
+    };
+    if report.apfs_clone().state() == SupportState::Unsupported && allow_full_copy {
+        MaterializationPlan::for_full_copy_after_preflight(report, policy).map_err(map_plan_error)
+    } else {
+        MaterializationPlan::for_apfs_clone(report, policy).map_err(map_plan_error)
     }
 }
 

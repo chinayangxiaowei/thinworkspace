@@ -16,14 +16,13 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "clap",
                 "directories",
                 "serde_json",
-                "tempfile",
                 "thinws-adapter-macos",
                 "thinws-application",
                 "thinws-metadata-sqlite",
             },
             "thinws-adapter-git-cli": {"thinws-core", "thinws-ports"},
-            "thinws-adapter-macos": {"blake3", "thinws-core", "thinws-ports"},
-            "thinws-metadata-sqlite": {"thinws-core", "thinws-ports"},
+            "thinws-adapter-macos": {"blake3", "libc", "rustix", "serde", "toml", "thinws-core", "thinws-ports"},
+            "thinws-metadata-sqlite": {"rusqlite", "serde_json", "thinws-core", "thinws-ports"},
         }
 
         self.assertEqual(validate_dependency_graph(graph), [])
@@ -47,7 +46,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                         "thinws-core",
                         "thinws-ports",
                         "rusqlite",
-                        "tempfile",
+                        "serde_json",
                     },
                 }
             ),
@@ -69,7 +68,6 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                         "thinws-ports",
                         "rustix",
                         "serde",
-                        "tempfile",
                         "toml",
                     }
                 }
@@ -89,7 +87,6 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                         "clap",
                         "directories",
                         "serde_json",
-                        "tempfile",
                         "thinws-adapter-macos",
                         "thinws-application",
                         "thinws-metadata-sqlite",
@@ -171,6 +168,32 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "thinws-core must not depend on thinws-adapter-macos",
                 "thinws-core must not depend on thinws-p0-probe",
             ],
+        )
+
+    @patch("tools.check_crate_dependencies.subprocess.run")
+    def test_metadata_extraction_excludes_test_only_dependencies(self, run) -> None:
+        run.return_value.stdout = json.dumps(
+            {
+                "workspace_members": ["application-id"],
+                "packages": [
+                    {
+                        "id": "application-id",
+                        "name": "thinws-application",
+                        "manifest_path": "/repo/crates/thinws-application/Cargo.toml",
+                        "dependencies": [
+                            {"name": "thinws-core", "kind": None},
+                            {"name": "thinws-ports", "kind": None},
+                            {"name": "thinws-adapter-macos", "kind": "dev"},
+                            {"name": "tempfile", "kind": "dev"},
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            load_product_graph(Path("/repo")),
+            {"thinws-application": {"thinws-core", "thinws-ports"}},
         )
 
 

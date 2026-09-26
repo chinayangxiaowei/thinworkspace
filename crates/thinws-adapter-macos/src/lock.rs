@@ -89,16 +89,31 @@ fn acquire(
     timeout: Duration,
 ) -> Result<MacOsLockGuard, PortError> {
     let parent = open_private_directory(&parent_path)?;
-    let fd = rustix::fs::openat(
-        &parent.fd,
-        &name,
-        LOCK_OPEN_FLAGS,
-        Mode::from_bits_retain(0o600),
-    )
-    .map_err(|error| io_error("open lifecycle lock", error))?;
+    let started = Instant::now();
+    let fd = loop {
+        match rustix::fs::openat(
+            &parent.fd,
+            &name,
+            LOCK_OPEN_FLAGS,
+            Mode::from_bits_retain(0o600),
+        ) {
+            Ok(fd) => break fd,
+            // Concurrent first-use create-if-missing can transiently report
+            // ENOENT on APFS. Retry only while the held parent still names
+            // the validated directory; never reinterpret another errno.
+            Err(error @ rustix::io::Errno::NOENT) => {
+                if retry_open_before_deadline(started.elapsed(), timeout) {
+                    revalidate_directory(&parent)?;
+                    thread::sleep(retry_delay(timeout, started.elapsed()));
+                    continue;
+                }
+                return Err(io_error("open lifecycle lock", error));
+            }
+            Err(error) => return Err(io_error("open lifecycle lock", error)),
+        }
+    };
     let mut file = File::from(fd);
     let identity = validate_private_file(&file, "validate lifecycle lock")?;
-    let started = Instant::now();
     loop {
         match classify_lock_attempt(rustix::fs::flock(
             file.as_fd(),
@@ -165,6 +180,10 @@ fn retry_delay(timeout: Duration, elapsed: Duration) -> Duration {
         .min(Duration::from_millis(5))
 }
 
+fn retry_open_before_deadline(elapsed: Duration, timeout: Duration) -> bool {
+    elapsed < timeout
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -194,6 +213,23 @@ mod tests {
             retry_delay(Duration::from_millis(10), Duration::from_millis(8)),
             Duration::from_millis(2)
         );
+    }
+
+    #[test]
+    fn first_lock_open_retry_stops_at_the_exact_deadline() {
+        assert!(retry_open_before_deadline(
+            Duration::from_millis(9),
+            Duration::from_millis(10)
+        ));
+        assert!(!retry_open_before_deadline(
+            Duration::from_millis(10),
+            Duration::from_millis(10)
+        ));
+        assert!(!retry_open_before_deadline(
+            Duration::from_millis(11),
+            Duration::from_millis(10)
+        ));
+        assert!(!retry_open_before_deadline(Duration::ZERO, Duration::ZERO));
     }
 
     #[test]

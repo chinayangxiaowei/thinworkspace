@@ -4,6 +4,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use tempfile::Builder;
@@ -17,8 +18,8 @@ use thinws_core::{
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 use thinws_ports::{
-    MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, PortError,
-    PortErrorKind, WorkspaceMaterializer,
+    LifecycleLock, MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe,
+    PortError, PortErrorKind, WorkspaceMaterializer,
 };
 
 fn absolute(path: &std::path::Path) -> AbsolutePath {
@@ -360,6 +361,176 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
         Some(FallbackReason::CloneUnavailableAtRuntime)
     );
     assert_eq!(allowed.materialization().failed_attempt_count(), 1);
+}
+
+#[test]
+fn p1_09_preview_is_read_only_and_has_no_workspace_identity() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-preview-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"preview source").unwrap();
+    let data_root = temp.path().join("data-root");
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let service = ThinWorkspaceService::new(
+        adapter,
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    let preview = service
+        .preview_create(&CreateRequest::new(
+            absolute(&source),
+            WorkspaceName::from_str("preview-only").unwrap(),
+            false,
+            UnixMillis::new(1_700_000_000_100).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(preview.effective_mode(), MaterializationMode::CowClone);
+    assert_eq!(preview.selected_adapter(), MaterializerKind::ApfsFileClone);
+    assert_eq!(preview.source_volume_id(), preview.target_volume_id());
+    assert_eq!(
+        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
+        0
+    );
+    assert!(!data_root.join("metadata/lifecycle.lock").exists());
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+}
+
+#[test]
+fn p1_09_concurrent_same_name_has_one_creation_and_one_idempotent_result() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-concurrent-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file.txt"), b"race-free content").unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let data_root = temp.path().join("data-root");
+    let setup = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    );
+    setup
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let barrier = barrier.clone();
+        let adapter = adapter.clone();
+        let source = absolute(&source);
+        threads.push(std::thread::spawn(move || {
+            let service = ThinWorkspaceService::new(
+                adapter.clone(),
+                SqliteMetadataStoreFactory,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            );
+            let clone = ApfsCloneMaterializer::new(adapter.clone());
+            let copy = FullCopyMaterializer::new(adapter);
+            barrier.wait();
+            service
+                .create(
+                    CreateRequest::new(
+                        source,
+                        WorkspaceName::from_str("one-name").unwrap(),
+                        false,
+                        UnixMillis::new(1_700_000_000_100).unwrap(),
+                    ),
+                    &clone,
+                    &copy,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{error}; source: {:?}; cause: {:?}",
+                        error.source(),
+                        error.source().and_then(Error::source)
+                    )
+                })
+        }));
+    }
+    barrier.wait();
+    let first = threads.remove(0).join().unwrap();
+    let second = threads.remove(0).join().unwrap();
+    assert_ne!(first.created(), second.created());
+    assert_eq!(
+        first.record().reservation().workspace_id(),
+        second.record().reservation().workspace_id()
+    );
+    assert_eq!(
+        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
+        1
+    );
+}
+
+#[test]
+fn p1_09_data_root_lock_timeout_precedes_name_reservation() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-lock-timeout-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let data_root = temp.path().join("data-root");
+    let service = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    let held = adapter
+        .acquire_data_root(&absolute(&data_root), Duration::from_secs(1))
+        .unwrap();
+    let error = service
+        .create(
+            CreateRequest::new(
+                absolute(&source),
+                WorkspaceName::from_str("lock-timeout").unwrap(),
+                false,
+                UnixMillis::new(1_700_000_000_100).unwrap(),
+            ),
+            &ApfsCloneMaterializer::new(adapter.clone()),
+            &FullCopyMaterializer::new(adapter),
+        )
+        .unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::LockTimeout);
+    drop(held);
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+    assert_eq!(
+        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
+        0
+    );
 }
 
 #[test]

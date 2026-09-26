@@ -5,7 +5,8 @@
 
 mod create;
 
-pub use create::{CreateOutcome, CreateRequest};
+pub use create::{CreateOutcome, CreatePreview, CreateRequest};
+pub use thinws_core::{CowEvidence, FallbackReason, MaterializationMode, MaterializerKind};
 
 use std::error::Error;
 use std::fmt;

@@ -1,8 +1,10 @@
 use std::ffi::OsString;
 
 use serde_json::Value;
-use thinws_application::{DoctorOutcome, InitOutcome, InitRequest, UseCaseError, UseCases};
-use thinws_cli::{ApplicationCommands, Commands, DoctorView, ErrorView, InitView, run};
+use thinws_cli::{
+    Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, InitView,
+    LocalCommands, run,
+};
 
 struct FakeCommands;
 
@@ -23,6 +25,43 @@ impl Commands for FakeCommands {
             volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
             incomplete_workspaces: 2,
         })
+    }
+
+    fn create(
+        &self,
+        source: Vec<u8>,
+        name: String,
+        _allow_copy: bool,
+        dry_run: bool,
+        _now_ms: i64,
+    ) -> Result<CreateView, ErrorView> {
+        if dry_run {
+            Ok(CreateView::Preview(CreatePreviewView {
+                name,
+                source,
+                target_parent: b"/Volumes/data/thinws-data/workspaces".to_vec(),
+                source_volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                target_volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                effective_mode: "cow-clone".to_owned(),
+                selected_adapter: "apfs-file-clone".to_owned(),
+                fallback_reason: None,
+            }))
+        } else {
+            Ok(CreateView::Ready(CreateReadyView {
+                workspace_id: "ws_019a0000-0000-7000-8000-000000000001".to_owned(),
+                name,
+                source,
+                path: b"/Volumes/data/thinws-data/workspaces/ws_019a0000-0000-7000-8000-000000000001/root".to_vec(),
+                created: true,
+                requested_mode: "cow-clone".to_owned(),
+                effective_mode: "cow-clone".to_owned(),
+                actual_mode: "cow-clone".to_owned(),
+                adapter: "apfs-file-clone".to_owned(),
+                cow: "confirmed".to_owned(),
+                fallback_reason: None,
+                failed_attempt_count: 0,
+            }))
+        }
     }
 }
 
@@ -53,6 +92,17 @@ impl Commands for FailingCommands {
     fn doctor(&self) -> Result<DoctorView, ErrorView> {
         Err(error(self.0))
     }
+
+    fn create(
+        &self,
+        _source: Vec<u8>,
+        _name: String,
+        _allow_copy: bool,
+        _dry_run: bool,
+        _now_ms: i64,
+    ) -> Result<CreateView, ErrorView> {
+        Err(error(self.0))
+    }
 }
 
 fn error(code: &str) -> ErrorView {
@@ -64,17 +114,7 @@ fn error(code: &str) -> ErrorView {
     }
 }
 
-struct PanicUseCases;
-
-impl UseCases for PanicUseCases {
-    fn init(&self, _request: InitRequest) -> Result<InitOutcome, UseCaseError> {
-        panic!("invalid CLI input must not reach Application orchestration")
-    }
-
-    fn doctor(&self) -> Result<DoctorOutcome, UseCaseError> {
-        panic!("not used by this contract test")
-    }
-}
+// Concrete path validation is exercised through LocalCommands in E2E tests.
 
 #[test]
 fn init_human_and_json_outputs_match_the_frozen_contract() {
@@ -186,7 +226,57 @@ fn p1_03_public_errors_keep_their_frozen_exit_statuses() {
 
 #[test]
 fn application_command_adapter_rejects_noncanonical_path_before_the_use_case() {
-    let commands = ApplicationCommands::new(PanicUseCases);
+    let commands = LocalCommands::new(None);
     let error = commands.init(b"relative/path".to_vec(), 1).unwrap_err();
     assert_eq!(error.code, "E_USAGE");
+    let error = commands
+        .create(b"relative/path".to_vec(), "one".to_owned(), false, false, 1)
+        .unwrap_err();
+    assert_eq!(error.code, "E_USAGE");
+}
+
+#[test]
+fn workspace_create_and_preview_render_distinct_execution_facts() {
+    let (status, stdout, stderr) = execute(&[
+        "thinws",
+        "workspace",
+        "create",
+        "--source",
+        "/Volumes/data/source",
+        "--name",
+        "one",
+    ]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    let human = String::from_utf8(stdout).unwrap();
+    assert!(human.contains("Workspace ready\n"));
+    assert!(human.contains("Actual mode:     cow-clone\n"));
+    assert!(human.contains("CoW:             confirmed\n"));
+    assert!(human.contains("Git setup:       not performed\n"));
+
+    let (status, stdout, stderr) = execute(&[
+        "thinws",
+        "--json",
+        "workspace",
+        "create",
+        "--source",
+        "/Volumes/data/source",
+        "--name",
+        "one",
+        "--dry-run",
+    ]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    let preview: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(preview["data"]["workspace_id"], Value::Null);
+    assert_eq!(preview["data"]["dry_run"], true);
+    assert_eq!(
+        preview["data"]["materialization"]["effective_planned_mode"],
+        "cow-clone"
+    );
+    assert!(
+        preview["data"]["materialization"]
+            .get("actual_mode")
+            .is_none()
+    );
 }

@@ -7,10 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tempfile::{Builder, TempDir};
-use thinws_adapter_macos::MacOsHostAdapter;
-use thinws_application::ThinWorkspaceService;
-use thinws_cli::{ApplicationCommands, run};
-use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
+use thinws_cli::{LocalCommands, run};
 
 fn apfs_tempdir(prefix: &str) -> TempDir {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-03-cli-tests");
@@ -27,14 +24,8 @@ fn private_dir(path: &Path) {
 }
 
 fn execute(bootstrap: &Path, arguments: Vec<OsString>) -> (i32, Vec<u8>, Vec<u8>) {
-    let adapter = MacOsHostAdapter::new(bootstrap).unwrap();
-    let service = ThinWorkspaceService::new(
-        adapter,
-        SqliteMetadataStoreFactory,
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
-    let commands = ApplicationCommands::new(service);
+    let commands = LocalCommands::new(Some(bootstrap.to_path_buf()))
+        .with_timeouts(Duration::from_secs(1), Duration::from_secs(1));
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let status = run(

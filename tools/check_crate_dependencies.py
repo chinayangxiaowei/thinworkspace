@@ -25,16 +25,15 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-metadata-sqlite": frozenset({"thinws-core", "thinws-ports"}),
 }
 
-# P1-01 freezes Core's complete direct dependency surface. Other product
-# crates add their external allowlist when their own implementation task begins.
+# Production dependency edges only; integration-test adapters remain dev dependencies.
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-adapter-macos": frozenset(
-        {"blake3", "libc", "rustix", "serde", "tempfile", "toml"}
+        {"blake3", "libc", "rustix", "serde", "toml"}
     ),
     "thinws-application": frozenset(),
-    "thinws-cli": frozenset({"clap", "directories", "serde_json", "tempfile"}),
+    "thinws-cli": frozenset({"clap", "directories", "serde_json"}),
     "thinws-core": frozenset({"thiserror", "uuid"}),
-    "thinws-metadata-sqlite": frozenset({"rusqlite", "tempfile"}),
+    "thinws-metadata-sqlite": frozenset({"rusqlite", "serde_json"}),
     "thinws-ports": frozenset(),
 }
 
@@ -87,7 +86,11 @@ def load_product_graph(repository: Path) -> dict[str, set[str]]:
         if _is_product_path(repository, package["manifest_path"])
     }
     return {
-        package["name"]: {dependency["name"] for dependency in package["dependencies"]}
+        package["name"]: {
+            dependency["name"]
+            for dependency in package["dependencies"]
+            if dependency.get("kind") != "dev"
+        }
         for package in product_packages.values()
     }
 

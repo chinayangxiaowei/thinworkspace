@@ -308,6 +308,28 @@ P1-09 Application 定向补跑启动记录（2026-09-25 22:31 UTC）：基线 `7
 
 补跑实际约 32 秒完成：25 caught、0 missed/unviable/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `12edd7c628ad5b15cbef0772222ed4e6245c319aa98c0f0ea061c3f16a7d7104`、`6b97a9d645aed93a967907d319f2493555b731bbcc678b9590ce5229410d4af7`。先前 11 个存活分支均被简化后的逻辑或对应单因素测试覆盖；真实 Application 测试另证明默认 CoW、同名幂等、运行时干净回滚才允许显式 Full Copy、非 CoW 失败不降级、跨卷和包含关系预留前拒绝。此结果只覆盖 Application 子结果，仍须公开 CLI、dry-run、任务终审及阶段门禁。
 
+P1-09 只读预览与 CLI 候选（进行中）：Application `preview_create` 在已验证实例上只读探测现有 `workspaces/` 父目录及四条实际路径，不分配 ID、不取会创建文件的生命周期锁、不预留名称或持久化计划。CLI 的本机装配入口统一为 `LocalCommands`，实现公开 `workspace create [--allow-copy] [--dry-run]` 与人类/JSON 输出。真实 APFS 命令级 E2E 通过：预览无目录/锁文件写入、创建原样复制普通 `.git`/ignored/未跟踪文件和符号链接、副本写入与来源隔离、来源移走后的同名幂等、同名参数冲突与跨卷（含 `--allow-copy`）拒绝。fmt、全目标/全 feature Clippy 与全 workspace 普通测试通过；本候选尚须定向变异、供应链/发布相关门禁与独立终审，不能标记 P1-09 Done。
+
+P1-09 预览/CLI 定向变异启动记录（2026-09-25 22:41 UTC）：基线 `3731cb9` 上已暂存代码/测试/用户手册差异 SHA-256 `90d2e0b34d0a53bc1eeaf093f1b7e2c3d403ed4c29d597b1195936f574a20226`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，精确筛选 `preview_create`、共享 `select_plan` 和 CLI `run`、人类/JSON renderer 共 11 个变异，验证包为 `thinws-application` 与 `thinws-cli`，结果放在 `target/p1-09-preview-cli-mutants/mutants.out`。前批同机 25 个约 32 秒，本批含两套测试包和重构后的 CLI，保守预计 22:43 UTC 首次主动查看；此前不轮询或改动冻结候选。
+
+该批实际约 40 秒完成：9 caught、2 unviable、0 missed/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `d20809d57dce68e60002d0ea68f9b9c9454667a38994d6604705428fd8042fc8`、`03d1a08e924c674cda697b63430587e797ef9b858d2b4241f7b0636c82388982`。候选通过的仅是预览/CLI 受影响函数；P1-09 验收断言中的并发名称、锁超时、SQLite 提交失败和适用 fuzz 等仍需单独证据，不能据此完成任务。
+
+P1-09 并发与最终提交故障验证（进行中）：真实并发创建暴露首次同时打开 data-root lifecycle lock 时，macOS/APFS 的 `openat(O_CREAT)` 偶发 `ENOENT`；Adapter 层精确 RED 后只对该 errno、父目录身份不变且调用时限未满的情况有界重试，不改变其他 I/O 错误映射。独立 Adapter 首次并发锁测试已 GREEN，Application 双创建同名仅一份新物化、另一份幂等，二者各重复 20 轮无失败；锁超时发生在名称预留前。注入 final SQLite commit 失败时，即使克隆已完成也只保留非 Ready 行并拒绝同名自动重试。相关断言均为当前未提交候选，不能代替独立审核。
+
+P1-09 首次并发锁精确变异启动记录（2026-09-25 23:54 UTC）：基线 `3731cb9` 上当前已暂存代码/测试/用户手册差异 SHA-256 `84e9b28e3ec56a39bf3019df8345b7c909c92b0cf9feed99f6887d3778458126`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，仅筛选 `lock.rs:104` 有界 `ENOENT` 重试守卫的 5 个变异，验证包 `thinws-adapter-macos` 和 `thinws-application`，结果 `target/p1-09-first-lock-mutants/mutants.out`。前次 11 个跨双包约 40 秒，本批有 12 轮同测并发，预计 23:57 UTC 首次主动查看；此前不轮询或修改冻结候选。
+
+该批实际约 41 秒完成：3 caught、2 missed、0 timeout，退出码 2；`outcomes.json`/`mutants.json` SHA-256 分别为 `6d3e06a9256e294e861911fb9eba4e755843c522f7af451dcc9b9b9605984bbd`、`2e4999162f594cbab024ed8f62d55c9ecee8cd94699a6c21de66f4fafc85db05`。存活项分别把时限判断替换为恒真及 `<` 变为 `<=`；并发测试证实正常竞态恢复，却无法构造持久 `ENOENT` 或精确时限等值。须补纯时限边界测试并定向重跑，不把本批视为通过。
+
+P1-09 首次并发锁时限补跑启动记录（2026-09-25 23:59 UTC）：基线 `3731cb9` 上新的已暂存差异 SHA-256 `3ebf132fd0a8efadc44ff601b76e39c934d4ea5d5d814dfadc7111d44a358ace`；主 Agent 单独执行，平台/工具/配置及双验证包同前批，并发 4，只选取 `lock.rs:105` 调用点和 `retry_open_before_deadline` 纯边界的 6 个变异，结果 `target/p1-09-first-lock-followup/mutants.out`。前批 5 个约 41 秒，预计 2026-09-26 00:02 UTC 首次主动查看；此前不轮询或修改冻结候选。
+
+该批实际约 33 秒完成：5 caught、1 missed、0 timeout，退出码 2；`outcomes.json`/`mutants.json` SHA-256 分别为 `8a49493339d2e5b69f59026de9fa9734f55f33d9bd46c313782a003342a1e650`、`000b9d3689cfc2f44442994b033918dc1b970b8e994ad6d4cdea4450f5b0375c`。唯一存活项删除调用点的 `!`，使有界条件反转；并发首用随机时序在变异运行中未稳定命中这一窗口。改用更直接的“时限内明确继续，否则返回原错误”分支表达后补测其影响范围，不以第一批或本批宣称全部通过。
+
+P1-09 首次并发锁最终定向补跑启动记录（2026-09-26 00:03 UTC）：基线 `3731cb9` 上当前已暂存差异 SHA-256 `b5aba3292b791250c1bb8d47028a8a5400a8b467342545cd7eecdb5848bf32f8`；主 Agent 单独执行，macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、仓库配置、并发 4、gitignore 开启，只选择 `retry_open_before_deadline` 5 个剩余变异，验证包 `thinws-adapter-macos`、`thinws-application`，结果 `target/p1-09-first-lock-deadline/mutants.out`。前批 6 个约 33 秒，预计 00:05 UTC 首次主动查看，期间不轮询或修改冻结候选。
+
+最终补跑实际约 32 秒完成：5 caught、0 missed/unviable/timeout，退出码 0；`outcomes.json`/`mutants.json` SHA-256 分别为 `b7d2115968016877307e8ab905d5e16f81d23507c13a48e703139a6db2dd07ba`、`731af325d628369c76f2a0ab87e04422ee4a773db14dfb4eff3c2b5996ef8df3`。前两批未捕获的时限语义经单因素边界测试和正向分支重写后已覆盖；并发首用与 Application 双创建各 20 轮真实 APFS 重复执行无失败。该证据只针对锁变更，不代替 P1-09 全部交付门禁。
+
+P1-09 候选补充验证（2026-09-26 UTC，macOS arm64、Rust 1.97.1）：新建 `thinws_create_request` 纯输入 fuzz target，使用 `nightly-2026-08-14` 和 libFuzzer 运行 60 秒，实际 61 秒、15,134,260 次执行、退出码 0，无 crash/hang；生成语料移出仓库暂存目录，未把随机语料作为回归样本提交。该 target 只覆盖 CreateRequest 输入边界，不声称覆盖 APFS/SQLite/锁时序。Debug/Release 全 workspace 测试、fmt、全目标/全 feature Clippy、rustdoc、30 项工具测试、crate 生产依赖方向检查、`cargo deny check`、离线 `cargo audit --no-fetch` 和 `git diff --check` 均退出 0；deny 只有既有的未命中 allowance/exception 警告，audit 使用本地 1261 条 advisory。新发现依赖检查器把 dev-dependencies 当生产依赖、遗漏已使用的 `serde_json`，已加分类回归并修正；CLI 创建结果枚举改由 Application 公共 API 暴露，避免 CLI 直接依赖 Core。真实跨卷 P1 Probe/Store 用例以 `/private/tmp` ↔ `/Volumes/data` 通过；仓库已在 `/Volumes/data`，P0 两项显式跨卷夹具改用 `/private/tmp` 后通过（首次误将 `/Volumes/data` 当异卷，仅触发夹具前置断言）。真实同卷 APFS Clone/Full Copy、CLI `.git` 原样内容、写隔离、幂等、故障注入和并发见上述测试。未执行真实子挂载创建、线上 CI/PR/push；本候选仍待精确提交后的 GPT-6 Astra `xhigh` 只读独立审核，不提前标记 Done。
+
 ### 4.4 P1.d 查询与路径交付
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

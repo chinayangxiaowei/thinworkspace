@@ -394,7 +394,7 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Review |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | Done |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
@@ -475,7 +475,9 @@ P1-12 CLI 告警渲染定向变异启动记录（2026-09-26 19:56 UTC）：同�
 
 CLI 告警结果：实际 19:56:27–19:56:44 UTC，约 16 秒，按预计 19:58 UTC 一次读取；5 个为 4 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `0d1e85e1ae9900a9ad5bd34b0c195c08257b840577008400e42b38b208fcb411`、`bf56f90d826576fe7674833c6cca4eb17a13f7dc6ac7882cf9ecfaf14c457fdf`。本批与前述 Core/Adapter/Application 的定向证据只覆盖 P1-12 本次受影响代码，不取代 P1.e 小阶段或 Phase 1 的全范围门禁。
 
-P1-12 审核修订候选终检（2026-09-26 UTC，macOS/APFS）：`cargo fmt --all -- --check`、`git diff --check`、全目标全 feature Clippy、带 `/Volumes/data` P1 异卷端和 `/private/tmp` P0 异卷参数的全 workspace/all-targets 普通测试均退出 0；P0 的 ignored 异卷实验不会因提供环境变量而在普通测试中自动执行。release 配置的真实 CLI remove E2E 4 项与告警渲染单测 1 项通过；bootstrap 30 项含新增日志异常组合及字段断言通过。根和 fuzz workspace 无新增直接依赖；两 workspace 的 deny 与离线 audit、所改文档 harness 单文件 rustfmt 均通过，deny 只有既有未命中例外/allowance 提示。Core、Adapter 日志、Application、CLI 的受影响变异按本节分批证据闭合，归属 TOML 文档 fuzz 短预算退出 0。专用 submount、P1.e 小阶段受影响 crate 全量变异和阶段长预算 fuzz、线上 CI/PR/push 未执行；它们不作为本任务候选已通过项。此本地提交仍待 GPT-6 Astra / `xhigh` 精确独立复核，通过后才进入 Verification/Done。
+P1-12 审核修订候选终检（2026-09-26 UTC，macOS/APFS）：`cargo fmt --all -- --check`、`git diff --check`、全目标全 feature Clippy、带 `/Volumes/data` P1 异卷端和 `/private/tmp` P0 异卷参数的全 workspace/all-targets 普通测试均退出 0；P0 的 ignored 异卷实验不会因提供环境变量而在普通测试中自动执行。release 配置的真实 CLI remove E2E 4 项与告警渲染单测 1 项通过；bootstrap 30 项含新增日志异常组合及字段断言通过。根和 fuzz workspace 无新增直接依赖；两 workspace 的 deny 与离线 audit、所改文档 harness 单文件 rustfmt 均通过，deny 只有既有未命中例外/allowance 提示。Core、Adapter 日志、Application、CLI 的受影响变异按本节分批证据闭合，归属 TOML 文档 fuzz 短预算退出 0。专用 submount、P1.e 小阶段受影响 crate 全量变异和阶段长预算 fuzz、线上 CI/PR/push 未执行；它们不作为本任务候选已通过项。此时本地候选尚待 GPT-6 Astra / `xhigh` 精确独立复核，未进入 Verification/Done。
+
+P1-12 任务级审核与 Verification（2026-09-26 UTC，macOS/APFS）：GPT-6 Astra / `xhigh` 对干净 `main` 的精确实现提交 `e31bf72d14f95a5d195adf12fd2a7ebe8f77f5f2` 只读独立审核为 Approve；上轮三项问题均关闭，未发现新的可操作问题。审核者独立运行 62 项定向测试通过，并核对已记录的定向变异和归属解析 fuzz 证据；未重新运行变异、fuzz 或全量门禁。主 Agent 在审核通过后进入 Verification，以 release 配置重跑真实 CLI remove E2E 4 项、Application remove 13 项和 CLI 拒绝告警单测 1 项，全部通过；此前同一候选的 fmt、Clippy、全 workspace/all-targets 普通测试及适用定向变异、短预算 fuzz 结果见上文。P1-12 已完成本地提交与任务级验收，工作树无待清理任务数据；P1-13、P1-14、P1-15 仍在 Backlog。专用 submount、P1.e 小阶段受影响 crate 全量变异、阶段长预算 fuzz 和线上 CI/PR/push 未执行，本结论不放行 P1.e 或 Phase 1。
 
 ### 4.6 P1.f 契约与发布
 

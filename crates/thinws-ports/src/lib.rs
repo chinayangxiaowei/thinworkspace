@@ -14,7 +14,8 @@ pub use bootstrap::{
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
 pub use materialization::{
-    MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, WorkspaceMaterializer,
+    MaterializationFailure, MaterializationPathProbeRequest, MaterializationPathRole,
+    PlatformProbe, WorkspaceMaterializer,
 };
 pub use metadata::{
     FinalMaterializationSummary, MetadataSnapshot, MetadataStore, MetadataStoreFactory,

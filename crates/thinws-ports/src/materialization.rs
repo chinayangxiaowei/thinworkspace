@@ -8,6 +8,19 @@ use thinws_core::{
 
 use crate::PortError;
 
+/// Which path in a combined materialization probe caused a Port failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaterializationPathRole {
+    /// Original source directory.
+    Source,
+    /// Controlled target directory or its future location.
+    TargetRoot,
+    /// Controlled staging directory.
+    Staging,
+    /// Controlled rollback trash directory.
+    Trash,
+}
+
 /// Four actual path roles inspected together for one materialization decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterializationPathProbeRequest {

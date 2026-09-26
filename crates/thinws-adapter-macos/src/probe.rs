@@ -6,7 +6,10 @@ use thinws_core::{
     FileSystemIdentity, HostCapabilityReport, MaterializationPathReport, MaterializerKind,
     MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest, SupportState,
 };
-use thinws_ports::{MaterializationPathProbeRequest, PlatformProbe, PortError, PortErrorKind};
+use thinws_ports::{
+    MaterializationPathProbeRequest, MaterializationPathRole, PlatformProbe, PortError,
+    PortErrorKind,
+};
 
 use crate::MacOsHostAdapter;
 use crate::ffi::{
@@ -45,10 +48,18 @@ impl PlatformProbe for MacOsHostAdapter {
         &self,
         request: &MaterializationPathProbeRequest,
     ) -> Result<MaterializationPathReport, PortError> {
-        let source = inspect_path(request.source())?;
-        let target_root = inspect_path(request.target_root())?;
-        let staging = inspect_path(request.staging())?;
-        let trash = inspect_path(request.trash())?;
+        let source = inspect_path(request.source()).map_err(|error| {
+            error.with_materialization_path_role(MaterializationPathRole::Source)
+        })?;
+        let target_root = inspect_path(request.target_root()).map_err(|error| {
+            error.with_materialization_path_role(MaterializationPathRole::TargetRoot)
+        })?;
+        let staging = inspect_path(request.staging()).map_err(|error| {
+            error.with_materialization_path_role(MaterializationPathRole::Staging)
+        })?;
+        let trash = inspect_path(request.trash()).map_err(|error| {
+            error.with_materialization_path_role(MaterializationPathRole::Trash)
+        })?;
         let (state, reasons) = combined_clone_support(&source, &target_root, &staging, &trash);
         let candidate = CandidateEvidence::new(MaterializerKind::ApfsFileClone, state, reasons);
         let (copy_state, copy_reasons) =

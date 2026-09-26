@@ -19,7 +19,8 @@ use thinws_core::{
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard,
-    MetadataStoreFactory, PortError, PortErrorKind, PreparedDataRootEvidence,
+    MaterializationPathRole, MetadataStoreFactory, PortError, PortErrorKind,
+    PreparedDataRootEvidence,
 };
 
 /// Public initialization request after CLI path validation.
@@ -441,7 +442,12 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         PortErrorKind::Timeout => ErrorCode::LockTimeout,
         PortErrorKind::CapabilityUnavailable => ErrorCode::CapabilityUnavailable,
         PortErrorKind::NotEmpty => ErrorCode::DataRootNotEmpty,
-        PortErrorKind::Unavailable if matches!(stage, Stage::Source) => ErrorCode::Filesystem,
+        PortErrorKind::Unavailable
+            if matches!(stage, Stage::Source)
+                || error.materialization_path_role() == Some(MaterializationPathRole::Source) =>
+        {
+            ErrorCode::Filesystem
+        }
         PortErrorKind::Unavailable => ErrorCode::DataRootUnavailable,
         PortErrorKind::InvalidLayout => ErrorCode::DataRootLayout,
         PortErrorKind::Io => ErrorCode::Filesystem,
@@ -490,5 +496,28 @@ fn semantic_error(code: ErrorCode, message: &'static str) -> UseCaseError {
         diagnostic: CoreError::new(code, message),
         source: None,
         partial_receipts: Box::default(),
+    }
+}
+
+#[cfg(test)]
+mod probe_error_tests {
+    use thinws_ports::{MaterializationPathRole, PortError, PortErrorKind};
+
+    use super::{ErrorCode, Stage, map_port};
+
+    #[test]
+    fn combined_source_failure_is_not_labeled_as_data_root_failure() {
+        let source = PortError::new(PortErrorKind::Unavailable, "open source path")
+            .with_materialization_path_role(MaterializationPathRole::Source);
+        assert_eq!(
+            map_port(Stage::Layout, source).diagnostic().code(),
+            ErrorCode::Filesystem
+        );
+        let target = PortError::new(PortErrorKind::Unavailable, "open target path")
+            .with_materialization_path_role(MaterializationPathRole::TargetRoot);
+        assert_eq!(
+            map_port(Stage::Layout, target).diagnostic().code(),
+            ErrorCode::DataRootUnavailable
+        );
     }
 }

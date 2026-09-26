@@ -52,6 +52,8 @@ trait PlatformProbe {
 
 `inspect_materialization_paths` 接收实际原始 source 目录、target root（不存在时为最近已存在 parent）、staging、trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
 
+组合 Probe 在任一路径探测失败时，结构化 Port 错误必须标明失败的 `source | target root | staging | trash` 角色，不携带原始路径字节。Application 据此区分来源不可访问与受控数据根不可访问；即使前一次单路径探测成功、两次探测间权限变化，也不能将来源失败误报为数据根不可用。
+
 Probe 不返回 `use_full_copy=true` 之类产品决策。
 
 ### 3.2 WorkspaceMaterializer

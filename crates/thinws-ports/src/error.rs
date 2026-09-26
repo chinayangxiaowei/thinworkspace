@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::materialization::MaterializationPathRole;
+
 /// Stable high-level classification shared by Phase 1 Port failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortErrorKind {
@@ -48,6 +50,7 @@ pub struct PortError {
     kind: PortErrorKind,
     operation: &'static str,
     conflict: Option<PortConflict>,
+    materialization_path_role: Option<MaterializationPathRole>,
     source: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
@@ -59,6 +62,7 @@ impl PortError {
             kind,
             operation,
             conflict: None,
+            materialization_path_role: None,
             source: None,
         }
     }
@@ -70,6 +74,7 @@ impl PortError {
             kind: PortErrorKind::Conflict,
             operation,
             conflict: Some(conflict),
+            materialization_path_role: None,
             source: None,
         }
     }
@@ -105,6 +110,19 @@ impl PortError {
     pub const fn conflict_kind(&self) -> Option<PortConflict> {
         self.conflict
     }
+
+    /// Attaches the role that failed during a combined materialization probe.
+    #[must_use]
+    pub fn with_materialization_path_role(mut self, role: MaterializationPathRole) -> Self {
+        self.materialization_path_role = Some(role);
+        self
+    }
+
+    /// Returns the failed role, without exposing the path bytes.
+    #[must_use]
+    pub const fn materialization_path_role(&self) -> Option<MaterializationPathRole> {
+        self.materialization_path_role
+    }
 }
 
 impl fmt::Debug for PortError {
@@ -114,6 +132,7 @@ impl fmt::Debug for PortError {
             .field("kind", &self.kind)
             .field("operation", &self.operation)
             .field("conflict", &self.conflict)
+            .field("materialization_path_role", &self.materialization_path_role)
             .field("has_source", &self.source.is_some())
             .finish()
     }

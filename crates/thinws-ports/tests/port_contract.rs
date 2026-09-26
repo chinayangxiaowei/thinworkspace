@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use thinws_ports::{PortConflict, PortError, PortErrorKind};
+use thinws_ports::{MaterializationPathRole, PortConflict, PortError, PortErrorKind};
 
 #[derive(Debug)]
 struct SensitiveSource;
@@ -30,4 +30,16 @@ fn port_error_keeps_typed_classification_and_source_without_leaking_it() {
     assert!(debug.contains("WorkspaceName"));
     assert!(debug.contains("has_source: true"));
     assert!(!debug.contains("/Users"));
+}
+
+#[test]
+fn materialization_probe_error_keeps_path_role_without_exposing_a_path() {
+    let error = PortError::new(PortErrorKind::Unavailable, "open path component")
+        .with_materialization_path_role(MaterializationPathRole::Source)
+        .with_source(SensitiveSource);
+    assert_eq!(
+        error.materialization_path_role(),
+        Some(MaterializationPathRole::Source)
+    );
+    assert!(!error.to_string().contains("/Users"));
 }

@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use tempfile::{Builder, TempDir};
@@ -9,7 +9,9 @@ use thinws_core::{
     AbsolutePath, FallbackPolicy, MaterializationPlan, MaterializationPlanError, PathResolution,
     SupportState,
 };
-use thinws_ports::{MaterializationPathProbeRequest, PlatformProbe, PortErrorKind};
+use thinws_ports::{
+    MaterializationPathProbeRequest, MaterializationPathRole, PlatformProbe, PortErrorKind,
+};
 
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
@@ -60,6 +62,38 @@ fn combined_probe_proves_a_same_volume_apfs_clone_plan_without_executing_it() {
     assert_ne!(report.evidence_digest().as_bytes(), [0; 32]);
     let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
     assert_eq!(plan.source_volume_id(), plan.target_volume_id());
+}
+
+#[test]
+fn combined_probe_identifies_source_that_lost_read_access_after_first_probe() {
+    let temp = controlled_root("source-access-race-");
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    let staging = temp.path().join("staging");
+    let trash = temp.path().join("trash");
+    for directory in [&source, &target, &staging, &trash] {
+        fs::create_dir(directory).unwrap();
+    }
+    let adapter = probe();
+    let first = adapter.inspect_path(&absolute(&source)).unwrap();
+    assert_eq!(first.readability(), SupportState::Supported);
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).unwrap();
+    let result = adapter.inspect_materialization_paths(&MaterializationPathProbeRequest::new(
+        absolute(&source),
+        absolute(&target),
+        absolute(&staging),
+        absolute(&trash),
+    ));
+    let error = match result {
+        Ok(_) => panic!("source without search permission must fail the combined probe"),
+        Err(error) => error,
+    };
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.kind(), PortErrorKind::Unavailable);
+    assert_eq!(
+        error.materialization_path_role(),
+        Some(MaterializationPathRole::Source)
+    );
 }
 
 #[test]

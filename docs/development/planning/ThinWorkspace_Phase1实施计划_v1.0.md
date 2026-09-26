@@ -525,7 +525,7 @@ P1-12 任务级审核与 Verification（2026-09-26 UTC，macOS/APFS）：GPT-6 A
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | In Review |
+| P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | Done |
 | P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | Backlog |
 
 小阶段退出：全部公开契约与发布二进制一致，未执行门禁和剩余风险已列出，进入人工阶段放行。
@@ -535,6 +535,8 @@ P1-14 领取（2026-09-26，macOS/APFS）：主 Agent 在干净的本地 `main`�
 P1-14 候选自测（2026-09-26，macOS/APFS）：`remove --help` 缺少手册已有的 `name:`/`id:` 消歧写法，新增测试先因精确短语缺失而 RED；只修正 clap 帮助文案后 GREEN。新增固定 FakeCommands fixture 逐命令检查成功 JSON envelope/顶层字段集、全表稳定错误码/退出码及完整错误 envelope、当前 help 命令树和旧命令/参数 E_USAGE；原有真实路径字节、JSON 拒绝及成功/失败 E2E 保留。用户手册现说明命令处于开发中、尚未发布；Changelog 移除旧“create 尚未接入”的过期表述。`cargo fmt --all -- --check`、全目标全 feature Clippy、`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --workspace --all-targets`、同环境 release `thinws-cli --tests`（契约 15 项、真实创建 3 项、初始化/doctor 6 项、查询 13 项、删除 4 项）、`cargo deny check` 和 `cargo audit --no-fetch` 均退出 0；deny 保留既有未命中许可 warning。生产代码只改由 doc comment 生成的 help，未改变解析器、状态或文件操作，因此没有受影响的生产变异目标或 fuzz harness，本任务不运行变异/fuzz。额外执行的 `python3 tools/check_crate_dependencies.py` 退出 1：既有 `thinws-adapter-macos` 生产依赖 `serde_json` 用于清理 JSONL，但脚本旧白名单未包含它；基线 `142ec74` 即如此，不是本任务引入，须另行修正后再用于阶段收口。P0 专用异卷/submount、阶段长预算门禁及线上 CI/PR/push 未执行；候选仍待精确提交只读审核与审核后的 Verification。
 
 P1-14 首轮独立审核纠偏（2026-09-26）：GPT-6 Astra / `xhigh` 对精确提交 `e82a83c02791ab2019ee7ab1da439de4687618b4` 给出 Changes requested，两项 P2 均为测试假阳性风险：旧 `--repo` 拒绝用例同时缺少必填 `--source`；成功 JSON fixture 只核对顶层字段，无法发现 `materialization`、`fallback`、`doctor.host`、list 条目或 Git 仓库摘要的嵌套漂移。主 Agent 已给 `--repo` 用例补齐其他合法创建参数，并对嵌套结构同时断言完整字段和值；修正后 Debug/Release 契约各 15 项、fmt、Clippy 与带真实 P1 异卷参数的全 workspace/all-targets 普通测试均退出 0。审核者对旧提交的 Changes requested 不用于放行；修正候选须重新绑定精确 commit 只读复核，未改变生产代码、依赖或工具配置。
+
+P1-14 任务级收口（2026-09-26）：GPT-6 Astra / `xhigh` 对精确修订提交 `e2fb8e7e20d552b9d4a3cbd9dde7cd632d7b91b4` 只读复核为 Approve，两项 P2 均已关闭；独立运行 CLI 契约 15 项及差异检查通过，未重复全仓或长门禁。主 Agent 随后在同一干净提交上以 `THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --release -p thinws-cli --tests` 进行 Verification：CLI 契约 15、真实创建 3、初始化/doctor 6、查询 13、删除 4 项全部退出 0，含旧命令 E_USAGE、原始路径与真实 APFS/Git 场景。P1-14 当前验收断言已满足，任务 Done；既有依赖白名单错误留给 P1-15 阶段收口前修正，不把本次额外失败检查写成通过，也不宣称 P1.f/Phase 1 已放行。线上 CI/PR/push、完整小阶段变异及阶段长预算 fuzz 未执行。
 
 ---
 

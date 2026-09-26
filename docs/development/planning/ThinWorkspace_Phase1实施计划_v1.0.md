@@ -435,6 +435,8 @@ P1-12 底层删除定向复测启动记录（2026-09-26 18:49 UTC）：上述生
 
 P1-12 底层修订独立复核：GPT-6 Astra / `xhigh` 对精确提交 `ff563873024fdcafd4fda2cb16b38c9b56fca8c5` 只读审核为 Approve，未发现 P0/P1/P2。审核者真实复验隔离后失去归属证明会停止删除并留下 Error/Started→Failed，修复证明后普通重试仍拒绝、新显式 force 可清理；外来同名对象保留。512/513 层在真实 Application 主线程分别成功/返回布局错误且保留隔离残留，类型替换为外部符号链接不越界；49 项定向测试含单独启用的真实异卷用例通过。审核者核对本批 28 caught、8 unviable、0 missed/timeout 的结果和哈希，但未重跑变异或全量门禁。当前结论仅关闭底层修订，不等于 P1-12 整体完成；Application/CLI 定向变异、适用 fuzz 与任务级收口仍待完成。
 
+P1-12 remove 参数 fuzz（2026-09-26 UTC）：新增纯内存 `thinws_remove_request` harness，对原始 UTF-8 输入及文本种子的无末尾换行版本核对普通名称、完整 ID、`name:`/`id:` 显式目标的接受性，并覆盖 force 标志与负时间错误码；输入不进入文件系统或删除 API。固定 `nightly-2026-08-14`、`cargo-fuzz` 0.12.0 在 macOS arm64 构建通过，以四个仓库种子、独立 `target/p1-12-remove-fuzz-corpus.9xkTQ2` 输出目录运行 `-max_total_time=30 -timeout=5`，31 秒完成 4,573,845 次，exit 0，无 crash/hang；生成语料保留在 target 而不批量提交。fuzz lockfile 仅补齐 Application 既有传递依赖 `serde_json`，没有新增直接依赖；fuzz manifest 的 `cargo deny check` 和本地 advisory 库的离线 `cargo audit` 均退出 0，deny 只有既有未命中例外/allowance 提示。单文件 rustfmt 检查通过；独立 fuzz workspace 的全量 fmt 检查发现两个未修改旧 harness 的既有格式差异，本任务未改动它们。该 smoke 仅验证公开 remove 参数解析，不代替 Git、路径和状态的其它既有 fuzz 目标，也不代表阶段长预算。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

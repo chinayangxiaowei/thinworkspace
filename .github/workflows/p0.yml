@@ -51,6 +51,7 @@ jobs:
           tools/test_ci_detach_image.py
           tools/test_ci_fuzz.py
           tools/test_ci_mutation.py
+          tools/test_ci_release_binary_e2e.py
       - name: Check crate dependency direction
         run: python3 -B tools/check_crate_dependencies.py
       - name: Lint

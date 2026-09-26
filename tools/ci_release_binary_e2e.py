@@ -22,6 +22,7 @@ def run_command(*arguments: str) -> subprocess.CompletedProcess[bytes]:
         cwd=REPO_ROOT,
         capture_output=True,
         check=False,
+        timeout=60,
     )
     if result.returncode != 0 or result.stderr:
         raise RuntimeError(
@@ -46,8 +47,13 @@ def require(value: bool, message: str) -> None:
 
 
 def main() -> int:
-    if sys.platform != "darwin" or os.environ.get("GITHUB_ACTIONS") != "true":
-        raise RuntimeError("release binary E2E is restricted to macOS CI")
+    # GITHUB_ACTIONS is also true on self-hosted runners, whose home persists.
+    if (
+        sys.platform != "darwin"
+        or os.environ.get("GITHUB_ACTIONS") != "true"
+        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        raise RuntimeError("release binary E2E requires a GitHub-hosted macOS runner")
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     config = Path.home() / "Library/Application Support/ThinWorkspace/config.toml"
     if config.exists() or config.is_symlink():

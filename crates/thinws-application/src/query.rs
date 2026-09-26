@@ -2,10 +2,12 @@
 
 use std::str::FromStr;
 
-use thinws_core::{AbsolutePath, ErrorCode, WorkspaceName, WorkspaceRecord, WorkspaceState};
+use thinws_core::{
+    AbsolutePath, ErrorCode, WorkspaceId, WorkspaceName, WorkspaceRecord, WorkspaceState,
+};
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, GitInspection,
-    GitInspector, LifecycleLock, MetadataSnapshot, MetadataStoreFactory,
+    GitInspector, LifecycleLock, MetadataSnapshot, MetadataStoreFactory, WorkspaceSpace,
 };
 
 use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error};
@@ -36,6 +38,7 @@ impl WorkspaceQuery {
 pub struct WorkspaceStatus {
     workspace: WorkspaceQuery,
     git: Option<GitInspection>,
+    space: Option<WorkspaceSpace>,
 }
 
 impl WorkspaceStatus {
@@ -49,6 +52,12 @@ impl WorkspaceStatus {
     #[must_use]
     pub const fn git(&self) -> Option<&GitInspection> {
         self.git.as_ref()
+    }
+
+    /// Returns current space evidence only for a verified Ready Workspace.
+    #[must_use]
+    pub const fn space(&self) -> Option<&WorkspaceSpace> {
+        self.space.as_ref()
     }
 }
 
@@ -99,6 +108,7 @@ where
             return Ok(WorkspaceStatus {
                 workspace,
                 git: None,
+                space: None,
             });
         };
         let inspection = git.inspect(&path);
@@ -109,6 +119,7 @@ where
             return Ok(WorkspaceStatus {
                 workspace: current,
                 git: None,
+                space: None,
             });
         };
         // Both validations require their path to equal the record's target;
@@ -119,10 +130,52 @@ where
                 "Ready Workspace changed during Git inspection",
             ));
         }
+        let space = self.measure_workspace_space(current.record().reservation().workspace_id())?;
+        // The read-only space scan can also outlive a concurrent lifecycle
+        // mutation; recheck before returning a usable Ready path.
+        let (after_space, after_space_path) = self.inspect_workspace(&name)?;
+        let Some(_) = after_space_path else {
+            return Ok(WorkspaceStatus {
+                workspace: after_space,
+                git: None,
+                space: None,
+            });
+        };
+        if after_space != current {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "Ready Workspace changed during space scan",
+            ));
+        }
         Ok(WorkspaceStatus {
-            workspace: current,
+            workspace: after_space,
             git: Some(inspection),
+            space: Some(space),
         })
+    }
+
+    fn measure_workspace_space(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceSpace, UseCaseError> {
+        let identity = self
+            .bootstrap
+            .read_config()
+            .map_err(|error| map_port(Stage::Bootstrap, error))?
+            .ok_or_else(|| {
+                semantic_error(
+                    ErrorCode::NotInitialized,
+                    "ThinWorkspace is not initialized",
+                )
+            })?;
+        let layout = self
+            .bootstrap
+            .validate_layout(&identity)
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        self.require_ready_marker(&identity)?;
+        self.bootstrap
+            .measure_ready_workspace_space(&layout, workspace_id)
+            .map_err(|error| map_port(Stage::Layout, error))
     }
 
     fn inspect_workspace(

@@ -34,6 +34,7 @@ struct State {
     workspaces: Vec<WorkspaceRecord>,
     final_materializations: Vec<(WorkspaceId, FinalMaterializationSummary)>,
     change_ready_during_validation: bool,
+    change_ready_during_measure: bool,
 }
 
 struct FakePrepared {
@@ -107,6 +108,14 @@ struct FakeBootstrap {
 
 struct StateChangingGit {
     state: Rc<RefCell<State>>,
+}
+
+struct StaticGit;
+
+impl GitInspector for StaticGit {
+    fn inspect(&self, _copy_root: &AbsolutePath) -> GitInspection {
+        GitInspection::new(DiscoveryCompleteness::Complete, Vec::new(), Vec::new())
+    }
 }
 
 impl GitInspector for StateChangingGit {
@@ -265,6 +274,24 @@ impl BootstrapStore for FakeBootstrap {
             change_first_workspace_to_error(&self.state);
         }
         Ok(record.reservation().target_path().clone())
+    }
+
+    fn measure_ready_workspace_space(
+        &self,
+        _layout: &Self::DataRootLayout,
+        _workspace_id: WorkspaceId,
+    ) -> Result<thinws_ports::WorkspaceSpace, PortError> {
+        self.state
+            .borrow_mut()
+            .events
+            .push("workspace.measure_space");
+        if self.state.borrow().change_ready_during_measure {
+            change_first_workspace_to_error(&self.state);
+        }
+        Ok(thinws_ports::WorkspaceSpace::Complete {
+            logical_bytes: 8,
+            allocated_bytes_estimate: 4096,
+        })
     }
 
     fn inspect_removal_container(
@@ -661,4 +688,33 @@ fn status_does_not_publish_ready_when_git_inspection_changes_the_state() {
     assert_eq!(status.workspace().record().state(), WorkspaceState::Error);
     assert!(status.git().is_none());
     assert!(state.borrow().events.contains(&"git.inspect"));
+}
+
+#[test]
+fn status_does_not_publish_ready_when_space_scan_changes_the_state() {
+    let state = ready_state();
+    let record = workspace(WorkspaceState::Ready, 0);
+    let id = record.reservation().workspace_id();
+    state.borrow_mut().workspaces = vec![record];
+    state.borrow_mut().final_materializations = vec![(
+        id,
+        FinalMaterializationSummary::new(
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializerKind::ApfsFileClone,
+            CowEvidence::Confirmed,
+            None,
+            0,
+        ),
+    )];
+    state.borrow_mut().change_ready_during_measure = true;
+
+    let status = service(Rc::clone(&state))
+        .workspace_status("workspace-0", &StaticGit)
+        .unwrap();
+    assert_eq!(status.workspace().record().state(), WorkspaceState::Error);
+    assert!(status.git().is_none());
+    assert!(status.space().is_none());
+    assert!(state.borrow().events.contains(&"workspace.measure_space"));
 }

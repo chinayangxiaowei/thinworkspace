@@ -9,7 +9,7 @@ use thinws_core::{
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
     PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
-    RemovalLogRecord, WorkspaceRemoval,
+    RemovalLogRecord, WorkspaceRemoval, WorkspaceSpace,
 };
 
 use crate::destroy::remove_root_contents;
@@ -26,6 +26,7 @@ use crate::filesystem::{
     require_empty_directory, revalidate_attached_directory, revalidate_directory, sync_directory,
     unlink_entry, validate_file_entry,
 };
+use crate::space::measure_root;
 use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
@@ -548,6 +549,46 @@ impl BootstrapStore for MacOsHostAdapter {
         }
         layout.revalidate()?;
         Ok(path)
+    }
+
+    fn measure_ready_workspace_space(
+        &self,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceSpace, PortError> {
+        let expected_path = self.validate_ready_workspace(layout, workspace_id)?;
+        let workspaces = &layout.controlled_directories[2];
+        let name = workspace_id.to_string();
+        let container = open_private_child_directory(workspaces, OsStr::new(&name))?;
+        let root = open_owned_child_directory(&container, OsStr::new("root"))?;
+        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
+        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
+        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
+        if ownership.instance_id != layout.instance_id
+            || ownership.volume_id != layout.volume_id
+            || !ownership
+                .container
+                .permits_current(historical_directory_identity(&container)?)
+            || !ownership
+                .root
+                .permits_current(historical_directory_identity(&root)?)
+            || volume_id_for_directory(&root)? != layout.volume_id
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace space-scan ownership changed",
+            ));
+        }
+        let measurement = measure_root(&root.fd);
+        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
+        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
+        if self.validate_ready_workspace(layout, workspace_id)? != expected_path {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace path changed during space scan",
+            ));
+        }
+        Ok(measurement)
     }
 
     fn inspect_removal_container(

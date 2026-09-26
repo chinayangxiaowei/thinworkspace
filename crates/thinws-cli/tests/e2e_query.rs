@@ -132,6 +132,131 @@ fn create(bootstrap: &Path, source: &Path, name: &str) -> Value {
 }
 
 #[test]
+fn status_measures_current_copy_space_without_reusing_creation_receipt() {
+    let (_temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    let created = create(&bootstrap, &source, "space-copy");
+    let copy = PathBuf::from(created["data"]["path"].as_str().expect("copy path"));
+    fs::write(copy.join("tracked.txt"), b"changed now").expect("change copied file");
+    fs::write(copy.join("new.bin"), vec![0_u8; 4096]).expect("add a copied-side file");
+
+    let (code, status) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "space-copy".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["data"]["space"]["state"], "complete");
+    assert_eq!(status["data"]["space"]["logical_bytes"], 4107);
+    assert!(status["data"]["space"]["allocated_bytes_estimate"].is_u64());
+}
+
+#[test]
+fn status_space_does_not_follow_links_or_double_count_hardlink_allocations() {
+    let (temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    let created = create(&bootstrap, &source, "space-links");
+    let copy = PathBuf::from(created["data"]["path"].as_str().expect("copy path"));
+    let (code, before) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "space-links".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{before}");
+    assert_eq!(before["data"]["space"]["logical_bytes"], 8);
+    let allocated_before = before["data"]["space"]["allocated_bytes_estimate"]
+        .as_u64()
+        .expect("allocated estimate");
+
+    fs::hard_link(copy.join("tracked.txt"), copy.join("hard-link"))
+        .expect("same-inode copied-side link");
+    let (code, hardlink_only) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "space-links".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{hardlink_only}");
+    assert_eq!(hardlink_only["data"]["space"]["logical_bytes"], 16);
+    assert_eq!(
+        hardlink_only["data"]["space"]["allocated_bytes_estimate"],
+        allocated_before
+    );
+    let outside = temp.path().join("outside-large-file");
+    fs::write(&outside, vec![1_u8; 1_000_000]).expect("large outside target");
+    symlink(&outside, copy.join("external-link")).expect("copied-side symlink");
+    let (code, after) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "space-links".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{after}");
+    assert_eq!(after["data"]["space"]["state"], "complete");
+    assert_eq!(
+        after["data"]["space"]["logical_bytes"],
+        16 + outside.as_os_str().as_bytes().len()
+    );
+    assert!(
+        after["data"]["space"]["allocated_bytes_estimate"]
+            .as_u64()
+            .expect("allocated estimate")
+            >= allocated_before
+    );
+}
+
+#[test]
+fn status_space_reports_unknown_for_an_unscannable_special_entry() {
+    let (_temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    let created = create(&bootstrap, &source, "space-unknown");
+    let copy = PathBuf::from(created["data"]["path"].as_str().expect("copy path"));
+    let fifo = copy.join("unscannable.fifo");
+    assert!(
+        Command::new("/usr/bin/mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("controlled mkfifo")
+            .success()
+    );
+    let (code, status) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "space-unknown".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["data"]["space"]["state"], "unknown");
+    assert_eq!(status["data"]["space"]["logical_bytes"], Value::Null);
+    assert_eq!(
+        status["data"]["space"]["allocated_bytes_estimate"],
+        Value::Null
+    );
+}
+
+#[test]
 fn list_returns_active_workspaces_in_name_order_without_git_results() {
     let (_temp, bootstrap, data_root, source) = fixture();
     initialize(&bootstrap, &data_root);
@@ -544,6 +669,8 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     assert_eq!(code, 0, "{status}");
     assert_eq!(status["data"]["state"], "error");
     assert_eq!(status["data"]["git"]["state"], "unknown");
+    assert_eq!(status["data"]["space"]["state"], "unknown");
+    assert_eq!(status["data"]["space"]["logical_bytes"], Value::Null);
     assert_eq!(status["data"]["git"]["issues"][0], "workspace-not-ready");
     assert_eq!(
         status["data"]["git"]["repositories"]
@@ -552,6 +679,21 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
             .len(),
         0
     );
+
+    let (code, stdout, stderr) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "workspace".into(),
+            "status".into(),
+            "failed-later".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+    assert!(stderr.is_empty());
+    let human = String::from_utf8(stdout).expect("human status is UTF-8 in this fixture");
+    assert!(!human.contains("Path:"));
+    assert!(human.contains("Space:         not measured (Workspace not Ready)"));
 
     let (code, stdout, stderr) = execute(
         &bootstrap,

@@ -62,6 +62,21 @@ pub enum WorkspaceRemoval {
     },
 }
 
+/// Current, best-effort byte measurement of one verified Ready copy.
+/// Allocated bytes can include APFS blocks shared with other clones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceSpace {
+    /// The bounded scan completed without a detected identity change.
+    Complete {
+        /// Sum of regular-file and symbolic-link sizes at scan time.
+        logical_bytes: u64,
+        /// Sum of filesystem-reported allocated bytes, deduplicated by inode.
+        allocated_bytes_estimate: u64,
+    },
+    /// The scan cannot safely supply complete current numbers.
+    Unknown,
+}
+
 /// One synchronous, ordinary persistent cleanup-log event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemovalLogEvent {
@@ -207,6 +222,15 @@ pub trait BootstrapStore {
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError>;
+
+    /// Measures the current contents of an ownership-verified Ready root
+    /// without following symlinks. Scan incompleteness is Unknown, not a
+    /// partial byte count; invalid layout remains an error.
+    fn measure_ready_workspace_space(
+        &self,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceSpace, PortError>;
 
     /// Finds the single currently owned container before a process-use scan.
     /// An absent container returns None; active/isolated conflicts and unproven

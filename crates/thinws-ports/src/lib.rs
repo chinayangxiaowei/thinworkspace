@@ -13,7 +13,7 @@ mod process;
 pub use bootstrap::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
     PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult, RemovalLogEvent,
-    RemovalLogRecord, WorkspaceRemoval,
+    RemovalLogRecord, WorkspaceRemoval, WorkspaceSpace,
 };
 pub use error::{PortConflict, PortError, PortErrorKind};
 pub use git::{

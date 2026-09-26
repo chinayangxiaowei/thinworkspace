@@ -17,7 +17,8 @@ use thinws_adapter_macos::{ApfsCloneMaterializer, FullCopyMaterializer, MacOsHos
 use thinws_application::{
     CowEvidence, CreateRequest, DiscoveryCompleteness, FallbackReason, GitInspectionIssue,
     GitQueryFailureKind, GitState, InitRequest, MaterializationMode, MaterializerKind,
-    RemoveRequest, RepositoryState, ThinWorkspaceService, WorkspaceQuery, WorkspaceStatus,
+    RemoveRequest, RepositoryState, ThinWorkspaceService, WorkspaceQuery, WorkspaceSpace,
+    WorkspaceStatus,
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 
@@ -170,6 +171,17 @@ pub struct GitView {
     pub repositories: Vec<RepositoryView>,
 }
 
+/// Renderer-facing current byte estimate of a Ready copy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpaceView {
+    /// Complete or unknown scan state.
+    pub state: String,
+    /// Current logical bytes, absent when not measured completely.
+    pub logical_bytes: Option<u64>,
+    /// Filesystem-allocated byte estimate, not exclusive APFS usage.
+    pub allocated_bytes_estimate: Option<u64>,
+}
+
 /// Renderer-facing status of one active Workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusView {
@@ -177,6 +189,8 @@ pub struct StatusView {
     pub workspace: WorkspaceView,
     /// Git evidence only for a verified Ready Workspace.
     pub git: Option<GitView>,
+    /// Current copy-space evidence; absent for non-Ready Workspace.
+    pub space: Option<SpaceView>,
 }
 
 /// Renderer-facing result of one explicit Workspace cleanup attempt.
@@ -470,6 +484,21 @@ fn workspace_view(query: &WorkspaceQuery) -> WorkspaceView {
 fn status_view(status: &WorkspaceStatus) -> StatusView {
     StatusView {
         workspace: workspace_view(status.workspace()),
+        space: status.space().map(|space| match space {
+            WorkspaceSpace::Complete {
+                logical_bytes,
+                allocated_bytes_estimate,
+            } => SpaceView {
+                state: "complete".to_owned(),
+                logical_bytes: Some(*logical_bytes),
+                allocated_bytes_estimate: Some(*allocated_bytes_estimate),
+            },
+            WorkspaceSpace::Unknown => SpaceView {
+                state: "unknown".to_owned(),
+                logical_bytes: None,
+                allocated_bytes_estimate: None,
+            },
+        }),
         git: status.git().map(|inspection| GitView {
             scan_complete: inspection.discovery() == DiscoveryCompleteness::Complete,
             state: git_state_name(inspection.aggregate()).to_owned(),
@@ -710,7 +739,7 @@ enum WorkspaceCommand {
         /// Exact Workspace name.
         name: String,
     },
-    /// Inspects one Workspace and its tracked Git changes when Ready.
+    /// Inspects tracked Git changes and current space usage for one Workspace.
     Status {
         /// Exact Workspace name.
         name: String,
@@ -897,6 +926,24 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
             } else {
                 writeln!(output, "Git:           not run (Workspace not Ready)")?;
             }
+            if let Some(space) = &status.space {
+                writeln!(
+                    output,
+                    "Logical bytes: {}",
+                    space
+                        .logical_bytes
+                        .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+                )?;
+                writeln!(
+                    output,
+                    "Allocated bytes (estimate): {}",
+                    space
+                        .allocated_bytes_estimate
+                        .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+                )?;
+            } else {
+                writeln!(output, "Space:         not measured (Workspace not Ready)")?;
+            }
             Ok(())
         }
         Success::Remove(view) => {
@@ -1024,6 +1071,25 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
                 })
             };
             object.insert("git".to_owned(), git);
+            object.insert(
+                "space".to_owned(),
+                status.space.as_ref().map_or_else(
+                    || {
+                        json!({
+                            "state": "unknown",
+                            "logical_bytes": Value::Null,
+                            "allocated_bytes_estimate": Value::Null,
+                        })
+                    },
+                    |space| {
+                        json!({
+                            "state": space.state,
+                            "logical_bytes": space.logical_bytes,
+                            "allocated_bytes_estimate": space.allocated_bytes_estimate,
+                        })
+                    },
+                ),
+            );
             data
         }
         Success::Remove(view) => json!({
@@ -1389,6 +1455,11 @@ mod tests {
                         failed_attempt_count: 0,
                     }),
                 },
+                space: Some(SpaceView {
+                    state: "complete".to_owned(),
+                    logical_bytes: Some(8),
+                    allocated_bytes_estimate: Some(4096),
+                }),
                 git: Some(GitView {
                     scan_complete: true,
                     state: "not-applicable".to_owned(),

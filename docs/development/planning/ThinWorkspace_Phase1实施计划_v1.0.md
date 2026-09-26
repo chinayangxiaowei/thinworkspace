@@ -395,9 +395,41 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | Done |
-| P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
+| P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | In Progress |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
+
+P1-13 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main` 实施，基线 `18d3b653bf84272242562e9236701b07c8d4dbe2`；不派生开发 Agent、不创建线上 PR，最终冻结候选由 GPT-6 Astra / `xhigh` 只读独立审核。风险 R4（GC 潜在递归删除及路径竞态），主要写入区为 Application、macOS Adapter、既有 Port 与 CLI 的空间/GC 能力及测试。开始前 `git status` 干净，`cargo fmt --all -- --check` 与 `cargo test --workspace --all-targets` 均退出 0。验收断言：status 报告当前普通副本的逻辑字节、可取得的物理分配估算或明确 unknown，不把创建 Receipt 当成当前用量；GC dry-run 不写入或预留计划，执行仅在交互确认或 `--yes` 后进行，并在 lifecycle lock 内重验元数据快照、卷、范围与候选身份；活跃 Workspace、日志、源目录、未完成清理隔离物和缺少明确可回收标记的 staging/trash 均不删除。真实 APFS、路径替换、非交互拒绝、JSON/退出码、受影响定向变异和适用 fuzz 需留证；本任务完成不自动放行 P1.e。现有完成路径在成功前清空 staging/trash，失败残留对应非 Ready Workspace，尚无已完成且带可回收标记的生产候选；先厘清该设计缺口，不以扫描名称或空 GC 输出冒充实际回收能力。
+
+P1-13 空间统计切片（2026-09-26 UTC，macOS/APFS）：真实 CLI 用例先按预期在缺少 `space.state` 时 RED，随后对 Ready 副本按当前内容测量，非 Ready 与不能完整扫描的特殊条目输出 unknown；真实 APFS 用例涵盖修改后字节、外部符号链接不跟随、硬链接分配量去重及查询锁文件被替换时仍可读。空间扫描复用 BootstrapStore 的历史目录归属证明和已有 no-follow FD 封装，不向工作区写文件，不新增 Port 或生命周期锁。全 workspace/all-targets 普通测试、fmt、全目标全 feature Clippy 和 release CLI 查询 E2E 13 项已退出 0；专用 submount、受影响变异和 P1-13 GC 尚未完成。本切片不把 GC 任务标为 Done。
+
+P1-13 空间扫描定向变异启动记录（2026-09-26 20:21 UTC）：主 Agent 在本地 `main` 基线 `18d3b65` 加未提交切片、macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip 下，仅选择 `crates/thinws-adapter-macos/src/space.rs`；执行器报告 38 个待测变异，以 `thinws-cli` 的真实 CLI 测试作为验证包，输出 `target/p1-13-space-mutants/mutants.out`。启动前 `space.rs` SHA-256 为 `97f3170cc8d6492d0b1ad874bac6c68f37948b7ce02d23278be12f34429ae8dc`；先前同机 Adapter 33 项约数分钟，本批因多一层 CLI E2E 保守估计 20:31 UTC 首次主动查看，不在此前反复轮询或修改冻结代码候选。文件边界以外的查询状态与 CLI 渲染变异另行验证，不能用本批冒充。
+
+首批空间扫描变异实际约 3 分钟，38 项为 18 caught、1 unviable、19 missed，退出 2；`outcomes.json`/`mutants.json` SHA-256 为 `3d98e5fba010b5e12fe345328626b1057dea748ce9aed7bad95da8043120ab41`/`c9574c71723d39c392719c6013ac794142613dd4b2b68e80c01392970dd61643`。存活项集中于深度/数量/时间边界、嵌套目录与身份、分配量累计，不据此宣称切片质量通过。修订通过纯边界断言和 256/257 层真实目录、错误身份及 inode 去重测试补强；移除递归入口重复身份判断与被总量检查覆盖的目录余量计算，不为不可达分支堆测试。4 项新 Adapter 定向测试通过，修订后 `space.rs` SHA-256 为 `609c5767769382b26891431dc20f71a612f98f9f16a12070777f947b1ecb05b5`。
+
+P1-13 空间扫描变异复测启动记录（2026-09-26 20:33 UTC）：同机同工具和本地主 Agent，copy 模式、4 并发、baseline skip；修订影响整个 `space.rs`，对该文件 36 项重新定向验证，以真实 `thinws-cli` 测试和 `thinws-adapter-macos` 模块单测为验证包，输出 `target/p1-13-space-mutants-fix/mutants.out`。上批 38 项 3 分钟，增加 Adapter 单测后保守估计 20:38 UTC 首次主动查看；此前不反复轮询、不修改冻结代码候选。旧失败证据保留，不以复测覆盖或删除。
+
+复测实际约 2 分钟，36 项为 34 caught、1 unviable、1 missed，退出 2；`outcomes.json`/`mutants.json` SHA-256 为 `b04937c2369323058747a6a876045172edef47529c81c9236897d15fade824e2`/`3bd6846d89d5f350d90118c30baf8240513c2458c20718e9eef8f5eb2ec34367`。唯一存活项把递归入口的“目录类型或身份不符即拒绝”改为两个条件同时成立；旧错误身份测试最终仍因收尾重验失败，不能证明遍历前拒绝。新增带目录项且已达数量边界的错误身份用例，精确要求先返回 ESTALE 而不是遍历后的 EOVERFLOW，普通定向测试通过；本次仅该测试发生变化，`space.rs` 实现保持不变，SHA-256 变为 `e050853d5921df52461c6dd8849810881cf050c3bdd6cda1f8db3cc327c4f761`。
+
+P1-13 单项存活变异复测启动记录（2026-09-26 20:39 UTC）：同机同工具、本地主 Agent、copy 模式、1 并发、baseline skip，精确选择 `space.rs` 中 `scan_directory` 的 `||→&&` 这一项，以 `thinws-adapter-macos` 单测验证，输出 `target/p1-13-space-mutant-entry-guard/mutants.out`；预估 20:40 UTC 首次查看。前两批有效结果及其失败证据保留，不为生成一份全绿摘要重跑无关项。
+
+该单项约 9 秒完成，1 caught、0 missed/timeout，退出 0；`outcomes.json`/`mutants.json` SHA-256 为 `fa0f5647bd77dca6703a3bd702642152cf0b4601f7699c676fa7a6b78db86b0f`/`7d3204c083dcdc21cd34fdaf2eec9cf75e0d7c8a2a689fca61455d823981eec8`。前批其余 34 caught 与 1 unviable 的生产扫描代码未变，唯一存活项由本批关闭。CLI `status --help` 同步空间能力：先以精确短语测试确认 RED，再调整帮助描述转 GREEN。
+
+P1-13 FD 目录读取变异启动记录（2026-09-26 20:41 UTC）：主 Agent 在上述本地未提交切片、macOS arm64、Rust 1.97.1、`cargo-mutants` 27.1.0、copy 模式、4 并发、baseline skip 下，仅选择 `ffi.rs` 中 `read_directory_bounded`/`read_directory_with_limit` 的 9 项，验证包 `thinws-adapter-macos`，输出 `target/p1-13-space-readdir-mutants/mutants.out`。`ffi.rs` SHA-256 `42c9a0b70e5d5d0a4d527c9039f3bd986e7e783ef1d23fcbc56eb12c9d64811a`；参考上批 36 项 2 分钟，本批预计 20:43 UTC 首次主动查看，不在此前反复轮询。Application 查询与 CLI 渲染另行定向验证。
+
+FD 目录读取实际约 25 秒，9 项全部 caught、0 missed/timeout，退出 0；`outcomes.json`/`mutants.json` SHA-256 为 `0074a1944922908af6de18a4e3080bb5d9c3ecf51e4b59efc826bce78146b958`/`ef547398029e016c35c035013dc3445105d3f9e01593ba5b4895604d60b2fc6b`。本批只覆盖新增有界目录读取及其共用循环，不声称对整个 FFI 文件完成全量变异。
+
+P1-13 查询编排定向变异启动记录（2026-09-26 20:43 UTC）：同机同工具、本地主 Agent、copy 模式、4 并发、baseline skip，仅选择 `thinws-application/src/query.rs` 的 `WorkspaceStatus::space`、`workspace_status` 和 `measure_workspace_space` 共 6 项，验证包为 `thinws-application` 与 `thinws-cli`，输出 `target/p1-13-query-space-mutants/mutants.out`。`query.rs` SHA-256 `473668253aa77c59630a78c011bec1d323720811ceb85a337a49db2d1607858e`；参考上一批 9 项约 25 秒，本批增加真实 CLI 验证，预计 20:45 UTC 首次主动查看。CLI 渲染另测。
+
+查询编排实际约 39 秒，6 项为 3 caught、3 unviable、0 missed/timeout，退出 0；`outcomes.json`/`mutants.json` SHA-256 为 `ea2b4cc952a23743b1a1f9eef148732b3c199f911f10bc44ee98b1c67e2d608e`/`9256713e702186efc280f108173161e721a4e7285ecdcbad1f88e5be1411f4d4`。CLI 契约再补人类输出的 `Logical bytes` 与 `Allocated bytes (estimate)` 精确行断言，契约 10 项全绿；查询生产代码未再改变。
+
+P1-13 CLI 空间渲染定向变异启动记录（2026-09-26 20:46 UTC）：同机同工具、本地主 Agent、copy 模式、4 并发、baseline skip，仅选择 `thinws-cli/src/lib.rs` 的 `status_view`、`render_success_human`、`render_success_json` 共 5 项，验证包 `thinws-cli`，输出 `target/p1-13-cli-space-mutants/mutants.out`。CLI 生产文件 SHA-256 `36c5497e5129f07ea3db85969a1893d97f3300a8a7ba304851e8a71fd951e29c`；参考上一批 6 项约 39 秒，预计 20:48 UTC 首次主动查看，不重复轮询或扩大到无关 CLI 函数。
+
+CLI 渲染实际约 35 秒，5 项为 3 caught、1 unviable、1 missed，退出 2；`outcomes.json`/`mutants.json` SHA-256 为 `a6acbb3b6a30355f22dc1c71ad753cc5fe2133fdd00953c9cc34ef5ab894b6bd`/`dbaf3c0eccc7d54105ab4ed34f75ee7b60bbceee2a701002726cd9ecd95c5fdf`。唯一存活项把人类状态输出的 Ready 判断反转；原非 Ready E2E 只断言 JSON，没有检查人类输出是否泄漏非 Ready 的 `Path:`。新增真实非 Ready 人类输出断言，要求不含 `Path:` 且明确显示空间未测，普通测试通过，生产 CLI 文件未改变。该项需单独复测，不能以手工阅读算通过。
+
+P1-13 CLI 单项存活变异复测启动记录（2026-09-26 20:49 UTC）：同机同工具、本地主 Agent、copy 模式、1 并发、baseline skip，精确选择 `render_success_human` 中 Ready 判断的 `==→!=`，验证包 `thinws-cli`，输出 `target/p1-13-cli-ready-render-mutant/mutants.out`；前批 5 项约 35 秒，预计 20:50 UTC 首次查看。前批失败结果保留，其他未变生产函数的有效结果不重跑。
+
+该单项约 14 秒完成，1 caught、0 missed/timeout，退出 0；`outcomes.json`/`mutants.json` SHA-256 为 `8521dbc139170138156b6c70f73373bb39b59ffa362b823aeccd584054d2219f`/`fc9cbc000c1902698b40f390bc61a9f53b39d764b3548992b92d60a95df760b9`。前批其余 3 caught 与 1 unviable 的生产 CLI 渲染代码未变，唯一存活项由本批关闭。空间统计切片最后一次本地复核：`cargo fmt --all -- --check`、`git diff --check`、全 workspace/all-targets 普通测试（`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data`、`THINWS_P0_CROSS_VOLUME_ROOT=/private/tmp`）、全目标全 feature Clippy、release CLI 查询 E2E 13 项、`cargo deny check` 和 `cargo audit --no-fetch` 均退出 0；deny 保留仓库既有 unmatched-license warning。P0 ignored 异卷用例和专用 submount 未在本次切片执行；空间扫描未新增文本解析入口，不为本切片虚报 fuzz 结果。P1-13 的 GC 能力与阶段门禁仍未完成，任务保持 In Progress。
 
 P1-12 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main` 实施，基线 `6d9bb75`；不派生开发 Agent、不创建线上 PR，冻结候选使用 GPT-6 Astra / `xhigh` 只读独立审核。风险 R4（递归删除、跨进程路径竞态、进程占用 FFI）。先补 ADR-0004 的 Workspace 历史目录归属证明，再实现受控删除，避免仅凭当前同名普通 `root/` 推定可删除。验收断言：真实 APFS 上替换原 root/容器、缺失或损坏证明均拒绝且不触碰替换目录；普通清理对 tracked dirty/unknown 拒绝，不因 untracked-only 拒绝；显式 force 绕过前两项但不绕过身份/卷/确认占用；日志在目标删除后可读且起止事件如实；中途失败保留非 Ready 与受控残留，再次 force 只清理仍可证明归属的对象；重复 ID 由 tombstone 返回 already-removed。真实 Git、进程、CLI/JSON、错误注入、定向变异和受影响 fuzz 均需执行，任务完成不自动代表 P1.e 小阶段放行。
 

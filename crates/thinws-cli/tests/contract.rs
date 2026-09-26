@@ -3,8 +3,8 @@ use std::ffi::OsString;
 use serde_json::{Map, Value};
 use thinws_cli::{
     Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, GitView,
-    InitView, LocalCommands, MaterializationView, RemoveView, RepositoryView, StatusView,
-    WorkspaceView, run,
+    InitView, LocalCommands, MaterializationView, RemoveView, RepositoryView, SpaceView,
+    StatusView, WorkspaceView, run,
 };
 
 struct FakeCommands;
@@ -97,6 +97,11 @@ impl Commands for FakeCommands {
     fn status(&self, _name: String) -> Result<StatusView, ErrorView> {
         Ok(StatusView {
             workspace: fixture_workspace_view(),
+            space: Some(SpaceView {
+                state: "complete".to_owned(),
+                logical_bytes: Some(8),
+                allocated_bytes_estimate: Some(4096),
+            }),
             git: Some(GitView {
                 scan_complete: true,
                 state: "clean".to_owned(),
@@ -368,6 +373,7 @@ fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
         "cow-clone"
     );
     assert!(listed["data"]["workspaces"][0].get("git").is_none());
+    assert!(listed["data"]["workspaces"][0].get("space").is_none());
     assert!(listed["data"]["workspaces"][0].get("path").is_none());
 
     let (code, stdout, stderr) = execute(&["thinws", "workspace", "path", "one"]);
@@ -392,6 +398,9 @@ fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
     assert_eq!(status["data"]["state"], "ready");
     assert_eq!(status["data"]["git"]["scan_complete"], true);
     assert_eq!(status["data"]["git"]["state"], "clean");
+    assert_eq!(status["data"]["space"]["state"], "complete");
+    assert_eq!(status["data"]["space"]["logical_bytes"], 8);
+    assert_eq!(status["data"]["space"]["allocated_bytes_estimate"], 4096);
     assert_eq!(
         status["data"]["git"]["repositories"][0]["relative_path"],
         "."
@@ -400,6 +409,13 @@ fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
         status["data"]["git"]["repositories"][0]["tracked_changes"],
         0
     );
+
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "status", "one"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let human = String::from_utf8(stdout).unwrap();
+    assert!(human.contains("Logical bytes: 8\n"));
+    assert!(human.contains("Allocated bytes (estimate): 4096\n"));
 }
 
 #[test]
@@ -411,6 +427,15 @@ fn workspace_help_lists_the_query_commands() {
     assert!(help.contains("list"));
     assert!(help.contains("path"));
     assert!(help.contains("status"));
+
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "status", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    assert!(
+        String::from_utf8(stdout)
+            .unwrap()
+            .contains("current space usage")
+    );
 }
 
 #[test]

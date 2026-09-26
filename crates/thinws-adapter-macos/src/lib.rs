@@ -13,6 +13,7 @@ mod materializer;
 mod operation_log;
 mod probe;
 mod process;
+mod space;
 mod store;
 mod volume;
 

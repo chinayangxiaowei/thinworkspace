@@ -79,11 +79,11 @@ Core 拥有支持性、请求/有效/实际模式、fallback、执行结果、Co
 
 P1-06 只在 `WorkspaceMaterializer` 落地 `kind/materialize`，交付 APFS 路径 Probe、共同数据模型和 `ApfsCloneMaterializer`。Probe 必须能观察不存在目标的最近存在父目录，供后续 dry-run 使用；真正执行 P1-06 时，target root 必须已经由调用者在受控 Workspace 容器中建立为空目录并绑定到 Plan，Materializer 不创建任意目标根或 Workspace 容器。P1-06 只执行 `cow-clone`，不实现 Full Copy 或 fallback；P1-07 依赖 P1-06，在同一 Port 上增加 Full Copy 和获准降级，不能修改 APFS 已冻结的成功、失败或回滚语义。P1-09 才负责 lifecycle lock、Creating/Ready/Error 持久化和公开 `workspace create`，不得提前塞进 Adapter。
 
-Port 按有真实调用者的任务增量开放，不在 P1-06 填占位方法：P1-12 在已有 `BootstrapStore` 增加按 WorkspaceId 与持锁布局证据清理的方法，不增加 Port 数量；P1-13 实现空间统计时才在物化 Port 增加 `measure_usage(&WorkspacePath) -> Result<UsageReport>`，并在该任务冻结输入证据。不新建平行 Port。
+Port 按有真实调用者的任务增量开放，不在 P1-06 填占位方法：P1-12 在已有 `BootstrapStore` 增加按 WorkspaceId 与持锁布局证据清理的方法，不增加 Port 数量。P1-13 的当前空间统计复用 `BootstrapStore` 已验证的受控根和历史归属证明，不把裸 `WorkspacePath` 交给物化 Port 重新扫描，也不新建平行 Port；具体空间语义由 Phase 1 单机 CLI 详细设计维护。
 
 执行输入由 source、target、staging、trash 四个规范绝对路径和冻结 Plan 组成。Plan 必须绑定这四类路径的身份/Volume 证据摘要、请求与有效模式、选中 Adapter 和 fallback policy；Adapter 在任何写入前重新 Probe 并逐项核对，不能接受调用者只填一个 Volume ID。成功 Receipt 必须来自执行后的源/目标清单核对，并记录普通文件数、实际成功 clone 数、已创建对象、源/目标卷、CoW、回滚、耗时与可用空间估算；空树或仅目录/链接树的成功 Receipt 仍为 `cow=not-used`。失败 Receipt 保留按创建顺序登记的对象、失败点、执行后源/目标观察和回滚结果；不能只返回“复制失败”。
 
-进程内回滚不采用“按名称检查后直接删除”的竞态序列。Adapter 只把仍与登记身份一致的目标项以 no-replace 原子重命名摘取到 Plan 已绑定的 trash root，摘取后再次核对身份，目录还必须确认不含未知子项；partial receipt 分别记录已确认和未确认的 trash 相对隔离名。身份或目录内容不符时尽力无覆盖还原，无法确认原路径或还原结果时保留数据并将回滚记为 incomplete。隔离项由后续显式清理/GC 处理，P1-06 不把安全隔离误报为物理删除。
+进程内回滚不采用“按名称检查后直接删除”的竞态序列。Adapter 只把仍与登记身份一致的目标项以 no-replace 原子重命名摘取到 Plan 已绑定的 trash root，摘取后再次核对身份，目录还必须确认不含未知子项；partial receipt 分别记录已确认和未确认的 trash 相对隔离名。身份或目录内容不符时尽力无覆盖还原，无法确认原路径或还原结果时保留数据并将回滚记为 incomplete。隔离项保留待后续单独证明归属并显式授权处置；相对名称或 partial receipt 本身都不授权 GC 自动删除，P1-06 不把安全隔离误报为物理删除。
 
 ### 3.4 输入内容与保证范围
 

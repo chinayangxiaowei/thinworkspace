@@ -153,7 +153,7 @@ thinws workspace status auth-refresh
 
 path 成功时 stdout 只有原始绝对路径字节和末尾换行，常见路径可用于 `cd "$(thinws workspace path auth-refresh)"`。文件名本身若含换行，不能按物理行数解析此输出；脚本可改用 `workspace status --json` 的无损 `path_hex` 处理。工具直接运行，不需要执行包装；终端、Agent 和工具自己管理环境、超时、输出和 Ctrl-C。
 
-list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和已有最终回执的实际物化模式；尚无成功回执时显示 `not-ready`，不为了列表自动扫描所有仓库。status 返回元数据及当前副本内主仓库/子仓库的按需 Git 检查结果；当前空间用量的估算由 P1-13 补入，P1-10 不把创建时回执字节数冒充当前用量。
+list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和已有最终回执的实际物化模式；尚无成功回执时显示 `not-ready`，不为了列表自动扫描所有仓库。status 返回元数据及当前副本内主仓库/子仓库的按需 Git 检查结果，以及当前 Ready 副本的空间估算；不是创建时回执的字节数。人类输出使用 `Logical bytes` 和 `Allocated bytes (estimate)` 两行。逻辑字节计入普通文件和符号链接的当前大小；已分配字节估算来自文件系统报告，APFS 共享块可能重复计入，不代表删除后可释放的空间。非 Ready 或扫描不完整时空间数值为 unknown，不以部分统计结果冒充完整。用户同时写入时统计不是原子快照，需要稳定数值应暂停写入后复测。
 
 Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修改、删除、重命名、模式、冲突及子模块引用变化。未跟踪文件和 ignored 文件不展示、不计数、不阻塞。子仓库只有未跟踪文件时不能使父仓库误报有已跟踪修改。已从版本控制移除的历史路径不按“曾经出现过”追溯。
 
@@ -292,7 +292,7 @@ thinws doctor
 | doctor | 支持 | 只读检查结果 |
 | workspace create / create --dry-run | 支持 | source、目标或目标模式、物化证据；dry-run ID 为 null |
 | workspace list | 支持 | 所有活跃记录的稳定排序数组 |
-| workspace status | 支持 | 当前状态、Git 检查完整性和逐仓库摘要；当前空间估算在 P1-13 接入 |
+| workspace status | 支持 | 当前状态、Git 检查完整性、逐仓库摘要和当前空间估算 |
 | workspace remove（含 --force） | 支持 | ID、operation、forced、removed/already-removed 和日志位置 |
 | gc / gc --dry-run | 支持 | 计划或实际回收结果；执行时还需 --yes |
 | workspace path | 不支持 | stdout 专用原始绝对路径字节加末尾换行；--json 返回 E_USAGE |
@@ -301,7 +301,7 @@ thinws doctor
 
 `workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex` 和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target_parent/target_parent_hex`、`target_path_mode=id-derived-under-target-parent`、两端 Volume UUID 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。
 
-`workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`last_error_code` 和 `materialization`，不含 `git` 或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}`；每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。P1-10 不返回当前空间字段，P1-13 再按 §八加入，不把创建时 Receipt 当成实时用量。
+`workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`last_error_code` 和 `materialization`，不含 `git`、当前空间或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}` 和 `space={state,logical_bytes,allocated_bytes_estimate}`；space.state 为 `complete` 或 `unknown`，unknown 时两个数值均为 null。每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。空间字段是查询时的估算，不把创建时 Receipt 当成实时用量。
 
 status JSON 示例：
 
@@ -316,6 +316,7 @@ status JSON 示例：
     "state": "ready",
     "source": "/Volumes/data/code/my-app",
     "path": "/Volumes/data/thinws-data/workspaces/ws_019.../root",
+    "space": {"state": "complete", "logical_bytes": 16384, "allocated_bytes_estimate": 8192},
     "git": {
       "scan_complete": true,
       "state": "dirty",
@@ -338,7 +339,7 @@ status JSON 示例：
 }
 ```
 
-示例为便于阅读省略了始终返回的 `source_hex`、`path_hex` 与 `last_error_code`。整体 git.state：发现不完整或任一仓库 unknown 则 unknown；否则存在 dirty 则 dirty；至少一个仓库且均 clean 则 clean；无仓库则 not-applicable。仓库按相对位置排序；unknown 原因放在全局或逐仓库 `issues`，用稳定短名表达。tracked_changes 为去重路径数，unknown 时为 null，不以 0 代替未知。非 Ready 的 status 返回 `path/path_hex=null`、`git={"scan_complete":false,"state":"unknown","issues":["workspace-not-ready"],"repositories":[]}`，不启动 Git。
+示例为便于阅读省略了始终返回的 `source_hex`、`path_hex` 与 `last_error_code`；空间数字仅为示例，不表示可回收字节。整体 git.state：发现不完整或任一仓库 unknown 则 unknown；否则存在 dirty 则 dirty；至少一个仓库且均 clean 则 clean；无仓库则 not-applicable。仓库按相对位置排序；unknown 原因放在全局或逐仓库 `issues`，用稳定短名表达。tracked_changes 为去重路径数，unknown 时为 null，不以 0 代替未知。非 Ready 的 status 返回 `path/path_hex=null`、`git={"scan_complete":false,"state":"unknown","issues":["workspace-not-ready"],"repositories":[]}`、`space={"state":"unknown","logical_bytes":null,"allocated_bytes_estimate":null}`，不启动 Git 或空间扫描。
 
 清理拒绝 JSON 示例：
 

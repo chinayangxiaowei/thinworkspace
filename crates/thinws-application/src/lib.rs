@@ -14,7 +14,7 @@ pub use thinws_core::{
     CowEvidence, DiscoveryCompleteness, FallbackReason, GitState, MaterializationMode,
     MaterializerKind, RepositoryState,
 };
-pub use thinws_ports::{GitInspectionIssue, GitQueryFailureKind};
+pub use thinws_ports::{GitInspectionIssue, GitQueryFailureKind, WorkspaceSpace};
 
 use std::error::Error;
 use std::fmt;

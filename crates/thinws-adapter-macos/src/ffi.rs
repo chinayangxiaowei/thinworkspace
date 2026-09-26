@@ -390,6 +390,20 @@ pub(crate) fn node_metadata_at(parent: &OwnedFd, name: &CStr) -> io::Result<RawN
 }
 
 pub(crate) fn read_directory(directory: &OwnedFd) -> io::Result<Vec<OsString>> {
+    read_directory_with_limit(directory, None)
+}
+
+pub(crate) fn read_directory_bounded(
+    directory: &OwnedFd,
+    max_entries: usize,
+) -> io::Result<Vec<OsString>> {
+    read_directory_with_limit(directory, Some(max_entries))
+}
+
+fn read_directory_with_limit(
+    directory: &OwnedFd,
+    max_entries: Option<usize>,
+) -> io::Result<Vec<OsString>> {
     // A fresh open file description is required because dup would share the
     // directory offset and make later enumerations observe EOF.
     // SAFETY: `directory` remains live and the static `.` is NUL-terminated.
@@ -428,6 +442,9 @@ pub(crate) fn read_directory(directory: &OwnedFd) -> io::Result<Vec<OsString>> {
             std::slice::from_raw_parts(name, length)
         };
         if bytes != b"." && bytes != b".." {
+            if max_entries.is_some_and(|limit| names.len() >= limit) {
+                return Err(io::Error::from_raw_os_error(libc::EOVERFLOW));
+            }
             names.push(OsString::from_vec(bytes.to_vec()));
         }
     }
@@ -874,6 +891,23 @@ impl Drop for DirectoryStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_directory_scan_stops_before_collecting_more_than_its_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("one"), b"1").unwrap();
+        std::fs::write(temp.path().join("two"), b"2").unwrap();
+        let directory: OwnedFd = std::fs::File::open(temp.path()).unwrap().into();
+
+        assert_eq!(
+            read_directory_bounded(&directory, 1)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EOVERFLOW)
+        );
+        assert_eq!(read_directory_bounded(&directory, 2).unwrap().len(), 2);
+        assert_eq!(read_directory(&directory).unwrap().len(), 2);
+    }
 
     #[test]
     fn staged_publication_never_replaces_an_existing_target() {

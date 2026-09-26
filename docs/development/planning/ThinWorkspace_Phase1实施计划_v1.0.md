@@ -544,6 +544,10 @@ P1-15 依赖门禁修复切片（2026-09-26）：既有 macOS Adapter 在清理 
 
 P1-15 十副本控制点切片（2026-09-26，macOS/APFS）：新增注入 bootstrap 的真实 APFS CLI 集成测试，以同一非 Git 源目录创建 10 个 `cow-clone`/`confirmed` 工作区，各自改写普通文件，再改写源文件，逐一核对 10 份副本与来源互不覆盖；本次人工复查临时夹具目录为空。Debug 与 Release 定向测试均通过；包含此用例的全 workspace/all-targets Debug/Release 普通测试和 release workspace 构建均退出 0。随后外置 `/Volumes/data` 一度未挂载，`diskutil list external` 当时未显示目标设备；卷恢复后核对 APFS Volume UUID `1A42C888-32E3-489C-9BFA-67FD640A94E8`、工作树和夹具，并重跑 Release 定向测试再次通过，但耗时 61.40 秒，明显慢于恢复前约半秒。本测试通过 `thinws_cli::run()`，并非 release `thinws` 可执行文件黑盒；本证据只证明该次内容隔离，不证明二进制入口、稳定性能或卷连接可靠。P1-15 的 release 二进制端到端、其余门禁与环境稳定性仍待核对。
 
+P1-15 发布候选门禁盘点（2026-09-26，当前提交 `bfd2e2686ceca8baae7629a1b1de5efe3e6875b0`）：GPT-6 Astra / `xhigh` 对十副本证据措辞修正提交只读复核为 Approve，确认其前次 P2 已关闭；这只批准该文档修正，不等于 P1-15 终审。`cargo build --release --workspace` 退出 0，产物 `target/release/thinws` 为 arm64 Mach-O，SHA-256 为 `f27833346fa2a1e3e7e7e5fda403cf5bcb470a9d7f8fa912c3c60a390c6f9dea`；直接运行该二进制的 `--help`、`--version`、`--json gc` 分别为正常帮助、`thinws 0.1.0`、退出 2 的 `E_USAGE`。这三项仅是无产品写入的黑盒入口检查，不覆盖真实创建/删除。主 workspace 与 fuzz workspace 的 `cargo deny check`、离线 `cargo audit` 均退出 0，仅有未命中许可配置警告；固定 nightly 下全部 fuzz target 的构建通过。`thinws_remove_request` 和 `thinws_create_request` 各运行 30 秒，分别约 460 万和 662 万次输入，均退出 0、无 crash/hang；这是两个短预算目标，不是所有目标的长预算阶段门禁。本次自动生成的未跟踪 fuzz 样本已从仓库清走，既有种子保留。
+
+P1-15 当前不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚未形成有效闭合证据；阶段全量变异仅枚举出约 3029 项，未执行，也没有相应的 P1 CI 承担该批次；其余 fuzz target 的阶段长预算、发布二进制真实状态变更黑盒 E2E、专用子挂载环境、外置卷稳定性复核、正式分发所需签名/公证及人工放行均未完成或尚未适用。不得以先前任务级定向变异、上述短预算 fuzz、进程内 CLI 集成测试或二进制帮助检查代替这些门禁；当前状态维持 In Progress，不打 tag、不推送、不宣称 Phase 1 发布。
+
 ---
 
 ## 五、依赖摘要

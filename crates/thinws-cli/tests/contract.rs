@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use thinws_cli::{
     Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, GitView,
     InitView, LocalCommands, MaterializationView, RemoveView, RepositoryView, SpaceView,
@@ -143,6 +144,17 @@ fn execute_with(commands: &impl Commands, args: &[&str]) -> (i32, Vec<u8>, Vec<u
         &mut stderr,
     );
     (status, stdout, stderr)
+}
+
+fn assert_object_keys(value: &Value, expected: &[&str]) {
+    let actual: BTreeSet<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let expected: BTreeSet<&str> = expected.iter().copied().collect();
+    assert_eq!(actual, expected);
 }
 
 struct FailingCommands(&'static str);
@@ -306,24 +318,248 @@ fn phase_one_does_not_expose_gc_or_its_former_flags() {
 }
 
 #[test]
-fn p1_03_public_errors_keep_their_frozen_exit_statuses() {
+fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
     for (code, expected_status) in [
+        ("E_USAGE", 2),
         ("E_NOT_INITIALIZED", 10),
         ("E_CAPABILITY_UNAVAILABLE", 11),
+        ("E_COW_UNAVAILABLE", 12),
+        ("E_NAME_CONFLICT", 15),
         ("E_DATA_ROOT_CHANGE_UNSUPPORTED", 16),
+        ("E_WORKSPACE_NOT_FOUND", 20),
+        ("E_WORKSPACE_NOT_READY", 21),
+        ("E_WORKSPACE_DIRTY", 22),
+        ("E_WORKSPACE_BUSY", 23),
+        ("E_GIT_CHECK_INCOMPLETE", 25),
+        ("E_GIT", 30),
         ("E_FILESYSTEM", 31),
         ("E_DATA_ROOT_UNAVAILABLE", 32),
         ("E_DATA_ROOT_LAYOUT", 33),
         ("E_METADATA", 35),
         ("E_DATA_ROOT_NOT_EMPTY", 36),
+        ("E_WORKSPACE_INCOMPLETE", 40),
         ("E_LOCK_TIMEOUT", 41),
     ] {
         let commands = FailingCommands(code);
         let (status, stdout, stderr) = execute_with(&commands, &["thinws", "--json", "doctor"]);
         assert_eq!(status, expected_status, "wrong status for {code}");
         assert!(stderr.is_empty());
+        assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
         let json: Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(json["error"]["code"], code);
+        assert_eq!(
+            json,
+            json!({
+                "schema_version": 1,
+                "ok": false,
+                "error": {
+                    "code": code,
+                    "message": "failure",
+                    "context": {},
+                    "remediation": null,
+                },
+            })
+        );
+    }
+}
+
+#[test]
+fn success_json_fixture_keys_match_the_public_command_matrix() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (
+            &[
+                "thinws",
+                "--json",
+                "init",
+                "--data-root",
+                "/Volumes/data/thinws-data",
+            ],
+            &[
+                "command",
+                "result",
+                "instance_id",
+                "data_root",
+                "data_root_hex",
+                "volume_id",
+            ],
+        ),
+        (
+            &["thinws", "--json", "doctor"],
+            &[
+                "command",
+                "status",
+                "host",
+                "instance_id",
+                "data_root",
+                "data_root_hex",
+                "volume_id",
+                "incomplete_workspaces",
+                "git_check",
+            ],
+        ),
+        (
+            &[
+                "thinws",
+                "--json",
+                "workspace",
+                "create",
+                "--source",
+                "/Volumes/data/source",
+                "--name",
+                "one",
+            ],
+            &[
+                "command",
+                "dry_run",
+                "result",
+                "workspace_id",
+                "name",
+                "state",
+                "source",
+                "source_hex",
+                "path",
+                "path_hex",
+                "materialization",
+            ],
+        ),
+        (
+            &[
+                "thinws",
+                "--json",
+                "workspace",
+                "create",
+                "--source",
+                "/Volumes/data/source",
+                "--name",
+                "one",
+                "--dry-run",
+            ],
+            &[
+                "command",
+                "dry_run",
+                "workspace_id",
+                "name",
+                "source",
+                "source_hex",
+                "target_parent",
+                "target_parent_hex",
+                "target_path_mode",
+                "source_volume_id",
+                "target_volume_id",
+                "same_volume",
+                "materialization",
+            ],
+        ),
+        (
+            &["thinws", "--json", "workspace", "list"],
+            &["command", "workspaces"],
+        ),
+        (
+            &["thinws", "--json", "workspace", "status", "one"],
+            &[
+                "command",
+                "workspace_id",
+                "name",
+                "state",
+                "source",
+                "source_hex",
+                "path",
+                "path_hex",
+                "last_error_code",
+                "materialization",
+                "git",
+                "space",
+            ],
+        ),
+        (
+            &["thinws", "--json", "workspace", "remove", "one"],
+            &[
+                "command",
+                "workspace_id",
+                "operation_id",
+                "forced",
+                "result",
+                "log",
+                "log_hex",
+                "warning",
+                "delivery_verification",
+            ],
+        ),
+    ];
+
+    for (args, expected_data_keys) in cases {
+        let (status, stdout, stderr) = execute(args);
+        assert_eq!(status, 0, "{args:?}");
+        assert!(stderr.is_empty(), "{args:?}");
+        assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let document: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_object_keys(&document, &["schema_version", "ok", "data"]);
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["ok"], true);
+        assert_object_keys(&document["data"], expected_data_keys);
+    }
+}
+
+#[test]
+fn help_exposes_the_current_public_command_tree() {
+    let (status, stdout, stderr) = execute(&["thinws", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    let root = String::from_utf8(stdout).unwrap();
+    for command in ["init", "doctor", "workspace"] {
+        assert!(root.contains(&format!("  {command}")));
+    }
+    for removed in ["gc", "repo", "exec"] {
+        assert!(!root.contains(&format!("  {removed}")));
+    }
+
+    let (status, stdout, stderr) = execute(&["thinws", "workspace", "--help"]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    let workspace = String::from_utf8(stdout).unwrap();
+    for command in ["create", "list", "path", "status", "remove"] {
+        assert!(workspace.contains(&format!("  {command}")));
+        let (status, stdout, stderr) = execute(&["thinws", "workspace", command, "--help"]);
+        assert_eq!(status, 0, "{command}");
+        assert!(stderr.is_empty(), "{command}");
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .contains(&format!("Usage: thinws workspace {command}")),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn removed_commands_and_flags_have_no_compatibility_entry_points() {
+    let old_forms: &[&[&str]] = &[
+        &["repo", "add"],
+        &["workspace", "exec", "one", "--", "true"],
+        &["workspace", "create", "--repo", "one", "--name", "one"],
+        &[
+            "workspace",
+            "create",
+            "--source",
+            "/Volumes/data/source",
+            "--name",
+            "one",
+            "--base",
+            "main",
+        ],
+        &["workspace", "remove", "one", "--delete-branch"],
+        &["doctor", "--repair"],
+        &["gc"],
+    ];
+
+    for old_form in old_forms {
+        let mut args = vec!["thinws", "--json"];
+        args.extend_from_slice(old_form);
+        let (status, stdout, stderr) = execute(&args);
+        assert_eq!(status, 2, "{old_form:?}");
+        assert!(stderr.is_empty(), "{old_form:?}");
+        let document: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["ok"], false);
+        assert_eq!(document["error"]["code"], "E_USAGE");
     }
 }
 
@@ -460,6 +696,16 @@ fn workspace_help_lists_the_query_commands() {
             .unwrap()
             .contains("current space usage")
     );
+}
+
+#[test]
+fn remove_help_explains_unambiguous_name_and_id_selectors() {
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "remove", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let help = String::from_utf8(stdout).unwrap();
+    assert!(help.contains("name:<NAME>"));
+    assert!(help.contains("id:<WORKSPACE_ID>"));
 }
 
 #[test]

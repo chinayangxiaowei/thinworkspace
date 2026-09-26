@@ -525,10 +525,14 @@ P1-12 任务级审核与 Verification（2026-09-26 UTC，macOS/APFS）：GPT-6 A
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | Backlog |
+| P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | In Review |
 | P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | Backlog |
 
 小阶段退出：全部公开契约与发布二进制一致，未执行门禁和剩余风险已列出，进入人工阶段放行。
+
+P1-14 领取（2026-09-26，macOS/APFS）：主 Agent 在干净的本地 `main`（基线 `142ec74d5955f79c8963a6d325317f931a9c34ca`）实施，不创建线上 PR、不派生开发 Agent；冻结候选使用 GPT-6 Astra / `xhigh` 只读独立审核。风险 R3（脚本依赖的 JSON 字段、稳定错误码和退出码漂移）；主要写入区是 CLI 契约测试与必要的 CLI help/renderer 修正。验收断言：用户手册的全部公开子命令/JSON 支持矩阵与 help 一致，成功 envelope、错误 envelope 和退出码由可重复 fixture 精确覆盖；旧 Repository/Base、`workspace exec`、`gc`、`doctor --repair` 及其参数不能重新进入 CLI，均返回 E_USAGE；`workspace path` 维持原始字节 stdout 且拒绝 JSON。无意中改变产品状态、文件物化、Git 或删除策略均超出本任务范围。先写失败的契约断言，再做最小修正；真实发布配置和必要的 APFS E2E 用于 Verification。
+
+P1-14 候选自测（2026-09-26，macOS/APFS）：`remove --help` 缺少手册已有的 `name:`/`id:` 消歧写法，新增测试先因精确短语缺失而 RED；只修正 clap 帮助文案后 GREEN。新增固定 FakeCommands fixture 逐命令检查成功 JSON envelope/顶层字段集、全表稳定错误码/退出码及完整错误 envelope、当前 help 命令树和旧命令/参数 E_USAGE；原有真实路径字节、JSON 拒绝及成功/失败 E2E 保留。用户手册现说明命令处于开发中、尚未发布；Changelog 移除旧“create 尚未接入”的过期表述。`cargo fmt --all -- --check`、全目标全 feature Clippy、`THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --workspace --all-targets`、同环境 release `thinws-cli --tests`（契约 15 项、真实创建 3 项、初始化/doctor 6 项、查询 13 项、删除 4 项）、`cargo deny check` 和 `cargo audit --no-fetch` 均退出 0；deny 保留既有未命中许可 warning。生产代码只改由 doc comment 生成的 help，未改变解析器、状态或文件操作，因此没有受影响的生产变异目标或 fuzz harness，本任务不运行变异/fuzz。额外执行的 `python3 tools/check_crate_dependencies.py` 退出 1：既有 `thinws-adapter-macos` 生产依赖 `serde_json` 用于清理 JSONL，但脚本旧白名单未包含它；基线 `142ec74` 即如此，不是本任务引入，须另行修正后再用于阶段收口。P0 专用异卷/submount、阶段长预算门禁及线上 CI/PR/push 未执行；候选仍待精确提交只读审核与审核后的 Verification。
 
 ---
 

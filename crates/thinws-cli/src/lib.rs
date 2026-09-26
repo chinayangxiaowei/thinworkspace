@@ -746,7 +746,7 @@ enum WorkspaceCommand {
     },
     /// Removes an exact named or ID-selected Workspace copy.
     Remove {
-        /// Workspace name or full Workspace ID.
+        /// Workspace name, full ID, name:<NAME>, or id:<WORKSPACE_ID>.
         target: String,
         /// Explicitly discard tracked changes and bypass incomplete Git checks.
         #[arg(long)]

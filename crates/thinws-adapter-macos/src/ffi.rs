@@ -120,6 +120,24 @@ pub(crate) fn visible_user_pids() -> io::Result<(Vec<i32>, bool)> {
     Ok((pids, count == capacity))
 }
 
+pub(crate) fn fd_kernel_path(fd: &impl AsRawFd) -> io::Result<OsString> {
+    let mut bytes = [0_u8; libc::MAXPATHLEN as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes to the live buffer and
+    // does not retain the descriptor or pointer after this call.
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, bytes.as_mut_ptr()) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| io::Error::other("unterminated kernel directory path"))?;
+    if length == 0 || bytes[0] != b'/' {
+        return Err(io::Error::other("kernel directory path is not absolute"));
+    }
+    Ok(OsString::from_vec(bytes[..length].to_vec()))
+}
+
 pub(crate) fn process_identity(pid: i32) -> io::Result<RawProcessIdentity> {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = c_int_buffer_bytes(1, std::mem::size_of::<libc::proc_bsdinfo>())?;

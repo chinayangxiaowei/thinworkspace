@@ -11,10 +11,10 @@ use thinws_ports::{PortError, PortErrorKind, ProcessObservation, ProcessProbe};
 
 use crate::MacOsHostAdapter;
 use crate::ffi::{
-    RawProcessIdentity, RawProcessVnode, process_cwd, process_identity, process_vnode_fd,
-    process_vnode_fds, visible_user_pids,
+    RawProcessIdentity, RawProcessVnode, fd_kernel_path, process_cwd, process_identity,
+    process_vnode_fd, process_vnode_fds, visible_user_pids,
 };
-use crate::filesystem::io_error;
+use crate::filesystem::{io_error, open_private_directory, revalidate_directory};
 
 const SCAN_BUDGET: Duration = Duration::from_secs(2);
 
@@ -26,15 +26,26 @@ impl ProcessProbe for MacOsHostAdapter {
         let container = PathBuf::from(std::ffi::OsString::from_vec(
             workspace_container.as_bytes().to_vec(),
         ));
-        let canonical = fs::canonicalize(&container)
-            .map_err(|error| io_error("open Workspace process-scan root", error))?;
-        if canonical != container || !fs::metadata(&canonical).is_ok_and(|meta| meta.is_dir()) {
+        let held = open_private_directory(&container)?;
+        let kernel_path = PathBuf::from(
+            fd_kernel_path(&held.fd)
+                .map_err(|error| io_error("resolve Workspace process-scan root", error))?,
+        );
+        let held_metadata = rustix::fs::fstat(&held.fd)
+            .map_err(|error| io_error("inspect held process-scan root", error))?;
+        let kernel_metadata = fs::metadata(&kernel_path)
+            .map_err(|error| io_error("inspect resolved process-scan root", error))?;
+        if !kernel_metadata.is_dir()
+            || kernel_metadata.dev() != held_metadata.st_dev as u64
+            || kernel_metadata.ino() != held_metadata.st_ino
+        {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
-                "Workspace process-scan root is not canonical directory",
+                "Workspace process-scan root identity changed",
             ));
         }
-        let use_state = scan_visible_processes(&canonical);
+        revalidate_directory(&held)?;
+        let use_state = scan_visible_processes(&kernel_path);
         let observed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -94,7 +105,10 @@ fn inspect_process(
     match process_cwd(pid) {
         Ok(Some(vnode)) => {
             if vnode_matches_container(&vnode, container, &mut incomplete) {
-                if process_identity(pid).ok() == Some(identity) {
+                if process_identity(pid)
+                    .ok()
+                    .is_some_and(|current| same_process(identity, current))
+                {
                     return ProcessUse::ConfirmedInUse;
                 }
                 incomplete = true;
@@ -114,7 +128,10 @@ fn inspect_process(
                 match process_vnode_fd(pid, fd) {
                     Ok(Some(vnode)) => {
                         if vnode_matches_container(&vnode, container, &mut incomplete) {
-                            if process_identity(pid).ok() == Some(identity) {
+                            if process_identity(pid)
+                                .ok()
+                                .is_some_and(|current| same_process(identity, current))
+                            {
                                 return ProcessUse::ConfirmedInUse;
                             }
                             incomplete = true;
@@ -131,6 +148,13 @@ fn inspect_process(
     } else {
         ProcessUse::NoEvidence
     }
+}
+
+fn same_process(before: RawProcessIdentity, after: RawProcessIdentity) -> bool {
+    before.pid == after.pid
+        && before.uid == after.uid
+        && before.start_seconds == after.start_seconds
+        && before.start_microseconds == after.start_microseconds
 }
 
 fn vnode_matches_container(
@@ -162,6 +186,7 @@ fn vnode_matches_container(
 #[cfg(test)]
 mod tests {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
     use std::thread;
 
@@ -179,9 +204,20 @@ mod tests {
             .unwrap();
         let container = temp.path().join("workspace");
         fs::create_dir(&container).unwrap();
+        fs::set_permissions(&container, fs::Permissions::from_mode(0o700)).unwrap();
         let absolute =
             AbsolutePath::try_from_bytes(container.as_os_str().as_bytes().to_vec()).unwrap();
         (temp, container, absolute)
+    }
+
+    fn data_firmlink_alias(path: &Path) -> Option<AbsolutePath> {
+        let alias = Path::new("/System/Volumes/Data").join(path.strip_prefix("/").ok()?);
+        let original = fs::metadata(path).ok()?;
+        let through_alias = fs::metadata(&alias).ok()?;
+        if (original.dev(), original.ino()) != (through_alias.dev(), through_alias.ino()) {
+            return None;
+        }
+        AbsolutePath::try_from_bytes(alias.as_os_str().as_bytes().to_vec()).ok()
     }
 
     #[test]
@@ -203,6 +239,27 @@ mod tests {
     }
 
     #[test]
+    fn process_identity_survives_fd_count_change_but_not_starttime_change() {
+        let before = RawProcessIdentity {
+            pid: 123,
+            uid: 501,
+            start_seconds: 1_700_000_000,
+            start_microseconds: 123_456,
+            open_file_count: 10,
+        };
+        let more_fds = RawProcessIdentity {
+            open_file_count: 400,
+            ..before
+        };
+        assert!(same_process(before, more_fds));
+        let reused_pid = RawProcessIdentity {
+            start_microseconds: before.start_microseconds + 1,
+            ..before
+        };
+        assert!(!same_process(before, reused_pid));
+    }
+
+    #[test]
     fn child_cwd_inside_workspace_is_confirmed_in_use() {
         let (_temp, container, path) = controlled_container("cwd-");
         let adapter = MacOsHostAdapter::new(container.parent().unwrap().join("bootstrap")).unwrap();
@@ -221,6 +278,16 @@ mod tests {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
+        }
+        if container.starts_with("/Volumes/data") {
+            assert!(data_firmlink_alias(&container).is_some());
+        }
+        if let Some(alias) = data_firmlink_alias(&container) {
+            assert_eq!(
+                adapter.inspect_workspace(&alias).unwrap().use_state,
+                ProcessUse::ConfirmedInUse,
+                "a physical firmlink alias must not hide cwd occupancy"
+            );
         }
         child.kill().unwrap();
         child.wait().unwrap();
@@ -253,6 +320,16 @@ mod tests {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
+        }
+        if container.starts_with("/Volumes/data") {
+            assert!(data_firmlink_alias(&container).is_some());
+        }
+        if let Some(alias) = data_firmlink_alias(&container) {
+            assert_eq!(
+                adapter.inspect_workspace(&alias).unwrap().use_state,
+                ProcessUse::ConfirmedInUse,
+                "a physical firmlink alias must not hide open-vnode occupancy"
+            );
         }
         child.kill().unwrap();
         child.wait().unwrap();

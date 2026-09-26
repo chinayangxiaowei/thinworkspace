@@ -50,6 +50,231 @@ pub(crate) struct RawCloneCapability {
     pub(crate) interface_valid: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RawProcessIdentity {
+    pub(crate) pid: i32,
+    pub(crate) uid: u32,
+    pub(crate) start_seconds: u64,
+    pub(crate) start_microseconds: u64,
+    pub(crate) open_file_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RawProcessVnode {
+    pub(crate) path: OsString,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+#[repr(C)]
+struct ProcFileInfo {
+    open_flags: u32,
+    status: u32,
+    offset: i64,
+    kind: i32,
+    guard_flags: u32,
+}
+
+#[repr(C)]
+struct VnodeFdInfoWithPath {
+    file: ProcFileInfo,
+    vnode: libc::vnode_info_path,
+}
+
+const PROC_UID_ONLY: u32 = 4;
+const PROC_PIDFDVNODEPATHINFO: i32 = 2;
+const MAX_VISIBLE_PIDS: usize = 16_384;
+const MAX_PROCESS_FDS: usize = 32_768;
+
+pub(crate) fn visible_user_pids() -> io::Result<(Vec<i32>, bool)> {
+    // SAFETY: a null buffer asks libproc for a byte capacity estimate.
+    let estimated_bytes =
+        unsafe { libc::proc_listpids(PROC_UID_ONLY, libc::geteuid(), std::ptr::null_mut(), 0) };
+    if estimated_bytes <= 0 {
+        return Err(libproc_error("list current-user processes"));
+    }
+    let item_size = std::mem::size_of::<i32>();
+    let capacity = (estimated_bytes as usize / item_size)
+        .saturating_add(64)
+        .min(MAX_VISIBLE_PIDS);
+    let mut pids = vec![0_i32; capacity];
+    let buffer_size = c_int_buffer_bytes(capacity, item_size)?;
+    // SAFETY: the vector owns writable storage for exactly buffer_size bytes.
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_UID_ONLY,
+            libc::geteuid(),
+            pids.as_mut_ptr().cast(),
+            buffer_size,
+        )
+    };
+    if bytes <= 0
+        || !(bytes as usize).is_multiple_of(item_size)
+        || bytes as usize > capacity * item_size
+    {
+        return Err(libproc_error("read current-user process list"));
+    }
+    let count = bytes as usize / item_size;
+    pids.truncate(count);
+    pids.retain(|pid| *pid > 0);
+    Ok((pids, count == capacity))
+}
+
+pub(crate) fn process_identity(pid: i32) -> io::Result<RawProcessIdentity> {
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = c_int_buffer_bytes(1, std::mem::size_of::<libc::proc_bsdinfo>())?;
+    // SAFETY: libproc writes at most size bytes to the correctly typed buffer.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if bytes != size {
+        return Err(libproc_error("inspect process identity"));
+    }
+    // SAFETY: an exact-size successful return initializes the full ABI struct.
+    let info = unsafe { info.assume_init() };
+    Ok(RawProcessIdentity {
+        pid: i32::try_from(info.pbi_pid).map_err(|_| io::Error::other("invalid process PID"))?,
+        uid: info.pbi_uid,
+        start_seconds: info.pbi_start_tvsec,
+        start_microseconds: info.pbi_start_tvusec,
+        open_file_count: info.pbi_nfiles,
+    })
+}
+
+pub(crate) fn process_cwd(pid: i32) -> io::Result<Option<RawProcessVnode>> {
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::uninit();
+    let size = c_int_buffer_bytes(1, std::mem::size_of::<libc::proc_vnodepathinfo>())?;
+    // SAFETY: libproc writes at most size bytes to the correctly typed buffer.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if bytes != size {
+        return Err(libproc_error("inspect process cwd"));
+    }
+    // SAFETY: an exact-size successful return initializes the full ABI struct.
+    let info = unsafe { info.assume_init() };
+    vnode_path(&info.pvi_cdir)
+}
+
+pub(crate) fn process_vnode_fds(pid: i32, expected: u32) -> io::Result<(Vec<i32>, bool)> {
+    if expected == 0 {
+        return Ok((Vec::new(), false));
+    }
+    // SAFETY: a null buffer asks libproc for a byte capacity estimate.
+    let estimated_bytes =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if estimated_bytes <= 0 {
+        return Err(libproc_error("size process fd list"));
+    }
+    let item_size = std::mem::size_of::<libc::proc_fdinfo>();
+    let capacity = (estimated_bytes as usize / item_size)
+        .saturating_add(32)
+        .min(MAX_PROCESS_FDS);
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        capacity
+    ];
+    let buffer_size = c_int_buffer_bytes(capacity, item_size)?;
+    // SAFETY: the vector owns writable storage for exactly buffer_size bytes.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            buffer_size,
+        )
+    };
+    if bytes <= 0
+        || !(bytes as usize).is_multiple_of(item_size)
+        || bytes as usize > capacity * item_size
+    {
+        return Err(libproc_error("read process fd list"));
+    }
+    let count = bytes as usize / item_size;
+    fds.truncate(count);
+    Ok((
+        fds.into_iter()
+            .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
+            .map(|fd| fd.proc_fd)
+            .collect(),
+        count == capacity,
+    ))
+}
+
+pub(crate) fn process_vnode_fd(pid: i32, fd: i32) -> io::Result<Option<RawProcessVnode>> {
+    let mut info = MaybeUninit::<VnodeFdInfoWithPath>::uninit();
+    let size = c_int_buffer_bytes(1, std::mem::size_of::<VnodeFdInfoWithPath>())?;
+    // SAFETY: the C-repr buffer matches the SDK's vnode_fdinfowithpath layout.
+    let bytes = unsafe {
+        libc::proc_pidfdinfo(
+            pid,
+            fd,
+            PROC_PIDFDVNODEPATHINFO,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if bytes != size {
+        return Err(libproc_error("inspect process vnode fd"));
+    }
+    // SAFETY: an exact-size successful return initializes the full ABI struct.
+    let info = unsafe { info.assume_init() };
+    vnode_path(&info.vnode)
+}
+
+fn vnode_path(info: &libc::vnode_info_path) -> io::Result<Option<RawProcessVnode>> {
+    // SAFETY: vip_path is a live, fixed-size C-char array in the ABI struct.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&raw const info.vip_path).cast::<u8>(),
+            std::mem::size_of_val(&info.vip_path),
+        )
+    };
+    let Some(length) = bytes.iter().position(|byte| *byte == 0) else {
+        return Err(io::Error::other("unterminated process vnode path"));
+    };
+    if length == 0 {
+        return Ok(None);
+    }
+    Ok(Some(RawProcessVnode {
+        path: OsString::from_vec(bytes[..length].to_vec()),
+        device: u64::from(info.vip_vi.vi_stat.vst_dev),
+        inode: info.vip_vi.vi_stat.vst_ino,
+    }))
+}
+
+fn c_int_buffer_bytes(count: usize, item_size: usize) -> io::Result<i32> {
+    count
+        .checked_mul(item_size)
+        .and_then(|bytes| i32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::other("libproc buffer exceeds int range"))
+}
+
+fn libproc_error(operation: &'static str) -> io::Error {
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(0) {
+        io::Error::other(operation)
+    } else {
+        error
+    }
+}
+
 #[repr(C)]
 struct VolumeUuidBuffer {
     length: u32,

@@ -8,6 +8,7 @@ mod error;
 mod git;
 mod materialization;
 mod metadata;
+mod process;
 
 pub use bootstrap::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard, LifecycleScope,
@@ -26,3 +27,4 @@ pub use materialization::{
 pub use metadata::{
     FinalMaterializationSummary, MetadataSnapshot, MetadataStore, MetadataStoreFactory,
 };
+pub use process::{ProcessObservation, ProcessProbe};

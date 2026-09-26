@@ -59,6 +59,8 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
     let copy = PathBuf::from(created["data"]["path"].as_str().unwrap());
     assert_eq!(fs::read(copy.join("note.txt")).unwrap(), b"source stays");
     assert!(!copy.join("metadata/lifecycle.lock").exists());
+    fs::write(data_root.join("staging/unknown-item"), b"unowned staging").unwrap();
+    fs::write(data_root.join("trash/unknown-item"), b"unowned trash").unwrap();
 
     let (code, removed) = execute(
         &bootstrap,
@@ -75,6 +77,14 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
     assert_eq!(removed["data"]["forced"], false);
     assert!(!copy.exists());
     assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"source stays");
+    assert_eq!(
+        fs::read(data_root.join("staging/unknown-item")).unwrap(),
+        b"unowned staging"
+    );
+    assert_eq!(
+        fs::read(data_root.join("trash/unknown-item")).unwrap(),
+        b"unowned trash"
+    );
     let log = data_root.join("logs/operations.jsonl");
     assert!(log.is_file());
     assert_eq!(removed["data"]["log"], log.to_str().unwrap());

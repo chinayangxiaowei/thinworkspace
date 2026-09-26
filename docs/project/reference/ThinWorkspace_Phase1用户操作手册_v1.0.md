@@ -258,17 +258,16 @@ git push -u origin task/auth-refresh
 
 工作区清理与任务验收是两件事。ThinWorkspace 自身研发的主管 Agent 如何核验 commit，见[任务流程](../../development/process/任务流程.md)；平台不内置此流程。
 
-## 八、空间与 GC
+## 八、空间与清理范围
 
 ```bash
-thinws gc --dry-run
-thinws gc
-thinws gc --yes
+thinws workspace status auth-refresh
+thinws workspace remove auth-refresh
 ```
 
-dry-run 只显示可回收 staging/trash 残留及大小估算，不删除、不预留计划。实际 GC 在交互终端要求确认；非交互必须 --yes。GC 不删除任何活跃 Workspace（包括 Creating、Deleting、Error）、日志、源目录或外部缓存，也不执行 Git object GC/prune。
+`workspace status` 的 `space` 是当前副本内容的逻辑字节与已分配字节估算，不能用来推断删除后实际释放的空间。`workspace remove` 仅按第六节清理已登记、归属可证的工作区容器及对应清理隔离位置；它不扫描 data root 的其他 staging/trash、日志、源目录或外部缓存。
 
-没有 Base 缓存可回收。普通副本文件逻辑大小不等于独占磁盘大小，实际回收共享块数量只提供可获得的估算，不保证零额外空间。
+首版没有 `thinws gc`、自动回收或 Base 缓存；`thinws gc` 返回 E_USAGE。失败或中断可能留下无法由产品证明归属的全局 staging/trash 项，`workspace remove --force` 也不因此取得删除它们的权限。用户须在产品外自行核对并处置这些残留，平台不会猜测删除。APFS CoW 共享块使已分配字节估算不等于可释放的独占空间。
 
 ## 九、中断与失败边界
 
@@ -294,7 +293,6 @@ thinws doctor
 | workspace list | 支持 | 所有活跃记录的稳定排序数组 |
 | workspace status | 支持 | 当前状态、Git 检查完整性、逐仓库摘要和当前空间估算 |
 | workspace remove（含 --force） | 支持 | ID、operation、forced、removed/already-removed 和日志位置 |
-| gc / gc --dry-run | 支持 | 计划或实际回收结果；执行时还需 --yes |
 | workspace path | 不支持 | stdout 专用原始绝对路径字节加末尾换行；--json 返回 E_USAGE |
 
 不支持的子命令或旧参数统一 E_USAGE，不保留首发前旧 Git/Base CLI 的兼容入口。源码实验命令不是本产品契约。

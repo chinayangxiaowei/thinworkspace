@@ -99,7 +99,7 @@ bootstrap/root marker 的精确字段、SQLite schema/trigger/migration 和双 s
 
 ## 五、并发与源一致性
 
-bootstrap lock 仅保护初始化；data-root lifecycle lock 串行创建、删除和 GC，均有界等待。它不能阻止用户工具读写源或副本，SQLite busy timeout 不能替代 OS 锁。
+bootstrap lock 仅保护初始化；data-root lifecycle lock 串行创建和删除，均有界等待。它不能阻止用户工具读写源或副本，SQLite busy timeout 不能替代 OS 锁。Phase 1 不实现 GC，见 [ADR-0005](../architecture/adr/ADR-0005_Phase1暂不实现GC.md)。
 
 创建期间由调用者暂停源目录写入；物化器检测到变化则停止并保留失败证据。首次没有原子目录快照、后台冻结、锁扫描重写或缓存一致性修复。创建成功后副本不跟随源更新。具体文件范围、时间属性和证据在物化设计中定义。
 
@@ -168,7 +168,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 部分删除后 Git 检查可能已不可用，因此普通清理拒绝；只有新的显式 `--force` 可授权清理仍归属本实例的剩余目录。若 root 已被删去，须以仍在的历史归属文件和容器身份确认剩余平台标记；只有原位置与私有隔离位置的 ID 容器经持锁、no-follow 验证均不存在时，即使归属文件缺失，也只完成 Deleting 行的数据库收口，不再执行路径删除。若 root 被替换、归属文件缺失或损坏但任一容器仍在、容器身份不符，则停止而不删除新对象。创建过程尚未持久化归属文件的极短失败窗口只允许用户在平台外核对并清除残留目录，再显式 force 释放名称；不能为了可恢复性放松删除证明。
 
-日志位于 data root 的 `logs/`，不随 Workspace 清理或 GC 删除，也不写进克隆项目目录。持锁的 BootstrapStore 同步追加并 fsync 清理 JSONL 事件；这属于受控文件持久化，不新增日志 Port 或审计服务，不依赖 stderr 日志级别。它是普通本机日志，不宣称防篡改或构成成果证明。中断可能只有开始事件；缺少完成事件不能解释为成功。
+日志位于 data root 的 `logs/`，不随 Workspace 清理删除，也不写进克隆项目目录。持锁的 BootstrapStore 同步追加并 fsync 清理 JSONL 事件；这属于受控文件持久化，不新增日志 Port 或审计服务，不依赖 stderr 日志级别。它是普通本机日志，不宣称防篡改或构成成果证明。中断可能只有开始事件；缺少完成事件不能解释为成功。
 
 ## 八、查询与未完成状态
 
@@ -186,11 +186,11 @@ ProcessProbe 通过 macOS Adapter 报告当前用户可见进程对已验证 `wo
 
 平台不停止用户工具，不阻止其他程序在检查后进入目录；用户负责清理窗口内不再写入。内部 Git 子进程的有界退出和输出处理属于 GitInspector 实现，不扩展为执行包装。
 
-## 十、GC 与空间统计
+## 十、空间统计与回收边界
 
-GC 仅处理已完成操作留下、归属可证明且明确标为可回收的 staging/trash 残留。`trash/remove-<workspace-id>/` 若仍对应活跃 Deleting/Error Workspace，属于显式清理的隔离残留，普通 GC 不可回收。不删除任何活跃 Workspace（包括 Creating、Deleting、Error）、日志、用户源目录或外部路径；不运行 Git GC/prune，不管理 Git refs。未完成 Workspace 只能由显式 `workspace remove --force` 清理，不能让 GC 绕过清理边界。
+Phase 1 没有 GC 命令、GC 计划或自动回收。用户只能显式 `workspace remove` 清理已登记且归属可证的 Workspace 容器及对应删除隔离位置；Creating、Deleting、Error 状态的剩余容器须按 §七重新显式授权 `--force`，不从查询或目录名称推断清理资格。全局 staging/trash 中无法持久证明归属的残留不由产品扫描删除；日志、源目录及外部路径不属于 Workspace 清理对象。此范围决定见 [ADR-0005](../architecture/adr/ADR-0005_Phase1暂不实现GC.md)。
 
-计划在一致的只读元数据视图中形成，执行在 lifecycle lock 内重验。空间统计由已有 BootstrapStore 对当前已验证的 Ready `root/` 进行只读、no-follow、同卷的有界扫描，避免新增单方法 Port 或经未绑定路径重新进入；每个普通文件和符号链接目录项的 `st_size` 计入逻辑字节，目录不计入逻辑字节，`st_blocks` 对同一卷内去重后的 inode 计入已分配字节估算。副本内部条目扫描失败、越界、特殊类型、卷变化或条目身份变化时两个数值均为 unknown，不以部分结果冒充完整；受控 `root/` 或容器的归属核验失败仍按 §八拒绝可用路径，不能降为 unknown。非 Ready 不扫描。已分配字节是当前文件系统报告的估算，APFS CoW 共享块可能重复计入，不等于删副本可释放的独占空间。
+空间统计由已有 BootstrapStore 对当前已验证的 Ready `root/` 进行只读、no-follow、同卷的有界扫描，避免新增单方法 Port 或经未绑定路径重新进入；每个普通文件和符号链接目录项的 `st_size` 计入逻辑字节，目录不计入逻辑字节，`st_blocks` 对同一卷内去重后的 inode 计入已分配字节估算。副本内部条目扫描失败、越界、特殊类型、卷变化或条目身份变化时两个数值均为 unknown，不以部分结果冒充完整；受控 `root/` 或容器的归属核验失败仍按 §八拒绝可用路径，不能降为 unknown。非 Ready 不扫描。已分配字节是当前文件系统报告的估算，APFS CoW 共享块可能重复计入，不等于删副本可释放的独占空间。
 
 ## 十一、实现验收重点
 

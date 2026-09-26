@@ -19,7 +19,7 @@
 
 Phase 1 需要在没有 daemon 的多个 CLI 进程之间保持三类事实一致：固定 bootstrap 配置、data root 归属和 SQLite Workspace 状态。文件系统与 SQLite 没有跨系统事务，因此必须先持久化非 Ready 状态，最后才发布可用结果；进程退出后不得根据目录外观自动补写 Ready。
 
-P1-02 还需要解决两个独立竞争面：首次初始化竞争发生在 data root 建立之前，只能由 bootstrap lock 协调；Workspace 创建、删除和 GC 发生在已验证 data root 内，由另一个 lifecycle lock 串行。SQLite busy timeout 只处理数据库页锁，不能替代这两个 OS 锁。
+P1-02 还需要解决两个独立竞争面：首次初始化竞争发生在 data root 建立之前，只能由 bootstrap lock 协调；Workspace 创建和删除发生在已验证 data root 内，由另一个 lifecycle lock 串行。SQLite busy timeout 只处理数据库页锁，不能替代这两个 OS 锁。Phase 1 不实现 GC，见 [ADR-0005](ADR-0005_Phase1暂不实现GC.md)。
 
 ## 四、决策
 
@@ -221,7 +221,7 @@ data-root scope: <data-root>/metadata/lifecycle.lock
 
 两者使用各自文件描述符上的排他 advisory lock，文件以 no-follow、create-if-missing、`0600` 打开，并验证为当前用户拥有的普通文件。成功取得锁后、写 PID 或修改任何目标状态前，必须重新读取锁文件目录项并确认它仍指向持锁文件描述符的同一身份；被替换或链接数异常时释放并失败。获取过程使用非阻塞尝试和单调时钟等待；到达调用方时限仍竞争则返回 timeout，且等待期间不得修改目标状态。
 
-锁文件内 PID 仅在成功持锁后写入，供诊断使用；不能通过读取 PID 判定锁所有权，也不终止该进程。guard 持有文件描述符，drop/close 释放锁。两个 scope 相互独立：持有 bootstrap lock 不阻止已初始化 data root 的生命周期操作，反之亦然。当前 Phase 1 没有同时持有两把锁的用例；初始化全过程只持 bootstrap lock，创建/删除/GC 只持对应 data-root lock。
+锁文件内 PID 仅在成功持锁后写入，供诊断使用；不能通过读取 PID 判定锁所有权，也不终止该进程。guard 持有文件描述符，drop/close 释放锁。两个 scope 相互独立：持有 bootstrap lock 不阻止已初始化 data root 的生命周期操作，反之亦然。当前 Phase 1 没有同时持有两把锁的用例；初始化全过程只持 bootstrap lock，创建/删除只持对应 data-root lock。
 
 查询命令（包括 `doctor`、`workspace list/path/status`）不取得 lifecycle lock，也不写 SQLite 产品状态。`path/status` 使用只读快照和路径归属重验；不靠这把锁阻止并发创建或清理，也不保证返回后路径持续存在。测试可注入 bootstrap 目录、data root 和较短时限；生产位置不能由隐藏环境变量覆盖。
 
@@ -243,7 +243,7 @@ CLI crate 是 composition root：业务调用和 renderer 只面向 Application�
 
 `prepare_workspace` 在持有 data-root lifecycle lock 时建立私有容器、`.state/incomplete` 和空 `root/`；这些目录先以私有临时名称创建并固定身份，再以 no-replace 发布到目标名称，不能从公开名称首次认领身份。随后在同一已验证 data root 的 `metadata/` 中以 no-follow、create-new 的私有文件发布上述归属证据，并同步文件与父目录；只有证据已持久化且再次核对目录项身份后才把准备结果交给 Application。文件不可覆盖、不可从当前路径状态事后补造。创建期间如果在证据发布之前失败或中断，存在的容器没有足够历史证明，`remove --force` 也必须拒绝接管，用户只能在产品外核对并处置这种未获证明的残留。首发前已有但缺少该文件的 Workspace 同样不得由产品补写并删除。
 
-Ready 查询可复用这份归属证明加强当前路径核验；但查询仍不取得 lifecycle lock，也不承诺返回后目录身份继续不变。删除必须在持锁后逐层 no-follow 打开并核对 data root、`workspaces`、ID 容器、归属文件和 `root/` 的身份与卷；容器或仍存在的 root 与历史证明不符时停止，不删除替换对象。为避免在用户可直接操作的公开目录上按名称递归删除，已证明归属的容器以同卷 no-replace rename 隔离至 `trash/remove-<workspace-id>/`，移动后再次按持久证明核对身份，才允许在实例私有隔离树清理。隔离前或隔离位置原有未知对象时不得覆盖；移动后身份不符时不得按名称还原或删除未证明对象，只有原容器仍附着于隔离位置时才可尝试无覆盖还原。新的显式 `--force` 同时检查原位置和固定隔离位置：两处同时存在拒绝；只有经持锁、no-follow 确认两处均不存在时，即使归属文件缺失，也只允许完成对应活动行的数据库收口与名称释放，不执行路径删除。`root/` 已不存在而隔离容器及归属文件仍匹配时，可以继续只清理由该证明覆盖的剩余平台标记与空容器。归属文件在 tombstone 写入后仍保留，不随 Workspace 清理或 GC 删除；仍对应活跃 Workspace 的隔离残留不得由普通 GC 回收。目录被替换、归属文件缺失/损坏或任何身份无法证实时，不得靠同名路径、当前属主/权限或 `--force` 推定归属。实例私有 `trash/` 与 staging 一样依赖操作期间无外部写者，不宣称隔离同 UID 恶意进程。具体清理顺序、状态与公开错误由详细设计和用户手册管理。
+Ready 查询可复用这份归属证明加强当前路径核验；但查询仍不取得 lifecycle lock，也不承诺返回后目录身份继续不变。删除必须在持锁后逐层 no-follow 打开并核对 data root、`workspaces`、ID 容器、归属文件和 `root/` 的身份与卷；容器或仍存在的 root 与历史证明不符时停止，不删除替换对象。为避免在用户可直接操作的公开目录上按名称递归删除，已证明归属的容器以同卷 no-replace rename 隔离至 `trash/remove-<workspace-id>/`，移动后再次按持久证明核对身份，才允许在实例私有隔离树清理。隔离前或隔离位置原有未知对象时不得覆盖；移动后身份不符时不得按名称还原或删除未证明对象，只有原容器仍附着于隔离位置时才可尝试无覆盖还原。新的显式 `--force` 同时检查原位置和固定隔离位置：两处同时存在拒绝；只有经持锁、no-follow 确认两处均不存在时，即使归属文件缺失，也只允许完成对应活动行的数据库收口与名称释放，不执行路径删除。`root/` 已不存在而隔离容器及归属文件仍匹配时，可以继续只清理由该证明覆盖的剩余平台标记与空容器。归属文件在 tombstone 写入后仍保留，不随 Workspace 清理删除；仍对应活跃 Workspace 的隔离残留只能由新的显式 `remove --force` 按本段证明清理。目录被替换、归属文件缺失/损坏或任何身份无法证实时，不得靠同名路径、当前属主/权限或 `--force` 推定归属。实例私有 `trash/` 与 staging 一样依赖操作期间无外部写者，不宣称隔离同 UID 恶意进程。具体清理顺序、状态与公开错误由详细设计和用户手册管理。
 
 ## 五、备选方案
 
@@ -271,7 +271,7 @@ Ready 查询可复用这份归属证明加强当前路径核验；但查询仍�
 
 - 原子文件发布、目录同步和 no-follow 检查比直接覆盖 TOML 复杂，但避免半写文件和链接替换被误认成合法归属。
 - SQLite trigger 与 Core 状态事件形成纵深校验；二者必须使用同一状态边，测试需防止漂移。
-- WAL 会产生 `state.db-wal`/`state.db-shm`，它们属于 metadata，不是 GC 或 Workspace 清理对象。
+- WAL 会产生 `state.db-wal`/`state.db-shm`，它们属于 metadata，不是 Workspace 清理对象。
 - advisory lock 不能阻止用户进程直接改写源或副本；它只协调 ThinWorkspace 生命周期命令。
 - crash 后可能留下 `initializing` marker、`creating/deleting/error` 记录或未发布临时文件；这些是可报告残留，不触发自动恢复。
 

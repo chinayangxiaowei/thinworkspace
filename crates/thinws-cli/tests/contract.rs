@@ -282,6 +282,30 @@ fn human_usage_errors_use_the_same_stable_error_renderer() {
 }
 
 #[test]
+fn phase_one_does_not_expose_gc_or_its_former_flags() {
+    for args in [&[][..], &["--dry-run"][..], &["--yes"][..]] {
+        let mut human = vec!["thinws", "gc"];
+        human.extend_from_slice(args);
+        let (status, stdout, stderr) = execute(&human);
+        assert_eq!(status, 2);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Error: invalid command or arguments\nCode: E_USAGE\n"
+        );
+
+        let mut json_args = vec!["thinws", "--json", "gc"];
+        json_args.extend_from_slice(args);
+        let (status, stdout, stderr) = execute(&json_args);
+        assert_eq!(status, 2);
+        assert!(stderr.is_empty());
+        let envelope: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"]["code"], "E_USAGE");
+    }
+}
+
+#[test]
 fn p1_03_public_errors_keep_their_frozen_exit_statuses() {
     for (code, expected_status) in [
         ("E_NOT_INITIALIZED", 10),

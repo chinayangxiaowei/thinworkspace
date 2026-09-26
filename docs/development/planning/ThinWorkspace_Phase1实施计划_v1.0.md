@@ -423,6 +423,8 @@ P1-12 日志纠偏复核：GPT-6 Astra / `xhigh` 对精确提交 `9e4a214ed9f291
 
 P1-12 Application/CLI 接线（进行中）：在既有 Service、BootstrapStore、MetadataStore、GitInspector、ProcessProbe 边界编排受控 `workspace remove`，使用名称或完整 ID，普通模式依据 Git 已跟踪变更与确认占用拒绝，显式 force 可绕过 Git 而不能绕过确认占用、历史归属或日志开始写入；开始事件同步落盘后才进入 Deleting，受控删除后再核对两处均无容器，写 tombstone 后才记完成事件。真实 APFS/CLI 测试覆盖普通目录清理且源目录不变、已跟踪变更拒绝与 force、仅未跟踪文件不阻塞、真实 cwd 占用进程拒绝、日志写入失败前不删目录，以及完整 ID tombstone 重复请求。清理拒绝的人类输出和 JSON context 返回已跟踪仓库相对路径与变更数，不把未跟踪文件当作已跟踪变更。首次应用层测试先因未实现返回 CapabilityUnavailable 而 RED，CLI 契约先因未登记命令返回 E_USAGE 而 RED，补实现后定向测试转绿。`cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过。仍需独立审核、失败注入、异常日志细节核对、定向变异/fuzz；不得把当前接线视作 P1-12 Done。
 
+P1-12 Application/CLI 首轮独立审核与修订（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `a4c485b509419d2f139c649ab782748fa4b64c6c` 给出 Changes requested（P1 一项、P2 两项）。真实复现表明，一个 Workspace 名称恰好等于另一 Workspace 的完整 ID 时，无前缀 remove 会静默删除 ID 所指的错误对象；已知 ID 的归属/进程预检失败未写持久失败事件；Git 检查不完整的 remove 拒绝未展示具体原因短名。修订为双候选冲突时 E_USAGE 且不删除，并提供仅用于 remove 的 `name:`/`id:` 显式选取；已知 ID 的预检失败追加 Failed 事件且保持原错误类型；JSON 与人类拒绝输出展示仓库 issue。分别先用真实两个 Workspace、注入 ProcessProbe Io、外部 Git metadata 用例确认旧候选错误，再修正转绿；补普通模式 Error 状态拒绝、force 后根目录替换拒删外部内容并可再次显式清理、缺少归属证明拒绝并记录失败的 APFS 回归。修订候选的 `cargo fmt --all -- --check`、全目标全 feature Clippy、全 workspace/all-targets 测试均退出 0；仍待提交后的精确独立复核与适用的耗时门禁，不据此宣布 P1-12 Done。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

@@ -1122,6 +1122,11 @@ fn render_error(
                 }
             })
             .and_then(|()| {
+                if let Some(issues) = error.context.get("issues").and_then(Value::as_array) {
+                    for issue in issues.iter().filter_map(Value::as_str) {
+                        writeln!(stderr, "Git issue: {issue}")?;
+                    }
+                }
                 if let Some(repositories) =
                     error.context.get("repositories").and_then(Value::as_array)
                 {
@@ -1134,6 +1139,11 @@ fn render_error(
                             repository.get("tracked_changes").and_then(Value::as_u64)
                         {
                             writeln!(stderr, "Tracked changes: {count}")?;
+                        }
+                        if let Some(issues) = repository.get("issues").and_then(Value::as_array) {
+                            for issue in issues.iter().filter_map(Value::as_str) {
+                                writeln!(stderr, "Repo issue: {issue}")?;
+                            }
                         }
                     }
                 }
@@ -1235,6 +1245,16 @@ fn use_case_error_view(error: thinws_application::UseCaseError) -> ErrorView {
         .collect();
     if let Some(inspection) = error.git_inspection() {
         context.insert(
+            "issues".to_owned(),
+            json!(
+                inspection
+                    .issues()
+                    .iter()
+                    .map(git_issue_name)
+                    .collect::<Vec<_>>()
+            ),
+        );
+        context.insert(
             "repositories".to_owned(),
             json!(
                 inspection
@@ -1256,6 +1276,7 @@ fn use_case_error_view(error: thinws_application::UseCaseError) -> ErrorView {
                             "relative_path_hex": hex(bytes),
                             "state": repository_state_name(repository.state()),
                             "tracked_changes": repository.state().tracked_change_count(),
+                            "issues": repository.issues().iter().map(git_issue_name).collect::<Vec<_>>(),
                         })
                     })
                     .collect::<Vec<_>>()

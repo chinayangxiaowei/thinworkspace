@@ -287,3 +287,88 @@ fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
     assert_eq!(code, 0, "{removed}");
     assert!(!copy.exists());
 }
+
+#[test]
+fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-remove-unknown-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    let external_git = temp.path().join("external-git");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&external_git).unwrap();
+    fs::write(source.join("note.txt"), b"source").unwrap();
+    let (code, init) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "init".into(),
+            "--data-root".into(),
+            data_root.as_os_str().to_owned(),
+        ],
+    );
+    assert_eq!(code, 0, "{init}");
+    let (code, created) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--name".into(),
+            "unknown-git".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{created}");
+    let copy = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    fs::write(
+        copy.join(".git"),
+        format!("gitdir: {}\n", external_git.display()),
+    )
+    .unwrap();
+    let (code, refused) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "unknown-git".into(),
+        ],
+    );
+    assert_eq!(code, 25, "{refused}");
+    assert_eq!(refused["error"]["code"], "E_GIT_CHECK_INCOMPLETE");
+    assert_eq!(
+        refused["error"]["context"]["repositories"][0]["issues"][0],
+        "external-repository-metadata"
+    );
+    assert!(copy.join("note.txt").is_file());
+    let commands = LocalCommands::new(Some(bootstrap.clone()))
+        .with_timeouts(Duration::from_secs(1), Duration::from_secs(1));
+    let mut human_stdout = Vec::new();
+    let mut human_stderr = Vec::new();
+    let human_code = run(
+        ["thinws", "workspace", "remove", "unknown-git"]
+            .into_iter()
+            .map(OsString::from),
+        &commands,
+        1_700_000_000_000,
+        &mut human_stdout,
+        &mut human_stderr,
+    );
+    assert_eq!(human_code, 25);
+    assert!(human_stdout.is_empty());
+    assert!(
+        String::from_utf8(human_stderr)
+            .unwrap()
+            .contains("Repo issue: external-repository-metadata\n")
+    );
+}

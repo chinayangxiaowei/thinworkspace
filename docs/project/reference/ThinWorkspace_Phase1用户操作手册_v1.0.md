@@ -110,7 +110,7 @@ Git setup:       not performed
 加 `--dry-run` 只展示当前 source/target 卷关系、目标路径模式、后端计划和降级原因，不分配 WorkspaceId、不预留名称、不保留可执行 plan token。正式创建重新检测。
 预览中的目标位置是已存在的 `workspaces/` 父目录，正式路径仍由新 WorkspaceId 派生；预览不生成实际复制结果或 CoW 证明。重复创建已 Ready 的同名同参数工作区时，人类输出的 Result 为 `already-ready`，JSON 的 result 同名。
 
-名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称全局唯一，实际目录只由 WorkspaceId 推导。后续命令可以用名称或完整 ID；Workspace ID 为 `ws_` 加标准小写 UUIDv7。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
+名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称全局唯一，实际目录只由 WorkspaceId 推导。`workspace path/status` 当前按名称查询；`workspace remove` 可用名称或完整 ID。Workspace ID 为 `ws_` 加标准小写 UUIDv7。若 `workspace remove` 的位置参数同时是某个活跃名称和另一个 Workspace 的完整 ID（含已删除 ID），命令拒绝而不猜测目标；可写 `name:<名称>` 或 `id:<完整 ID>` 明确指定。两种前缀只用于清理目标，不属于 Workspace 名称。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
 
 相同名称、规范源路径和创建策略，若已有 Ready 记录则返回原副本，不重新复制，也不比较源是否已变。想复制当前源的新内容必须使用新名称；同名参数不同返回 E_NAME_CONFLICT，原记录未 Ready 返回 E_WORKSPACE_INCOMPLETE。该幂等返回不会因来源随后消失而失效。
 
@@ -203,7 +203,7 @@ To discard the workspace explicitly:
 No files were removed.
 ```
 
-输出只列仓库相对位置和已跟踪变更摘要；不打印未跟踪清单、源码、完整 argv 或凭据。
+拒绝输出只列仓库相对位置、已跟踪变更摘要和检查不完整的原因短名；不打印未跟踪清单、源码、完整 argv 或凭据。
 
 ### 6.2 显式强制清理
 
@@ -228,7 +228,7 @@ Delivery verification: not performed
 
 ### 6.3 日志与结果边界
 
-检查异常、普通拒绝和显式 force 写入 data root 的 `logs/operations.jsonl`。force 记录开始和结果，删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
+检查异常、普通拒绝和显式 force 写入 data root 的 `logs/operations.jsonl`。保护条件拒绝 force 时记录拒绝事件，不宣称删除已开始；允许执行时记录开始和结果。删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
 
 没有独立审计服务、提交证明数据库或防篡改承诺。日志字段在开发规范中维护，不在本手册重复。
 

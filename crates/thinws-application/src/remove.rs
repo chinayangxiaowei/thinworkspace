@@ -8,8 +8,8 @@ use thinws_core::{
     WorkspaceId, WorkspaceName, WorkspaceState, decide_removal,
 };
 use thinws_ports::{
-    BootstrapStore, GitInspector, LifecycleLock, LifecycleLockGuard, MetadataStoreFactory,
-    ProcessProbe, RemovalLogEvent, RemovalLogRecord, WorkspaceRemoval,
+    BootstrapStore, GitInspection, GitInspector, LifecycleLock, LifecycleLockGuard,
+    MetadataStoreFactory, ProcessProbe, RemovalLogEvent, RemovalLogRecord, WorkspaceRemoval,
 };
 
 use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error};
@@ -18,6 +18,7 @@ use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error}
 enum RemoveTarget {
     Name(WorkspaceName),
     Id(WorkspaceId),
+    Ambiguous(WorkspaceName, WorkspaceId),
 }
 
 /// One explicit user request to remove a named or exact-ID Workspace.
@@ -31,13 +32,31 @@ pub struct RemoveRequest {
 impl RemoveRequest {
     /// Parses the public target, explicit force flag, and caller-supplied UTC time.
     pub fn try_from_raw(target: &str, force: bool, now_ms: i64) -> Result<Self, UseCaseError> {
-        let target = if let Ok(id) = WorkspaceId::from_str(target) {
-            RemoveTarget::Id(id)
-        } else {
-            RemoveTarget::Name(WorkspaceName::from_str(target).map_err(|_| {
-                semantic_error(ErrorCode::Usage, "invalid Workspace name or full ID")
-            })?)
-        };
+        let target =
+            if let Some(value) = target.strip_prefix("name:") {
+                RemoveTarget::Name(WorkspaceName::from_str(value).map_err(|_| {
+                    semantic_error(ErrorCode::Usage, "invalid explicit Workspace name")
+                })?)
+            } else if let Some(value) = target.strip_prefix("id:") {
+                RemoveTarget::Id(WorkspaceId::from_str(value).map_err(|_| {
+                    semantic_error(ErrorCode::Usage, "invalid explicit Workspace ID")
+                })?)
+            } else {
+                match (
+                    WorkspaceName::from_str(target).ok(),
+                    WorkspaceId::from_str(target).ok(),
+                ) {
+                    (Some(name), Some(id)) => RemoveTarget::Ambiguous(name, id),
+                    (Some(name), None) => RemoveTarget::Name(name),
+                    (None, Some(id)) => RemoveTarget::Id(id),
+                    (None, None) => {
+                        return Err(semantic_error(
+                            ErrorCode::Usage,
+                            "invalid Workspace name or full ID",
+                        ));
+                    }
+                }
+            };
         let now = UnixMillis::new(now_ms).map_err(|_| {
             semantic_error(ErrorCode::Usage, "system clock predates the Unix epoch")
         })?;
@@ -169,22 +188,59 @@ where
                 self.sqlite_timeout,
             )
             .map_err(|error| map_port(Stage::Metadata, error))?;
-        let active = match request.target {
-            RemoveTarget::Name(ref name) => metadata
+        let active = match &request.target {
+            RemoveTarget::Name(name) => metadata
                 .workspaces()
                 .map_err(|error| map_port(Stage::Metadata, error))?
                 .into_iter()
                 .find(|workspace| workspace.reservation().name() == name),
             RemoveTarget::Id(id) => metadata
-                .workspace(id)
+                .workspace(*id)
                 .map_err(|error| map_port(Stage::Metadata, error))?,
+            RemoveTarget::Ambiguous(name, id) => {
+                let by_name = metadata
+                    .workspaces()
+                    .map_err(|error| map_port(Stage::Metadata, error))?
+                    .into_iter()
+                    .find(|workspace| workspace.reservation().name() == name);
+                let by_id = metadata
+                    .workspace(*id)
+                    .map_err(|error| map_port(Stage::Metadata, error))?;
+                let old_id = if by_id.is_none() {
+                    metadata
+                        .deletion_tombstone(*id)
+                        .map_err(|error| map_port(Stage::Metadata, error))?
+                        .is_some()
+                } else {
+                    false
+                };
+                if by_name.as_ref().is_some_and(|named| {
+                    old_id
+                        || by_id.as_ref().is_some_and(|identified| {
+                            named.reservation().workspace_id()
+                                != identified.reservation().workspace_id()
+                        })
+                }) {
+                    return Err(semantic_error(
+                        ErrorCode::Usage,
+                        "Workspace name and ID select different records",
+                    )
+                    .with_remediation(
+                        "Use name:<name> or id:<full-workspace-id> to select the intended Workspace explicitly.",
+                    ));
+                }
+                by_name.or(by_id)
+            }
         };
         let Some(active) = active else {
-            let RemoveTarget::Id(id) = request.target else {
-                return Err(semantic_error(
-                    ErrorCode::WorkspaceNotFound,
-                    "Workspace not found",
-                ));
+            let id = match &request.target {
+                RemoveTarget::Id(id) | RemoveTarget::Ambiguous(_, id) => *id,
+                RemoveTarget::Name(_) => {
+                    return Err(semantic_error(
+                        ErrorCode::WorkspaceNotFound,
+                        "Workspace not found",
+                    ));
+                }
             };
             let tombstone = metadata
                 .deletion_tombstone(id)
@@ -242,32 +298,81 @@ where
         let id = active.reservation().workspace_id();
         let state = active.state();
         let operation_id = OperationId::new();
-        let container = self
-            .bootstrap
-            .inspect_removal_container(&lock, &layout, id)
-            .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-        let inspection = if state == WorkspaceState::Ready
-            && request.mode == RemovalMode::Normal
-            && container.is_some()
-        {
-            let path = self
-                .bootstrap
-                .validate_ready_workspace(&layout, id)
-                .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-            if path != *active.reservation().target_path() {
-                return Err(semantic_error(
-                    ErrorCode::DataRootLayout,
-                    "Ready Workspace path does not match metadata",
-                )
-                .with_workspace_id(id));
+        let preflight =
+            (|| -> Result<(Option<GitInspection>, Option<ProcessUse>), UseCaseError> {
+                let container = self
+                    .bootstrap
+                    .inspect_removal_container(&lock, &layout, id)
+                    .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
+                let inspection = if state == WorkspaceState::Ready
+                    && request.mode == RemovalMode::Normal
+                    && container.is_some()
+                {
+                    let path = self
+                        .bootstrap
+                        .validate_ready_workspace(&layout, id)
+                        .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
+                    if path != *active.reservation().target_path() {
+                        return Err(semantic_error(
+                            ErrorCode::DataRootLayout,
+                            "Ready Workspace path does not match metadata",
+                        )
+                        .with_workspace_id(id));
+                    }
+                    let result = git.inspect(&path);
+                    self.bootstrap
+                        .validate_ready_workspace(&layout, id)
+                        .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
+                    Some(result)
+                } else {
+                    None
+                };
+                let container = self
+                    .bootstrap
+                    .inspect_removal_container(&lock, &layout, id)
+                    .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
+                let process_use = container
+                    .as_ref()
+                    .map(|path| {
+                        process
+                            .inspect_workspace(path)
+                            .map(|observation| observation.use_state)
+                            .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))
+                    })
+                    .transpose()?;
+                Ok((inspection, process_use))
+            })();
+        let (inspection, process_use) = match preflight {
+            Ok(facts) => facts,
+            Err(failure) => {
+                let logged = self.bootstrap.append_removal_log(
+                    &lock,
+                    &layout,
+                    &RemovalLogRecord {
+                        occurred_at: request.now,
+                        operation_id,
+                        workspace_id: id,
+                        event: RemovalLogEvent::Failed,
+                        mode: request.mode,
+                        git_state: GitState::Unknown,
+                        git_check_complete: false,
+                        repositories: &[],
+                        process_use: None,
+                        protection: None,
+                        error_code: Some(failure.diagnostic().code()),
+                        outcome: None,
+                    },
+                );
+                if let Err(log_error) = logged {
+                    return Err(map_port(Stage::Layout, log_error)
+                        .with_workspace_id(id)
+                        .with_public_context(
+                            "preflight_error_code",
+                            failure.diagnostic().code().as_str(),
+                        ));
+                }
+                return Err(failure);
             }
-            let result = git.inspect(&path);
-            self.bootstrap
-                .validate_ready_workspace(&layout, id)
-                .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-            Some(result)
-        } else {
-            None
         };
         let git_state = inspection
             .as_ref()
@@ -279,19 +384,6 @@ where
         let repositories = inspection
             .as_ref()
             .map_or(&[][..], |result| result.repositories());
-        let container = self
-            .bootstrap
-            .inspect_removal_container(&lock, &layout, id)
-            .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-        let process_use = container
-            .as_ref()
-            .map(|path| {
-                process
-                    .inspect_workspace(path)
-                    .map(|observation| observation.use_state)
-                    .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))
-            })
-            .transpose()?;
         let append = |event, protection, error_code, outcome| {
             self.bootstrap.append_removal_log(
                 &lock,

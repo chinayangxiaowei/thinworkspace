@@ -226,6 +226,14 @@ impl UseCaseError {
         self.git_inspection = inspection.map(Box::new);
         self
     }
+
+    fn with_public_context(mut self, key: &'static str, value: &str) -> Self {
+        self.diagnostic = self
+            .diagnostic
+            .clone()
+            .with_context(key, ContextValue::public(value));
+        self
+    }
 }
 
 impl fmt::Debug for UseCaseError {

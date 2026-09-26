@@ -17,7 +17,7 @@ use thinws_adapter_macos::{ApfsCloneMaterializer, FullCopyMaterializer, MacOsHos
 use thinws_application::{
     CowEvidence, CreateRequest, DiscoveryCompleteness, FallbackReason, GitInspectionIssue,
     GitQueryFailureKind, GitState, InitRequest, MaterializationMode, MaterializerKind,
-    RepositoryState, ThinWorkspaceService, WorkspaceQuery, WorkspaceStatus,
+    RemoveRequest, RepositoryState, ThinWorkspaceService, WorkspaceQuery, WorkspaceStatus,
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 
@@ -179,6 +179,23 @@ pub struct StatusView {
     pub git: Option<GitView>,
 }
 
+/// Renderer-facing result of one explicit Workspace cleanup attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoveView {
+    /// Exact Workspace identifier.
+    pub workspace_id: String,
+    /// Per-attempt correlation identifier.
+    pub operation_id: String,
+    /// Whether force was explicitly requested.
+    pub forced: bool,
+    /// Stable removed or already-removed result.
+    pub result: String,
+    /// Lossless log path bytes outside the Workspace copy.
+    pub log_path: Vec<u8>,
+    /// Non-blocking process-scan warning, when applicable.
+    pub warning: Option<String>,
+}
+
 /// Renderer-facing stable failure data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErrorView {
@@ -187,7 +204,7 @@ pub struct ErrorView {
     /// Human-readable implementation message.
     pub message: String,
     /// Stable string context fields.
-    pub context: Vec<(String, String)>,
+    pub context: Map<String, Value>,
     /// Optional remediation.
     pub remediation: Option<String>,
 }
@@ -218,6 +235,9 @@ pub trait Commands {
 
     /// Returns one Workspace's metadata and on-demand tracked-change evidence.
     fn status(&self, name: String) -> Result<StatusView, ErrorView>;
+
+    /// Removes one registered Workspace after policy checks and durable logging.
+    fn remove(&self, target: String, force: bool, now_ms: i64) -> Result<RemoveView, ErrorView>;
 }
 
 /// Local composition root for the macOS/APFS Phase 1 command set.
@@ -250,13 +270,13 @@ impl LocalCommands {
         let path = self.bootstrap_dir.as_ref().ok_or_else(|| ErrorView {
             code: "E_FILESYSTEM".to_owned(),
             message: "the current user data directory is unavailable".to_owned(),
-            context: Vec::new(),
+            context: Map::new(),
             remediation: None,
         })?;
         MacOsHostAdapter::new(path).map_err(|_| ErrorView {
             code: "E_FILESYSTEM".to_owned(),
             message: "the ThinWorkspace bootstrap path is invalid".to_owned(),
-            context: Vec::new(),
+            context: Map::new(),
             remediation: None,
         })
     }
@@ -395,6 +415,31 @@ impl Commands for LocalCommands {
             .workspace_status(&name, &SystemGitInspector)
             .map(|status| status_view(&status))
             .map_err(use_case_error_view)
+    }
+
+    fn remove(&self, target: String, force: bool, now_ms: i64) -> Result<RemoveView, ErrorView> {
+        let request =
+            RemoveRequest::try_from_raw(&target, force, now_ms).map_err(use_case_error_view)?;
+        let adapter = self.adapter()?;
+        let service = ThinWorkspaceService::new(
+            adapter.clone(),
+            SqliteMetadataStoreFactory,
+            self.lock_timeout,
+            self.sqlite_timeout,
+        );
+        let outcome = service
+            .remove(request, &SystemGitInspector, &adapter)
+            .map_err(use_case_error_view)?;
+        Ok(RemoveView {
+            workspace_id: outcome.workspace_id().to_string(),
+            operation_id: outcome.operation_id().to_string(),
+            forced: outcome.forced(),
+            result: outcome.result().as_str().to_owned(),
+            log_path: outcome.log_path().as_bytes().to_vec(),
+            warning: outcome
+                .warning()
+                .map(|_| "process-scan-incomplete".to_owned()),
+        })
     }
 }
 
@@ -594,6 +639,9 @@ where
         Command::Workspace {
             command: WorkspaceCommand::Status { name },
         } => commands.status(name).map(Success::Status),
+        Command::Workspace {
+            command: WorkspaceCommand::Remove { target, force },
+        } => commands.remove(target, force, now_ms).map(Success::Remove),
     };
     match result {
         Ok(success) => {
@@ -667,6 +715,14 @@ enum WorkspaceCommand {
         /// Exact Workspace name.
         name: String,
     },
+    /// Removes an exact named or ID-selected Workspace copy.
+    Remove {
+        /// Workspace name or full Workspace ID.
+        target: String,
+        /// Explicitly discard tracked changes and bypass incomplete Git checks.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 enum Success {
@@ -676,6 +732,7 @@ enum Success {
     List(Vec<WorkspaceView>),
     Path(Vec<u8>),
     Status(StatusView),
+    Remove(RemoveView),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -842,6 +899,20 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
             }
             Ok(())
         }
+        Success::Remove(view) => {
+            writeln!(output, "Workspace removed")?;
+            writeln!(output, "Result: {}", view.result)?;
+            writeln!(output, "Workspace ID: {}", view.workspace_id)?;
+            writeln!(output, "Forced: {}", if view.forced { "yes" } else { "no" })?;
+            writeln!(output, "Operation ID: {}", view.operation_id)?;
+            output.write_all(b"Log: ")?;
+            output.write_all(&view.log_path)?;
+            output.write_all(b"\n")?;
+            if let Some(warning) = &view.warning {
+                writeln!(output, "Warning: {warning}")?;
+            }
+            writeln!(output, "Delivery verification: not performed")
+        }
     }
 }
 
@@ -955,6 +1026,17 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
             object.insert("git".to_owned(), git);
             data
         }
+        Success::Remove(view) => json!({
+            "command": "workspace remove",
+            "workspace_id": view.workspace_id,
+            "operation_id": view.operation_id,
+            "forced": view.forced,
+            "result": view.result,
+            "log": String::from_utf8_lossy(&view.log_path),
+            "log_hex": hex(&view.log_path),
+            "warning": view.warning,
+            "delivery_verification": "not-performed",
+        }),
     };
     serde_json::to_writer(
         &mut *output,
@@ -1016,18 +1098,13 @@ fn render_error(
     stderr: &mut dyn Write,
 ) -> i32 {
     let rendered = if json_mode {
-        let context: Map<String, Value> = error
-            .context
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-            .collect();
         let document = json!({
             "schema_version": 1,
             "ok": false,
             "error": {
                 "code": error.code,
                 "message": error.message,
-                "context": context,
+                "context": error.context,
                 "remediation": error.remediation,
             },
         });
@@ -1037,6 +1114,51 @@ fn render_error(
     } else {
         writeln!(stderr, "Error: {}", error.message)
             .and_then(|()| writeln!(stderr, "Code: {}", error.code))
+            .and_then(|()| {
+                if let Some(id) = error.context.get("workspace_id").and_then(Value::as_str) {
+                    writeln!(stderr, "Workspace ID: {id}")
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
+                if let Some(repositories) =
+                    error.context.get("repositories").and_then(Value::as_array)
+                {
+                    for repository in repositories {
+                        if let Some(path) = repository.get("relative_path").and_then(Value::as_str)
+                        {
+                            writeln!(stderr, "Repository: {path}")?;
+                        }
+                        if let Some(count) =
+                            repository.get("tracked_changes").and_then(Value::as_u64)
+                        {
+                            writeln!(stderr, "Tracked changes: {count}")?;
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .and_then(|()| {
+                if let Some(remediation) = &error.remediation {
+                    writeln!(stderr, "{remediation}")
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
+                if matches!(
+                    error.code.as_str(),
+                    "E_WORKSPACE_DIRTY"
+                        | "E_GIT_CHECK_INCOMPLETE"
+                        | "E_WORKSPACE_BUSY"
+                        | "E_WORKSPACE_INCOMPLETE"
+                ) {
+                    writeln!(stderr, "No files were removed.")
+                } else {
+                    Ok(())
+                }
+            })
     };
     if rendered.is_err() {
         31
@@ -1049,7 +1171,7 @@ fn usage_error(message: &str) -> ErrorView {
     ErrorView {
         code: "E_USAGE".to_owned(),
         message: message.to_owned(),
-        context: Vec::new(),
+        context: Map::new(),
         remediation: None,
     }
 }
@@ -1101,14 +1223,49 @@ const fn platform_name() -> &'static str {
 
 fn use_case_error_view(error: thinws_application::UseCaseError) -> ErrorView {
     let diagnostic = error.diagnostic();
+    let mut context: Map<String, Value> = diagnostic
+        .context()
+        .iter()
+        .map(|(key, value)| {
+            (
+                (*key).to_owned(),
+                Value::String(value.user_value().to_owned()),
+            )
+        })
+        .collect();
+    if let Some(inspection) = error.git_inspection() {
+        context.insert(
+            "repositories".to_owned(),
+            json!(
+                inspection
+                    .repositories()
+                    .iter()
+                    .map(|repository| {
+                        let bytes = repository.relative_path().as_os_str().as_bytes();
+                        let bytes = if bytes.is_empty() {
+                            b".".as_slice()
+                        } else {
+                            bytes
+                        };
+                        let display = match std::str::from_utf8(bytes) {
+                            Ok(value) if !value.chars().any(char::is_control) => value.to_owned(),
+                            _ => format!("hex:{}", hex(bytes)),
+                        };
+                        json!({
+                            "relative_path": display,
+                            "relative_path_hex": hex(bytes),
+                            "state": repository_state_name(repository.state()),
+                            "tracked_changes": repository.state().tracked_change_count(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     ErrorView {
         code: diagnostic.code().to_string(),
         message: diagnostic.message().to_owned(),
-        context: diagnostic
-            .context()
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), value.user_value().to_owned()))
-            .collect(),
+        context,
         remediation: diagnostic.remediation().map(str::to_owned),
     }
 }

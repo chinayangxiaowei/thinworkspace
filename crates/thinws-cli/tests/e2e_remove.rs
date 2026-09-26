@@ -1,0 +1,289 @@
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use serde_json::Value;
+use tempfile::Builder;
+use thinws_cli::{LocalCommands, run};
+
+fn execute(bootstrap: &Path, args: Vec<OsString>) -> (i32, Value) {
+    let commands = LocalCommands::new(Some(bootstrap.to_path_buf()))
+        .with_timeouts(Duration::from_secs(1), Duration::from_secs(1));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = run(args, &commands, 1_700_000_000_000, &mut stdout, &mut stderr);
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+    (code, serde_json::from_slice(&stdout).unwrap())
+}
+
+#[test]
+fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-remove-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"source stays").unwrap();
+    let (code, init) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "init".into(),
+            "--data-root".into(),
+            data_root.as_os_str().to_owned(),
+        ],
+    );
+    assert_eq!(code, 0, "{init}");
+    let (code, created) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--name".into(),
+            "ordinary".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{created}");
+    let copy = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    assert_eq!(fs::read(copy.join("note.txt")).unwrap(), b"source stays");
+    assert!(!copy.join("metadata/lifecycle.lock").exists());
+
+    let (code, removed) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "ordinary".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(removed["data"]["result"], "removed");
+    assert_eq!(removed["data"]["forced"], false);
+    assert!(!copy.exists());
+    assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"source stays");
+    let log = data_root.join("logs/operations.jsonl");
+    assert!(log.is_file());
+    assert_eq!(removed["data"]["log"], log.to_str().unwrap());
+    assert_eq!(fs::read_to_string(log).unwrap().lines().count(), 2);
+}
+
+fn fixture_git(path: &Path, args: &[&str]) {
+    let output = Command::new("/usr/bin/git")
+        .args(args)
+        .current_dir(path)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Git fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-remove-git-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("tracked.txt"), b"baseline").unwrap();
+    fixture_git(&source, &["init", "--quiet"]);
+    fixture_git(&source, &["add", "tracked.txt"]);
+    fixture_git(
+        &source,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline",
+        ],
+    );
+    let (code, init) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "init".into(),
+            "--data-root".into(),
+            data_root.as_os_str().to_owned(),
+        ],
+    );
+    assert_eq!(code, 0, "{init}");
+    let create = |name: &str| {
+        execute(
+            &bootstrap,
+            vec![
+                "thinws".into(),
+                "--json".into(),
+                "workspace".into(),
+                "create".into(),
+                "--source".into(),
+                source.as_os_str().to_owned(),
+                "--name".into(),
+                name.into(),
+            ],
+        )
+    };
+    let remove = |name: &str, force: bool| {
+        let mut args: Vec<OsString> = vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            name.into(),
+        ];
+        if force {
+            args.push("--force".into());
+        }
+        execute(&bootstrap, args)
+    };
+
+    let (code, untracked) = create("untracked-only");
+    assert_eq!(code, 0, "{untracked}");
+    let untracked_copy = PathBuf::from(untracked["data"]["path"].as_str().unwrap());
+    fs::write(untracked_copy.join("new.txt"), b"untracked").unwrap();
+    let (code, removed) = remove("untracked-only", false);
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(removed["data"]["result"], "removed");
+    assert!(!untracked_copy.exists());
+
+    let (code, dirty) = create("tracked-dirty");
+    assert_eq!(code, 0, "{dirty}");
+    let dirty_copy = PathBuf::from(dirty["data"]["path"].as_str().unwrap());
+    fs::write(dirty_copy.join("tracked.txt"), b"changed").unwrap();
+    let (code, refused) = remove("tracked-dirty", false);
+    assert_eq!(refused["error"]["code"], "E_WORKSPACE_DIRTY");
+    assert_ne!(code, 0);
+    assert_eq!(
+        refused["error"]["context"]["repositories"][0]["relative_path"],
+        "."
+    );
+    assert_eq!(
+        refused["error"]["context"]["repositories"][0]["tracked_changes"],
+        1
+    );
+    assert!(dirty_copy.is_dir());
+    let commands = LocalCommands::new(Some(bootstrap.clone()))
+        .with_timeouts(Duration::from_secs(1), Duration::from_secs(1));
+    let mut human_stdout = Vec::new();
+    let mut human_stderr = Vec::new();
+    let human_code = run(
+        ["thinws", "workspace", "remove", "tracked-dirty"]
+            .into_iter()
+            .map(OsString::from),
+        &commands,
+        1_700_000_000_000,
+        &mut human_stdout,
+        &mut human_stderr,
+    );
+    assert_ne!(human_code, 0);
+    assert!(human_stdout.is_empty());
+    let hint = String::from_utf8(human_stderr).unwrap();
+    assert!(hint.contains("Repository: .\n"));
+    assert!(hint.contains("Tracked changes: 1\n"));
+    assert!(hint.contains("--force"));
+    assert!(hint.contains("No files were removed.\n"));
+    let (code, forced) = remove("tracked-dirty", true);
+    assert_eq!(code, 0, "{forced}");
+    assert_eq!(forced["data"]["forced"], true);
+    assert!(!dirty_copy.exists());
+}
+
+#[test]
+fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-remove-busy-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"source").unwrap();
+    let (code, init) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "init".into(),
+            "--data-root".into(),
+            data_root.as_os_str().to_owned(),
+        ],
+    );
+    assert_eq!(code, 0, "{init}");
+    let (code, created) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--name".into(),
+            "busy".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{created}");
+    let copy = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    let mut child = Command::new("/bin/sleep")
+        .arg("10")
+        .current_dir(&copy)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let remove_force = || {
+        execute(
+            &bootstrap,
+            vec![
+                "thinws".into(),
+                "--json".into(),
+                "workspace".into(),
+                "remove".into(),
+                "busy".into(),
+                "--force".into(),
+            ],
+        )
+    };
+    let (code, refused) = remove_force();
+    assert_ne!(code, 0);
+    assert_eq!(refused["error"]["code"], "E_WORKSPACE_BUSY");
+    assert!(copy.join("note.txt").is_file());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let (code, removed) = remove_force();
+    assert_eq!(code, 0, "{removed}");
+    assert!(!copy.exists());
+}

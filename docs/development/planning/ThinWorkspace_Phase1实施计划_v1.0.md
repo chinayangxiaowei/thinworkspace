@@ -419,6 +419,10 @@ P1-12 清理日志持久化（进行中）：在既有 BootstrapStore 边界增�
 
 P1-12 日志部分写入审核纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `dd0bd5f` 给出 Changes requested（P2 一项）：已有 JSONL 尾行不完整时，下一开始事件直接粘连，fsync 成功也不构成独立可解析事件。审核者用精确提交独立构建及 `RLIMIT_FSIZE` 真实短写复现：首次 Io 留下无换行的 128 字节，第二次返回成功但有效 JSONL 事件数为零。主 Agent 补半行尾字节检测与新事件换行隔离，先写测试复现旧行为（一行而非两行）再转绿；不完整旧片段保留，不解释为成功；新事件完整同步之前不能开始删除。开发规范 §13.1 同步明确此边界。本地 `cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过；独立复核仍待完成。日志写入与 Application 删除先后顺序尚未集成。
 
+P1-12 日志纠偏复核：GPT-6 Astra / `xhigh` 对精确提交 `9e4a214ed9f291348526df7cb764973a78622b5e` 独立只读审核为 Approve，新增 P0/P1/P2 均为零。审核者用独立 target 的真实 `RLIMIT_FSIZE` 验证：128 字节旧半行后受限重试只写分隔换行仍报 Io；解除限制后新开始事件独立可解析，原半行保留且工作区未删除；`process_use=None` 与 `Some(NoEvidence)` 输出分别为 null 与 `no-evidence`，竞争 lifecycle lock 有界超时。未重跑全量门禁、变异/fuzz 或真实断电注入；该结论仅关闭日志局部问题，不代表完整删除编排放行。
+
+P1-12 Application/CLI 接线（进行中）：在既有 Service、BootstrapStore、MetadataStore、GitInspector、ProcessProbe 边界编排受控 `workspace remove`，使用名称或完整 ID，普通模式依据 Git 已跟踪变更与确认占用拒绝，显式 force 可绕过 Git 而不能绕过确认占用、历史归属或日志开始写入；开始事件同步落盘后才进入 Deleting，受控删除后再核对两处均无容器，写 tombstone 后才记完成事件。真实 APFS/CLI 测试覆盖普通目录清理且源目录不变、已跟踪变更拒绝与 force、仅未跟踪文件不阻塞、真实 cwd 占用进程拒绝、日志写入失败前不删目录，以及完整 ID tombstone 重复请求。清理拒绝的人类输出和 JSON context 返回已跟踪仓库相对路径与变更数，不把未跟踪文件当作已跟踪变更。首次应用层测试先因未实现返回 CapabilityUnavailable 而 RED，CLI 契约先因未登记命令返回 E_USAGE 而 RED，补实现后定向测试转绿。`cargo fmt --all -- --check`、全目标全 feature Clippy 和全 workspace/all-targets 测试通过。仍需独立审核、失败注入、异常日志细节核对、定向变异/fuzz；不得把当前接线视作 P1-12 Done。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

@@ -1,9 +1,10 @@
 use std::ffi::OsString;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thinws_cli::{
     Commands, CreatePreviewView, CreateReadyView, CreateView, DoctorView, ErrorView, GitView,
-    InitView, LocalCommands, MaterializationView, RepositoryView, StatusView, WorkspaceView, run,
+    InitView, LocalCommands, MaterializationView, RemoveView, RepositoryView, StatusView,
+    WorkspaceView, run,
 };
 
 struct FakeCommands;
@@ -109,6 +110,17 @@ impl Commands for FakeCommands {
             }),
         })
     }
+
+    fn remove(&self, _target: String, force: bool, _now_ms: i64) -> Result<RemoveView, ErrorView> {
+        Ok(RemoveView {
+            workspace_id: "ws_019a0000-0000-7000-8000-000000000001".to_owned(),
+            operation_id: "op_019a0000-0000-7000-8000-000000000002".to_owned(),
+            forced: force,
+            result: "removed".to_owned(),
+            log_path: b"/Volumes/data/thinws-data/logs/operations.jsonl".to_vec(),
+            warning: None,
+        })
+    }
 }
 
 fn execute(args: &[&str]) -> (i32, Vec<u8>, Vec<u8>) {
@@ -161,13 +173,17 @@ impl Commands for FailingCommands {
     fn status(&self, _name: String) -> Result<StatusView, ErrorView> {
         Err(error(self.0))
     }
+
+    fn remove(&self, _target: String, _force: bool, _now_ms: i64) -> Result<RemoveView, ErrorView> {
+        Err(error(self.0))
+    }
 }
 
 fn error(code: &str) -> ErrorView {
     ErrorView {
         code: code.to_owned(),
         message: "failure".to_owned(),
-        context: Vec::new(),
+        context: Map::new(),
         remediation: None,
     }
 }
@@ -395,4 +411,29 @@ fn workspace_help_lists_the_query_commands() {
     assert!(help.contains("list"));
     assert!(help.contains("path"));
     assert!(help.contains("status"));
+}
+
+#[test]
+fn workspace_remove_renders_explicit_force_result_and_json_contract() {
+    let (code, stdout, stderr) = execute(&["thinws", "workspace", "remove", "one", "--force"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let human = String::from_utf8(stdout).unwrap();
+    assert!(human.contains("Workspace removed\n"));
+    assert!(human.contains("Forced: yes\n"));
+    assert!(human.contains("Delivery verification: not performed\n"));
+
+    let (code, stdout, stderr) = execute(&["thinws", "--json", "workspace", "remove", "one"]);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    let document: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(document["data"]["command"], "workspace remove");
+    assert_eq!(document["data"]["result"], "removed");
+    assert_eq!(document["data"]["forced"], false);
+    assert!(
+        document["data"]["operation_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("op_")
+    );
 }

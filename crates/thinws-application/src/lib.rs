@@ -5,9 +5,11 @@
 
 mod create;
 mod query;
+mod remove;
 
 pub use create::{CreateOutcome, CreatePreview, CreateRequest};
 pub use query::{WorkspaceQuery, WorkspaceStatus};
+pub use remove::{RemoveOutcome, RemoveRequest, RemoveResult};
 pub use thinws_core::{
     CowEvidence, DiscoveryCompleteness, FallbackReason, GitState, MaterializationMode,
     MaterializerKind, RepositoryState,
@@ -24,7 +26,7 @@ use thinws_core::{
     WorkspaceState,
 };
 use thinws_ports::{
-    BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard,
+    BootstrapStore, DataRootLayoutEvidence, GitInspection, LifecycleLock, LifecycleLockGuard,
     MaterializationPathRole, MetadataSnapshot, MetadataStoreFactory, PortError, PortErrorKind,
     PreparedDataRootEvidence,
 };
@@ -153,8 +155,9 @@ impl DoctorOutcome {
 /// Application failure preserving a public diagnostic and typed Port source.
 pub struct UseCaseError {
     diagnostic: CoreError,
-    source: Option<PortError>,
+    source: Option<Box<PortError>>,
     partial_receipts: Box<[MaterializationReceipt]>,
+    git_inspection: Option<Box<GitInspection>>,
 }
 
 impl UseCaseError {
@@ -168,6 +171,12 @@ impl UseCaseError {
     #[must_use]
     pub fn partial_receipts(&self) -> &[MaterializationReceipt] {
         self.partial_receipts.as_ref()
+    }
+
+    /// Returns tracked-change evidence for a cleanup refusal, if collected.
+    #[must_use]
+    pub fn git_inspection(&self) -> Option<&GitInspection> {
+        self.git_inspection.as_deref()
     }
 
     fn with_partial_receipt(mut self, receipt: MaterializationReceipt) -> Self {
@@ -207,6 +216,16 @@ impl UseCaseError {
         );
         self
     }
+
+    fn with_remediation(mut self, remediation: &'static str) -> Self {
+        self.diagnostic = self.diagnostic.clone().with_remediation(remediation);
+        self
+    }
+
+    fn with_git_inspection(mut self, inspection: Option<GitInspection>) -> Self {
+        self.git_inspection = inspection.map(Box::new);
+        self
+    }
 }
 
 impl fmt::Debug for UseCaseError {
@@ -216,6 +235,7 @@ impl fmt::Debug for UseCaseError {
             .field("diagnostic", &self.diagnostic)
             .field("has_source", &self.source.is_some())
             .field("partial_receipt_count", &self.partial_receipts.len())
+            .field("has_git_inspection", &self.git_inspection.is_some())
             .finish()
     }
 }
@@ -229,7 +249,7 @@ impl fmt::Display for UseCaseError {
 impl Error for UseCaseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         self.source
-            .as_ref()
+            .as_deref()
             .map(|source| source as &(dyn Error + 'static))
     }
 }
@@ -496,8 +516,9 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
     };
     UseCaseError {
         diagnostic: CoreError::new(code, message),
-        source: Some(error),
+        source: Some(Box::new(error)),
         partial_receipts: Box::default(),
+        git_inspection: None,
     }
 }
 
@@ -506,6 +527,7 @@ fn semantic_error(code: ErrorCode, message: &'static str) -> UseCaseError {
         diagnostic: CoreError::new(code, message),
         source: None,
         partial_receipts: Box::default(),
+        git_inspection: None,
     }
 }
 

@@ -544,8 +544,9 @@ where
                                 ErrorCode::CowUnavailable,
                                 "APFS clone is unavailable and Full Copy was not authorized",
                             ),
-                            source: Some(error),
+                            source: Some(Box::new(error)),
                             partial_receipts: Box::default(),
+                            git_inspection: None,
                         }
                         .with_partial_receipt(partial));
                     }
@@ -746,8 +747,9 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
                 ErrorCode::CowUnavailable,
                 "APFS clone is unavailable and Full Copy was not authorized",
             ),
-            source: Some(error),
+            source: Some(Box::new(error)),
             partial_receipts: Box::default(),
+            git_inspection: None,
         }
     } else {
         map_port(Stage::Layout, error)

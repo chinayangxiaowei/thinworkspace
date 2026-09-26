@@ -394,10 +394,12 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | Backlog |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Progress |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
+
+P1-12 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main` 实施，基线 `6d9bb75`；不派生开发 Agent、不创建线上 PR，冻结候选使用 GPT-6 Astra / `xhigh` 只读独立审核。风险 R4（递归删除、跨进程路径竞态、进程占用 FFI）。先补 ADR-0004 的 Workspace 历史目录归属证明，再实现受控删除，避免仅凭当前同名普通 `root/` 推定可删除。验收断言：真实 APFS 上替换原 root/容器、缺失或损坏证明均拒绝且不触碰替换目录；普通清理对 tracked dirty/unknown 拒绝，不因 untracked-only 拒绝；显式 force 绕过前两项但不绕过身份/卷/确认占用；日志在目标删除后可读且起止事件如实；中途失败保留非 Ready 与受控残留，再次 force 只清理仍可证明归属的对象；重复 ID 由 tombstone 返回 already-removed。真实 Git、进程、CLI/JSON、错误注入、定向变异和受影响 fuzz 均需执行，任务完成不自动代表 P1.e 小阶段放行。
 
 ### 4.6 P1.f 契约与发布
 

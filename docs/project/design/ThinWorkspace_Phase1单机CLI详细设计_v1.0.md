@@ -72,12 +72,13 @@ thinws-data/
 │   └── lifecycle.lock
 ├── logs/operations.jsonl
 ├── workspaces/<workspace-id>/.state/incomplete
+├── workspaces/<workspace-id>/.state/ownership.toml
 ├── workspaces/<workspace-id>/root/
 ├── staging/
 └── trash/
 ```
 
-受控目标由 WorkspaceId 推导，全部受控子树位于登记的同一 APFS Volume。源目录是用户提供的只读输入，不需要位于 data root 内，但首版要求与 data root 同卷；拒绝源与 data root 相等或互相包含，防止把平台目录递归复制进自身。根和路径组件不接受未验证链接，遍历边界以物化设计为准。
+受控目标由 WorkspaceId 推导，全部受控子树位于登记的同一 APFS Volume。`ownership.toml` 的持久目录身份契约由 ADR-0004 §4.8 维护，不复制到 `root/`。源目录是用户提供的只读输入，不需要位于 data root 内，但首版要求与 data root 同卷；拒绝源与 data root 相等或互相包含，防止把平台目录递归复制进自身。根和路径组件不接受未验证链接，遍历边界以物化设计为准。
 
 `.state` 与日志均在副本 `root/` 外；`.git` 不是平台保留项，它仅是被复制的目录内容。用户不能手工移动或改写平台管理目录。
 
@@ -149,10 +150,10 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 用户停止相关工具后，按以下顺序执行：
 
-1. 验证实例、WorkspaceId、卷和目标归属；运行只读 Git 与进程检查。
+1. 验证实例、WorkspaceId、卷及创建时持久目录归属；运行只读 Git 与进程检查。
 2. Application 按手册决定普通拒绝或接受显式强制意图；拒绝发生在破坏性写入之前。
 3. 清理前写持久日志，并将 Workspace 标记为 Deleting；日志关联 ID 仅用于定位这次尝试，不用于重放。
-4. 每个破坏性步骤前重验范围、卷和适用的占用保护；Materializer 以 no-follow 清理副本 `root/` 的全部内容，包括其中 `.git` 和后来生成的内容；Application 随后清理同一 WorkspaceId 下的平台标记与空容器目录。
+4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Materializer 从已验证目录 FD 以 no-follow 清理副本 `root/` 的全部内容，包括其中 `.git` 和后来生成的内容；Application 随后清理同一 WorkspaceId 下的平台标记与空容器目录。`ownership.toml` 留到 root 已不存在且平台容器可安全收口时才删除。
 5. 确认整个 `workspaces/<workspace-id>/` 已不存在；在同一事务删除活跃记录并保留最小 tombstone；记录完成结果。data root 内的日志不随工作区删除。
 
 强制操作不要求说明理由、commit 证明、主管批准或在线服务；只保留日志。日志字段与敏感信息边界见《开发规范》§13。清理前无法持久化日志时停止且报告 I/O 错误；已开始后失败/中断保留非 Ready 状态和剩余范围，不能写成成功。
@@ -163,13 +164,13 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 尚未开始删除的普通拒绝不固定后续 flags；用户可重新执行显式强制清理。删除中断后不自动续跑，也不重放旧 Git 检查结果。若 WorkspaceId 容器目录仍在，用户可重新发起一次 `remove --force`；每次都重新验证实例、卷、目录归属和当前占用，绝不扩大到登记范围外。
 
-部分删除后 Git 检查可能已不可用，因此普通清理拒绝；只有新的显式 `--force` 可授权清理整个仍归属本实例的剩余目录。发现目标被替换或归属无法证明时停止，不删除新对象。
+部分删除后 Git 检查可能已不可用，因此普通清理拒绝；只有新的显式 `--force` 可授权清理整个仍归属本实例的剩余目录。若 root 已被删去，须以仍在的历史归属文件和容器身份确认剩余平台标记；若 root 被替换、归属文件缺失或损坏、容器身份不符，则停止而不删除新对象。创建过程尚未持久化归属文件的极短失败窗口只能在平台外核对清理，不能为了可恢复性放松删除证明。
 
 日志位于 data root 的 `logs/`，不随 Workspace 清理或 GC 删除。它是普通本机日志，不宣称防篡改或构成成果证明。中断可能只有开始事件；缺少完成事件不能解释为成功。
 
 ## 八、查询与未完成状态
 
-list/status 展示全部活跃状态；path 仅 Ready。查询不取得 lifecycle lock，不写 SQLite/Git 产品状态，也不自动清理或恢复；Ready 路径在只读快照、受控目录归属核验及再次只读快照一致后返回。status 对 Ready 完成 Git 检查后再次核验状态与目录归属，避免把检查期间进入非 Ready 的副本仍作为可用路径输出。检测到的并发状态或路径身份变化必须拒绝可用路径，但检查结束后仍不能保证路径持续存在；P1 不维护跨进程的历史 root inode 证明。SQLite read-only 打开可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
+list/status 展示全部活跃状态；path 仅 Ready。查询不取得 lifecycle lock，不写 SQLite/Git 产品状态，也不自动清理或恢复；Ready 路径在只读快照、受控目录归属核验及再次只读快照一致后返回。P1-12 引入持久归属文件后，Ready 核验也要对照创建时目录身份；status 对 Ready 完成 Git 检查后再次核验状态与目录归属，避免把检查期间进入非 Ready 的副本仍作为可用路径输出。检测到的并发状态或路径身份变化必须拒绝可用路径，但检查结束后仍不能保证路径持续存在。SQLite read-only 打开可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不会把一个物化完整的 Ready 副本变为不可用，也不阻止获取路径。
 
 doctor 只读报告不一致及未完成状态，没有 `--repair`。创建中断后不自动重新镜像最新源；调用者可显式强制清理登记的残留 Workspace，再以释放后的名称重新创建。初始化中断的 data root 不属于已登记 Workspace，不能交给 `workspace remove` 删除。
 

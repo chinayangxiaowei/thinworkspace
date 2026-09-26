@@ -9,6 +9,7 @@
 - bootstrap `config.toml` 与 data root `.thinws-root.toml` 的版本化字段、发布顺序和冲突规则；
 - SQLite schema v1、迁移规则、数据库约束和并发唯一性；
 - bootstrap 与 data-root lifecycle 两个 advisory lock scope 的路径、互斥和超时语义。
+- P1-12 起 Workspace 平台归属文件的版本、字段与删除前历史身份核验。
 
 ## 二、非职责
 
@@ -235,6 +236,14 @@ P1-03 不增加第八个概念 Port。`BootstrapStore` 在 P1-02 文档发布能
 SQLite 的“read-only”是产品状态只读，不等于目录字节零变化。WAL 模式读取可能创建、更新或删除 `state.db-wal`/`state.db-shm` 协调文件；P1 允许这一 SQLite 引擎行为，但不把它记录为产品成功或修复。如果辅助文件不可访问则结构化失败，不得回退 `immutable=1`。专项测试至少覆盖：初始无 sidecar、已有未 checkpoint WAL，以及并发写连接存在时读取到一致的已提交状态。
 
 CLI crate 是 composition root：业务调用和 renderer 只面向 Application，但生产装配可以直接依赖 macOS/SQLite Adapter 以构造 Port 实现。该依赖只做 wiring，不能在 CLI 复制初始化顺序、身份判断或错误策略。
+
+### 4.8 P1-12 Workspace 目录归属证明
+
+`workspaces/<workspace-id>/.state/ownership.toml` 是平台持久归属文件，不在用户可直接使用的 `root/` 内。它以版本 `1` 记录本实例 ID、WorkspaceId、APFS Volume UUID，以及创建时容器和 `root/` 各自从已打开目录 FD 取得的设备号、inode 和 birthtime（秒与纳秒）。这份证据只用于确认删除目标仍是创建时的目录，不表示工作区内容未被用户修改，也不提供防同 UID 主动篡改的安全隔离。
+
+`prepare_workspace` 在持有 data-root lifecycle lock 时建立私有容器、`.state/incomplete` 和空 `root/`，随后以 no-follow、create-new 的私有文件发布上述归属证据，并同步文件与父目录；只有证据已持久化且再次核对目录项身份后才把准备结果交给 Application。文件不可覆盖、不可从当前路径状态事后补造。创建期间如果在证据发布之前失败或中断，残留没有足够历史证明，`remove --force` 也必须拒绝接管；用户只能在产品外核对并处置这种未获证明的残留。首发前已有但缺少该文件的 Workspace 同样不得由产品补写并清理。
+
+Ready 查询可复用这份归属证明加强当前路径核验；但查询仍不取得 lifecycle lock，也不承诺返回后目录身份继续不变。删除必须在持锁后逐层 no-follow 打开并核对 data root、`workspaces`、ID 容器、归属文件和 `root/` 的身份与卷；容器或仍存在的 root 与历史证明不符时停止，不删除替换对象。`root/` 已不存在而容器及归属文件仍匹配时，可以继续只清理由该证明覆盖的剩余平台标记与空容器。目录被替换、归属文件缺失/损坏或任何身份无法证实时，不得靠同名路径、当前属主/权限或 `--force` 推定归属。具体清理顺序、状态与公开错误由详细设计和用户手册管理。
 
 ## 五、备选方案
 

@@ -181,3 +181,53 @@ fn real_cli_distinguishes_missing_source_from_missing_registered_root() {
     assert_eq!(status, 32, "{error}");
     assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
 }
+
+#[test]
+fn ten_cow_workspaces_keep_ordinary_file_writes_independent() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-15-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("ten-cow-copies-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"source content").unwrap();
+    init(&bootstrap, &data_root);
+
+    let mut copies = Vec::new();
+    for index in 0..10 {
+        let name = format!("copy-{index}");
+        let (status, created) = execute(&bootstrap, create_args(&source, &name, &[]));
+        assert_eq!(status, 0, "{created}");
+        assert_eq!(
+            created["data"]["materialization"]["actual_mode"],
+            "cow-clone"
+        );
+        assert_eq!(created["data"]["materialization"]["cow"], "confirmed");
+        let path = PathBuf::from(created["data"]["path"].as_str().unwrap());
+        assert_eq!(fs::read(path.join("note.txt")).unwrap(), b"source content");
+        copies.push(path);
+    }
+    assert_eq!(
+        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
+        10
+    );
+
+    for (index, copy) in copies.iter().enumerate() {
+        fs::write(copy.join("note.txt"), format!("copy {index}")).unwrap();
+    }
+    fs::write(source.join("note.txt"), b"source changed after cloning").unwrap();
+    for (index, copy) in copies.iter().enumerate() {
+        assert_eq!(
+            fs::read(copy.join("note.txt")).unwrap(),
+            format!("copy {index}").as_bytes()
+        );
+    }
+    assert_eq!(
+        fs::read(source.join("note.txt")).unwrap(),
+        b"source changed after cloning"
+    );
+}

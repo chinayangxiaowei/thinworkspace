@@ -542,6 +542,8 @@ P1-15 领取（2026-09-26，macOS/APFS）：主 Agent 在干净的本地 `main`�
 
 P1-15 依赖门禁修复切片（2026-09-26）：既有 macOS Adapter 在清理 JSONL 中使用生产 `serde_json`，但 crate 依赖检查脚本白名单仍拒绝该边，导致先前 P1-14 的额外检查退出 1；技术栈早已允许该日志用途。先把该依赖加入工具的合格图与平台边单测，两项均按预期 RED；仅扩充该 Adapter 的精确外部白名单后 GREEN，未放宽 Core/其他 crate 边界。`python3 -B -m unittest` 的 31 项 CI 辅助测试、`python3 tools/check_crate_dependencies.py`（7 个产品 crate）、fmt、全目标全 feature Clippy 和带真实 P1 异卷参数的全 workspace/all-targets 普通测试均退出 0。此切片仅修复既有门禁规则，不等于完成 P1-15 阶段验收；生产 Rust、依赖清单和公开契约未变，变异/fuzz 不适用，线上 CI 未执行。
 
+P1-15 十副本控制点切片（2026-09-26，macOS/APFS）：新增真实 CLI E2E，以同一非 Git 源目录创建 10 个 `cow-clone`/`confirmed` 工作区，各自改写普通文件，再改写源文件，逐一核对 10 份副本与来源互不覆盖；临时夹具结束后无残留。Debug 与 Release 定向测试均通过；包含此用例的全 workspace/all-targets Debug/Release 普通测试和 release workspace 构建均退出 0。随后外置 `/Volumes/data` 一度未挂载，`diskutil list external` 当时未显示目标设备；卷恢复后核对 APFS Volume UUID `1A42C888-32E3-489C-9BFA-67FD640A94E8`、工作树和夹具，并重跑 Release 定向测试再次通过，但耗时 61.40 秒，明显慢于恢复前约半秒。本证据证明该次内容隔离，不证明稳定性能或卷连接可靠；P1-15 的其余门禁、环境稳定性与独立审核仍待核对。
+
 ---
 
 ## 五、依赖摘要

@@ -5,14 +5,16 @@ use std::time::Duration;
 
 use thinws_application::{InitRequest, InitResult, ThinWorkspaceService};
 use thinws_core::{
-    AbsolutePath, CowEvidence, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId,
-    MaterializationMode, MaterializerKind, RootMarker, RootMarkerState, UnixMillis, VolumeId,
-    WorkspaceId, WorkspaceName, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
+    AbsolutePath, CowEvidence, DiscoveryCompleteness, ErrorCode, InstallationIdentity,
+    InstallationRecord, InstanceId, MaterializationMode, MaterializerKind, RootMarker,
+    RootMarkerState, UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceRecord,
+    WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
-    BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, LifecycleLock,
-    LifecycleLockGuard, LifecycleScope, MetadataSnapshot, MetadataStoreFactory, PortError,
-    PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
+    BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, GitInspection,
+    GitInspector, LifecycleLock, LifecycleLockGuard, LifecycleScope, MetadataSnapshot,
+    MetadataStoreFactory, PortError, PortErrorKind, PreparedDataRootEvidence,
+    PreparedWorkspaceEvidence, PublishResult,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -97,6 +99,30 @@ impl LifecycleLockGuard for FakeGuard {
 
 struct FakeBootstrap {
     state: Rc<RefCell<State>>,
+}
+
+struct StateChangingGit {
+    state: Rc<RefCell<State>>,
+}
+
+impl GitInspector for StateChangingGit {
+    fn inspect(&self, _copy_root: &AbsolutePath) -> GitInspection {
+        self.state.borrow_mut().events.push("git.inspect");
+        change_first_workspace_to_error(&self.state);
+        GitInspection::new(DiscoveryCompleteness::Complete, Vec::new(), Vec::new())
+    }
+}
+
+fn change_first_workspace_to_error(state: &Rc<RefCell<State>>) {
+    let record = state.borrow().workspaces[0].clone();
+    let changed = WorkspaceRecord::new(
+        record.reservation().clone(),
+        WorkspaceState::Error,
+        Some(ErrorCode::Filesystem),
+        UnixMillis::new(record.updated_at().get() + 1).unwrap(),
+    )
+    .unwrap();
+    state.borrow_mut().workspaces = vec![changed];
 }
 
 impl LifecycleLock for FakeBootstrap {
@@ -232,14 +258,7 @@ impl BootstrapStore for FakeBootstrap {
             .cloned()
             .expect("controlled Ready fixture");
         if self.state.borrow().change_ready_during_validation {
-            let changed = WorkspaceRecord::new(
-                record.reservation().clone(),
-                WorkspaceState::Error,
-                Some(ErrorCode::Filesystem),
-                UnixMillis::new(record.updated_at().get() + 1).unwrap(),
-            )
-            .unwrap();
-            self.state.borrow_mut().workspaces = vec![changed];
+            change_first_workspace_to_error(&self.state);
         }
         Ok(record.reservation().target_path().clone())
     }
@@ -581,4 +600,34 @@ fn path_does_not_publish_ready_when_state_changes_during_read_only_validation() 
     );
     assert!(events.contains(&"workspace.validate"));
     assert!(!events.contains(&"lock.acquire"));
+}
+
+#[test]
+fn status_does_not_publish_ready_when_git_inspection_changes_the_state() {
+    let state = ready_state();
+    let record = workspace(WorkspaceState::Ready, 0);
+    let id = record.reservation().workspace_id();
+    state.borrow_mut().workspaces = vec![record];
+    state.borrow_mut().final_materializations = vec![(
+        id,
+        FinalMaterializationSummary::new(
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializationMode::CowClone,
+            MaterializerKind::ApfsFileClone,
+            CowEvidence::Confirmed,
+            None,
+            0,
+        ),
+    )];
+    let git = StateChangingGit {
+        state: Rc::clone(&state),
+    };
+
+    let status = service(Rc::clone(&state))
+        .workspace_status("workspace-0", &git)
+        .unwrap();
+    assert_eq!(status.workspace().record().state(), WorkspaceState::Error);
+    assert!(status.git().is_none());
+    assert!(state.borrow().events.contains(&"git.inspect"));
 }

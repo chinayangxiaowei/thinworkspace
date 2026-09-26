@@ -166,7 +166,7 @@ Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修�
 | remove | 仅显式 --force 清理 | 检查后执行 | 仅显式 --force 清理 | 仅显式 --force 清理 |
 | doctor | 只读 | 只读 | 只读 | 只读 |
 
-查询不取得 lifecycle lock，不写平台产品状态或 Git 元数据；Ready 的 `path/status` 通过只读快照、当前受控目录归属核验和再次读取状态检查并发变化。返回的路径是查询时的事实，不保证之后仍存在。SQLite 只读查询可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不自行将 Ready 改成 Error。非 Ready 的 status 不启动 Git，返回 `git.state=unknown`、`issues=["workspace-not-ready"]`；`path` 返回 E_WORKSPACE_NOT_READY。Ready 路径当前归属核验失败时 `path/status` 均不输出可用路径。物化未证明完整时不能仅因目录存在返回 Ready。
+查询不取得 lifecycle lock，不写平台产品状态或 Git 元数据；Ready 的 `path/status` 通过只读快照、当前受控目录归属核验和再次读取状态检查并发变化，status 还会在 Git 检查后复核，避免输出检查期间失效的 Ready 路径。返回的路径是查询时的事实，不保证之后仍存在。SQLite 只读查询可能更新 WAL 协调文件，因此不承诺文件系统字节零变化。Git unknown 不自行将 Ready 改成 Error。非 Ready 的 status 不启动 Git，返回 `git.state=unknown`、`issues=["workspace-not-ready"]`；`path` 返回 E_WORKSPACE_NOT_READY。Ready 路径当前归属核验失败时 `path/status` 均不输出可用路径。物化未证明完整时不能仅因目录存在返回 Ready。
 
 ## 六、清理工作区
 

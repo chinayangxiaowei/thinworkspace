@@ -95,9 +95,33 @@ where
     ) -> Result<WorkspaceStatus, UseCaseError> {
         let name = parse_name(name)?;
         let (workspace, path) = self.inspect_workspace(&name)?;
+        let Some(path) = path else {
+            return Ok(WorkspaceStatus {
+                workspace,
+                git: None,
+            });
+        };
+        let inspection = git.inspect(&path);
+        // Git inspection can take time. Do not publish a stale Ready path if a
+        // lifecycle operation changed the record or controlled root meanwhile.
+        let (current, current_path) = self.inspect_workspace(&name)?;
+        let Some(_) = current_path else {
+            return Ok(WorkspaceStatus {
+                workspace: current,
+                git: None,
+            });
+        };
+        // Both validations require their path to equal the record's target;
+        // equal records therefore imply equal validated paths.
+        if current != workspace {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "Ready Workspace changed during Git inspection",
+            ));
+        }
         Ok(WorkspaceStatus {
-            workspace,
-            git: path.map(|path| git.inspect(&path)),
+            workspace: current,
+            git: Some(inspection),
         })
     }
 

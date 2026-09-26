@@ -29,7 +29,7 @@ P1-02 还需要解决两个独立竞争面：首次初始化竞争发生在 data
 
 Phase 1 首发平台的稳定 `VolumeId` 表示为规范小写、带连字符的 UUID 文本。它是从已打开目录取得的 APFS Volume UUID，不是卷名、设备显示名或 APFS container ID。路径以 macOS 文件系统原始字节保存：TOML 使用小写偶数长度十六进制，SQLite 使用 `BLOB`。解码后必须仍是无 NUL、无 `.`/`..` 组件的规范绝对路径；展示字符串不参与身份比较。
 
-时间字段使用非负 Unix 毫秒整数，语义为 UTC。P1-02 不持久化源码、patch、凭据、完整环境、构建日志或可重放 Operation。
+业务时间字段使用非负 Unix 毫秒整数，语义为 UTC；§4.8 的文件系统 birthtime 是保留纳秒精度的原始身份上界，不属于业务时间字段。P1-02 不持久化源码、patch、凭据、完整环境、构建日志或可重放 Operation。
 
 ### 4.2 Bootstrap 文件契约
 
@@ -239,11 +239,11 @@ CLI crate 是 composition root：业务调用和 renderer 只面向 Application�
 
 ### 4.8 P1-12 Workspace 目录归属证明
 
-`workspaces/<workspace-id>/.state/ownership.toml` 是平台持久归属文件，不在用户可直接使用的 `root/` 内。它以版本 `1` 记录本实例 ID、WorkspaceId、APFS Volume UUID，以及创建时容器和 `root/` 各自从已打开目录 FD 取得的设备号、inode 和 birthtime（秒与纳秒）。这份证据只用于确认删除目标仍是创建时的目录，不表示工作区内容未被用户修改，也不提供防同 UID 主动篡改的安全隔离。
+`metadata/ownership-<workspace-id>.toml` 是平台持久归属文件，不在用户可直接使用的 `root/` 或将被删除的 Workspace 容器内。它以版本 `1` 记录本实例 ID、WorkspaceId、APFS Volume UUID，以及创建时容器和 `root/` 各自从已打开目录 FD 取得的 inode（无符号 64 位）和 birthtime（有符号 64 位 Unix 秒与 `0..999999999` 纳秒）。设备号只用于本次运行的已打开 FD/目录项同一性及跨挂载检查，不持久化要求跨重挂载相等；持久判断以卷 UUID 和目录自身历史身份组合为准。macOS/APFS 在把目录 mtime 调早时也可能调早 birthtime，故重验要求同 inode 且当前 birthtime **不晚于**创建时记录的上界，而不是严格相等；birthtime 变晚则拒绝。此规则旨在识别普通目录替换，不承诺防止同 UID 主动复制/回填身份，也不能排除被刻意回填旧日期的 inode 复用。这份证据不表示工作区内容未被用户修改，也不提供安全隔离。
 
-`prepare_workspace` 在持有 data-root lifecycle lock 时建立私有容器、`.state/incomplete` 和空 `root/`，随后以 no-follow、create-new 的私有文件发布上述归属证据，并同步文件与父目录；只有证据已持久化且再次核对目录项身份后才把准备结果交给 Application。文件不可覆盖、不可从当前路径状态事后补造。创建期间如果在证据发布之前失败或中断，残留没有足够历史证明，`remove --force` 也必须拒绝接管；用户只能在产品外核对并处置这种未获证明的残留。首发前已有但缺少该文件的 Workspace 同样不得由产品补写并清理。
+`prepare_workspace` 在持有 data-root lifecycle lock 时建立私有容器、`.state/incomplete` 和空 `root/`，随后在同一已验证 data root 的 `metadata/` 中以 no-follow、create-new 的私有文件发布上述归属证据，并同步文件与父目录；只有证据已持久化且再次核对目录项身份后才把准备结果交给 Application。文件不可覆盖、不可从当前路径状态事后补造。创建期间如果在证据发布之前失败或中断，存在的容器没有足够历史证明，`remove --force` 也必须拒绝接管，用户只能在产品外核对并处置这种未获证明的残留。首发前已有但缺少该文件的 Workspace 同样不得由产品补写并删除。
 
-Ready 查询可复用这份归属证明加强当前路径核验；但查询仍不取得 lifecycle lock，也不承诺返回后目录身份继续不变。删除必须在持锁后逐层 no-follow 打开并核对 data root、`workspaces`、ID 容器、归属文件和 `root/` 的身份与卷；容器或仍存在的 root 与历史证明不符时停止，不删除替换对象。`root/` 已不存在而容器及归属文件仍匹配时，可以继续只清理由该证明覆盖的剩余平台标记与空容器。目录被替换、归属文件缺失/损坏或任何身份无法证实时，不得靠同名路径、当前属主/权限或 `--force` 推定归属。具体清理顺序、状态与公开错误由详细设计和用户手册管理。
+Ready 查询可复用这份归属证明加强当前路径核验；但查询仍不取得 lifecycle lock，也不承诺返回后目录身份继续不变。删除必须在持锁后逐层 no-follow 打开并核对 data root、`workspaces`、ID 容器、归属文件和 `root/` 的身份与卷；容器或仍存在的 root 与历史证明不符时停止，不删除替换对象。`root/` 已不存在而容器及归属文件仍匹配时，可以继续只清理由该证明覆盖的剩余平台标记与空容器。经持锁及 no-follow 确认 ID 容器不存在时，即使归属文件缺失，新的显式 `--force` 也只允许完成对应活动行的数据库收口与名称释放，不执行路径删除；这覆盖预留后尚未建目录和用户在产品外已核对清除无证据残留的情形。归属文件在 tombstone 写入后仍保留，不随 Workspace 清理或 GC 删除，避免“文件已删但数据库未收口”中断窗口失去证明。目录被替换、归属文件缺失/损坏或任何身份无法证实时，不得靠同名路径、当前属主/权限或 `--force` 推定归属。具体清理顺序、状态与公开错误由详细设计和用户手册管理。
 
 ## 五、备选方案
 

@@ -5,7 +5,10 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thinws_core::{
     AbsolutePath, InstallationIdentity, InstanceId, RootMarker, RootMarkerState, VolumeId,
+    WorkspaceId,
 };
+
+use crate::filesystem::HistoricalDirectoryIdentity;
 
 /// Maximum encoded size of either bootstrap TOML document.
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -53,6 +56,30 @@ struct MarkerDocument {
     data_root_hex: String,
     volume_id: String,
     state: MarkerState,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OwnershipDocument {
+    schema_version: u32,
+    instance_id: String,
+    workspace_id: String,
+    volume_id: String,
+    container_inode: u64,
+    container_birth_seconds: i64,
+    container_birth_nanoseconds: u32,
+    root_inode: u64,
+    root_birth_seconds: i64,
+    root_birth_nanoseconds: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceOwnership {
+    pub(crate) instance_id: InstanceId,
+    pub(crate) workspace_id: WorkspaceId,
+    pub(crate) volume_id: VolumeId,
+    pub(crate) container: HistoricalDirectoryIdentity,
+    pub(crate) root: HistoricalDirectoryIdentity,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -113,6 +140,59 @@ pub(crate) fn encode_marker(marker: &RootMarker) -> Result<Vec<u8>, DocumentErro
         data_root_hex: encode_hex(marker.identity().data_root().as_bytes()),
         volume_id: marker.identity().volume_id().to_string(),
         state,
+    })
+}
+
+pub(crate) fn encode_workspace_ownership(
+    ownership: WorkspaceOwnership,
+) -> Result<Vec<u8>, DocumentError> {
+    encode_toml(&OwnershipDocument {
+        schema_version: DOCUMENT_SCHEMA_VERSION,
+        instance_id: ownership.instance_id.to_string(),
+        workspace_id: ownership.workspace_id.to_string(),
+        volume_id: ownership.volume_id.to_string(),
+        container_inode: ownership.container.inode,
+        container_birth_seconds: ownership.container.birth_seconds,
+        container_birth_nanoseconds: ownership.container.birth_nanoseconds,
+        root_inode: ownership.root.inode,
+        root_birth_seconds: ownership.root.birth_seconds,
+        root_birth_nanoseconds: ownership.root.birth_nanoseconds,
+    })
+}
+
+pub(crate) fn decode_workspace_ownership(
+    bytes: &[u8],
+) -> Result<WorkspaceOwnership, DocumentError> {
+    let document: OwnershipDocument = decode_toml(bytes)?;
+    if document.schema_version != DOCUMENT_SCHEMA_VERSION {
+        return Err(DocumentError::UnsupportedVersion);
+    }
+    if document.container_birth_nanoseconds >= 1_000_000_000
+        || document.root_birth_nanoseconds >= 1_000_000_000
+        || document.container_inode == 0
+        || document.root_inode == 0
+        || document.container_birth_seconds < 0
+        || document.root_birth_seconds < 0
+    {
+        return Err(DocumentError::InvalidIdentity);
+    }
+    Ok(WorkspaceOwnership {
+        instance_id: InstanceId::from_str(&document.instance_id)
+            .map_err(|_| DocumentError::InvalidIdentity)?,
+        workspace_id: WorkspaceId::from_str(&document.workspace_id)
+            .map_err(|_| DocumentError::InvalidIdentity)?,
+        volume_id: VolumeId::from_str(&document.volume_id)
+            .map_err(|_| DocumentError::InvalidIdentity)?,
+        container: HistoricalDirectoryIdentity {
+            inode: document.container_inode,
+            birth_seconds: document.container_birth_seconds,
+            birth_nanoseconds: document.container_birth_nanoseconds,
+        },
+        root: HistoricalDirectoryIdentity {
+            inode: document.root_inode,
+            birth_seconds: document.root_birth_seconds,
+            birth_nanoseconds: document.root_birth_nanoseconds,
+        },
     })
 }
 

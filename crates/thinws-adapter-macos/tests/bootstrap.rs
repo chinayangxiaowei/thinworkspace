@@ -1,9 +1,9 @@
-use std::fs;
+use std::fs::{self, File, FileTimes};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use tempfile::{Builder, TempDir};
 use thinws_adapter_macos::{MacOsHostAdapter, MacOsPreparedDataRoot};
@@ -170,6 +170,18 @@ fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
             & 0o7777,
         0o600
     );
+    assert_eq!(
+        fs::metadata(
+            data_root
+                .join("metadata")
+                .join(format!("ownership-{id}.toml"))
+        )
+        .unwrap()
+        .permissions()
+        .mode()
+            & 0o7777,
+        0o600
+    );
     assert_eq!(fs::read_dir(container.join("root")).unwrap().count(), 0);
     assert!(adapter.prepare_workspace(&lock, &layout, id).is_err());
     fs::set_permissions(container.join("root"), fs::Permissions::from_mode(0o750)).unwrap();
@@ -262,6 +274,72 @@ fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
             .join(third.to_string())
             .join(".state/incomplete")
             .exists()
+    );
+}
+
+#[test]
+fn p1_12_ready_validation_rejects_an_ordinary_replacement_root() {
+    let temp = controlled_tempdir();
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let data_root = temp.path().join("data");
+    adapter.prepare_bootstrap().unwrap();
+    let bootstrap_lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
+    let proof = adapter
+        .create_initializing(&bootstrap_lock, prepared, &identity)
+        .unwrap();
+    let layout = adapter.initialize_layout(&bootstrap_lock, &proof).unwrap();
+    adapter.publish_ready(&bootstrap_lock, proof).unwrap();
+    adapter.publish_config(&bootstrap_lock, &identity).unwrap();
+    drop(bootstrap_lock);
+
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(500))
+        .unwrap();
+    let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f45").unwrap();
+    let prepared = adapter.prepare_workspace(&lock, &layout, id).unwrap();
+    adapter
+        .clear_workspace_incomplete(&lock, &layout, prepared)
+        .unwrap();
+    let container = data_root.join("workspaces").join(id.to_string());
+    let root = container.join("root");
+    let ownership = data_root
+        .join("metadata")
+        .join(format!("ownership-{id}.toml"));
+    let ownership_bytes = fs::read(&ownership).unwrap();
+    fs::write(&ownership, b"not a valid ownership proof").unwrap();
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
+    fs::write(&ownership, &ownership_bytes).unwrap();
+    let displaced_ownership = data_root.join("metadata/displaced-ownership");
+    fs::rename(&ownership, &displaced_ownership).unwrap();
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
+    fs::rename(&displaced_ownership, &ownership).unwrap();
+    File::open(&root)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(946_684_800)))
+        .unwrap();
+    assert!(adapter.validate_ready_workspace(&layout, id).is_ok());
+    fs::rename(&root, container.join("original-root")).unwrap();
+    private_dir(&root);
+    fs::write(root.join("foreign-content"), b"must survive").unwrap();
+
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
+    assert_eq!(
+        fs::read(root.join("foreign-content")).unwrap(),
+        b"must survive"
+    );
+
+    fs::rename(&container, data_root.join("workspaces/original-container")).unwrap();
+    private_dir(&container);
+    private_dir(&container.join(".state"));
+    private_dir(&container.join("root"));
+    fs::write(container.join("root/another-foreign-content"), b"keep").unwrap();
+    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
+    assert_eq!(
+        fs::read(container.join("root/another-foreign-content")).unwrap(),
+        b"keep"
     );
 }
 

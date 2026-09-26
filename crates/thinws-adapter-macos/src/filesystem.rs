@@ -38,6 +38,22 @@ pub(crate) struct FileIdentity {
     inode: u64,
 }
 
+/// Directory identity stable across APFS remounts on the same Volume UUID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HistoricalDirectoryIdentity {
+    pub(crate) inode: u64,
+    pub(crate) birth_seconds: i64,
+    pub(crate) birth_nanoseconds: u32,
+}
+
+impl HistoricalDirectoryIdentity {
+    pub(crate) fn permits_current(self, current: Self) -> bool {
+        self.inode == current.inode
+            && (current.birth_seconds, current.birth_nanoseconds)
+                <= (self.birth_seconds, self.birth_nanoseconds)
+    }
+}
+
 pub(crate) struct ValidatedDirectory {
     pub(crate) fd: OwnedFd,
     pub(crate) identity: FileIdentity,
@@ -492,6 +508,25 @@ pub(crate) fn revalidate_directory(directory: &ValidatedDirectory) -> Result<(),
     Ok(())
 }
 
+pub(crate) fn historical_directory_identity(
+    directory: &ValidatedDirectory,
+) -> Result<HistoricalDirectoryIdentity, PortError> {
+    let stat = rustix::fs::fstat(&directory.fd)
+        .map_err(|error| io_error("inspect historical directory identity", error))?;
+    if !FileType::from_raw_mode(stat.st_mode).is_dir()
+        || stat.st_uid != rustix::process::geteuid().as_raw()
+        || !(0..1_000_000_000).contains(&stat.st_birthtime_nsec)
+    {
+        return Err(validation_error("historical directory identity is unsafe"));
+    }
+    Ok(HistoricalDirectoryIdentity {
+        inode: stat.st_ino,
+        birth_seconds: stat.st_birthtime,
+        birth_nanoseconds: u32::try_from(stat.st_birthtime_nsec)
+            .map_err(|_| validation_error("historical directory birthtime is invalid"))?,
+    })
+}
+
 /// Revalidates a child whose application-owned mode may change after materialization.
 /// The private parent remains strictly validated; the child is never followed by name.
 pub(crate) fn revalidate_attached_directory(
@@ -600,11 +635,12 @@ impl Error for FilesystemValidationError {}
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
+    use std::fs::{self, File, FileTimes};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use tempfile::{Builder, TempDir};
 
@@ -622,6 +658,20 @@ mod tests {
         fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o700)).unwrap();
         let directory = open_private_directory(&directory_path).unwrap();
         (temp, directory_path, directory)
+    }
+
+    #[test]
+    fn p1_12_old_source_mtime_can_backdate_root_birthtime() {
+        let (_temp, directory_path, directory) = controlled_directory("root-birthtime-");
+        let before = historical_directory_identity(&directory).unwrap();
+        File::open(directory_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(946_684_800)))
+            .unwrap();
+        let after = historical_directory_identity(&directory).unwrap();
+        assert_eq!(after.inode, before.inode);
+        assert!(before.permits_current(after));
+        assert_eq!(after.birth_seconds, 946_684_800);
     }
 
     #[test]

@@ -213,7 +213,7 @@ thinws workspace remove auth-refresh --force
 
 force 明确授权丢弃副本内容，绕过 tracked dirty 和 Git 检查不完整；不要求填写理由、提供 commit、联网或取得主管在线批准。无额外交互确认，脚本中的显式 flag 就是清理意图。
 
-force 不绕过实例/目标归属、卷身份、路径安全和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。缺少或损坏平台归属证明、原 `root/` 被其他目录替换时也必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。成功时删除整个已登记的 `workspaces/<workspace-id>/` 目录；data root 内的日志保留。
+force 不绕过实例/目标归属、卷身份、路径安全和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。容器仍在但缺少或损坏平台归属证明、原 `root/` 被其他目录替换时也必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。若经安全核验 ID 容器已不存在，显式 force 可以只完成未完成记录的清理并释放名称，不删除任何路径。正常成功时删除整个已登记的 `workspaces/<workspace-id>/` 目录；data root 内的日志保留。
 
 ```text
 Workspace removed

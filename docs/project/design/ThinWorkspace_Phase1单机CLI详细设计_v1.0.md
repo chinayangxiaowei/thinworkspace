@@ -69,16 +69,16 @@ thinws-data/
 ├── .thinws-root.toml
 ├── metadata/
 │   ├── state.db
-│   └── lifecycle.lock
+│   ├── lifecycle.lock
+│   └── ownership-<workspace-id>.toml
 ├── logs/operations.jsonl
 ├── workspaces/<workspace-id>/.state/incomplete
-├── workspaces/<workspace-id>/.state/ownership.toml
 ├── workspaces/<workspace-id>/root/
 ├── staging/
 └── trash/
 ```
 
-受控目标由 WorkspaceId 推导，全部受控子树位于登记的同一 APFS Volume。`ownership.toml` 的持久目录身份契约由 ADR-0004 §4.8 维护，不复制到 `root/`。源目录是用户提供的只读输入，不需要位于 data root 内，但首版要求与 data root 同卷；拒绝源与 data root 相等或互相包含，防止把平台目录递归复制进自身。根和路径组件不接受未验证链接，遍历边界以物化设计为准。
+受控目标由 WorkspaceId 推导，全部受控子树位于登记的同一 APFS Volume。`metadata/ownership-<workspace-id>.toml` 的持久目录身份契约由 ADR-0004 §4.8 维护，不复制到 `root/`，也不随 Workspace 删除。源目录是用户提供的只读输入，不需要位于 data root 内，但首版要求与 data root 同卷；拒绝源与 data root 相等或互相包含，防止把平台目录递归复制进自身。根和路径组件不接受未验证链接，遍历边界以物化设计为准。
 
 `.state` 与日志均在副本 `root/` 外；`.git` 不是平台保留项，它仅是被复制的目录内容。用户不能手工移动或改写平台管理目录。
 
@@ -153,7 +153,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 1. 验证实例、WorkspaceId、卷及创建时持久目录归属；运行只读 Git 与进程检查。
 2. Application 按手册决定普通拒绝或接受显式强制意图；拒绝发生在破坏性写入之前。
 3. 清理前写持久日志，并将 Workspace 标记为 Deleting；日志关联 ID 仅用于定位这次尝试，不用于重放。
-4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Materializer 从已验证目录 FD 以 no-follow 清理副本 `root/` 的全部内容，包括其中 `.git` 和后来生成的内容；Application 随后清理同一 WorkspaceId 下的平台标记与空容器目录。`ownership.toml` 留到 root 已不存在且平台容器可安全收口时才删除。
+4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Materializer 从已验证目录 FD 以 no-follow 清理副本 `root/` 的全部内容，包括其中 `.git` 和后来生成的内容；Application 随后清理同一 WorkspaceId 下的平台标记与空容器目录。位于 `metadata/` 的归属文件保留，不作为清理目标。
 5. 确认整个 `workspaces/<workspace-id>/` 已不存在；在同一事务删除活跃记录并保留最小 tombstone；记录完成结果。data root 内的日志不随工作区删除。
 
 强制操作不要求说明理由、commit 证明、主管批准或在线服务；只保留日志。日志字段与敏感信息边界见《开发规范》§13。清理前无法持久化日志时停止且报告 I/O 错误；已开始后失败/中断保留非 Ready 状态和剩余范围，不能写成成功。
@@ -164,7 +164,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 尚未开始删除的普通拒绝不固定后续 flags；用户可重新执行显式强制清理。删除中断后不自动续跑，也不重放旧 Git 检查结果。若 WorkspaceId 容器目录仍在，用户可重新发起一次 `remove --force`；每次都重新验证实例、卷、目录归属和当前占用，绝不扩大到登记范围外。
 
-部分删除后 Git 检查可能已不可用，因此普通清理拒绝；只有新的显式 `--force` 可授权清理整个仍归属本实例的剩余目录。若 root 已被删去，须以仍在的历史归属文件和容器身份确认剩余平台标记；若 root 被替换、归属文件缺失或损坏、容器身份不符，则停止而不删除新对象。创建过程尚未持久化归属文件的极短失败窗口只能在平台外核对清理，不能为了可恢复性放松删除证明。
+部分删除后 Git 检查可能已不可用，因此普通清理拒绝；只有新的显式 `--force` 可授权清理整个仍归属本实例的剩余目录。若 root 已被删去，须以仍在的历史归属文件和容器身份确认剩余平台标记；若整个 ID 容器经持锁、no-follow 验证已经不存在，即使归属文件缺失，也只完成 Deleting 行的数据库收口，不再执行路径删除。若 root 被替换、归属文件缺失或损坏但容器仍在、容器身份不符，则停止而不删除新对象。创建过程尚未持久化归属文件的极短失败窗口只允许用户在平台外核对并清除残留目录，再显式 force 释放名称；不能为了可恢复性放松删除证明。
 
 日志位于 data root 的 `logs/`，不随 Workspace 清理或 GC 删除。它是普通本机日志，不宣称防篡改或构成成果证明。中断可能只有开始事件；缺少完成事件不能解释为成功。
 

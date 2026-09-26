@@ -401,6 +401,8 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 P1-12 领取（2026-09-26 UTC）：主 Agent 在唯一 checkout 的本地 `main` 实施，基线 `6d9bb75`；不派生开发 Agent、不创建线上 PR，冻结候选使用 GPT-6 Astra / `xhigh` 只读独立审核。风险 R4（递归删除、跨进程路径竞态、进程占用 FFI）。先补 ADR-0004 的 Workspace 历史目录归属证明，再实现受控删除，避免仅凭当前同名普通 `root/` 推定可删除。验收断言：真实 APFS 上替换原 root/容器、缺失或损坏证明均拒绝且不触碰替换目录；普通清理对 tracked dirty/unknown 拒绝，不因 untracked-only 拒绝；显式 force 绕过前两项但不绕过身份/卷/确认占用；日志在目标删除后可读且起止事件如实；中途失败保留非 Ready 与受控残留，再次 force 只清理仍可证明归属的对象；重复 ID 由 tombstone 返回 already-removed。真实 Git、进程、CLI/JSON、错误注入、定向变异和受影响 fuzz 均需执行，任务完成不自动代表 P1.e 小阶段放行。
 
+P1-12 首轮安全设计审核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `94afe48050fc803011be8c603a69c3fcd05b3ba6` 给出 Changes requested。归属文件置于待删容器内会在删标记后中断时丢失重试证据，历史 `st_dev` 不能跨重挂载等值，预留记录却无标记且目录已不存在时必须能仅收口数据库。主 Agent 已将证据移到 `metadata/` 并在 tombstone 后保留，只持久化卷 UUID、inode 和 birthtime 上界；明确“容器不存在且显式 force”不执行路径删除，只释放记录。另经真实 APFS 测试证实把目录 mtime 调到 2000 年会把 birthtime 调早，故持久出生时间只作为上界，不能相等比较。生产 Adapter 已先补持久文件创建与 Ready 历史归属核验，并有普通目录替换先 RED 后 GREEN、缺失/损坏证明、容器替换和旧 mtime 回归；全 workspace/all-targets 普通测试及 Clippy 通过。此时删除、日志、ProcessProbe、CLI 与任务级定向变异/fuzz 均未实现或未执行，P1-12 保持 In Progress；设计修订及代码须在冻结候选后重新独立审核，不沿用对旧提交的结论。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

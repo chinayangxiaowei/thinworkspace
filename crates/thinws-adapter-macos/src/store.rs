@@ -10,16 +10,17 @@ use thinws_ports::{
 };
 
 use crate::document::{
-    DocumentError, decode_bootstrap_config, decode_root_marker, encode_config, encode_marker,
+    DocumentError, WorkspaceOwnership, decode_bootstrap_config, decode_root_marker,
+    decode_workspace_ownership, encode_config, encode_marker, encode_workspace_ownership,
 };
 use crate::filesystem::{
     FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, create_private_child_directory,
-    create_private_file, duplicate_validated_directory, entry_identity, io_error,
-    open_owned_child_directory, open_private_child_directory, open_private_directory,
-    open_private_directory_optional, open_private_file, path_from_absolute,
-    prepare_private_directory, read_private_file, require_empty_directory,
-    revalidate_attached_directory, revalidate_directory, sync_directory, unlink_entry,
-    validate_file_entry,
+    create_private_file, duplicate_validated_directory, entry_identity,
+    historical_directory_identity, io_error, open_owned_child_directory,
+    open_private_child_directory, open_private_directory, open_private_directory_optional,
+    open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
+    require_empty_directory, revalidate_attached_directory, revalidate_directory, sync_directory,
+    unlink_entry, validate_file_entry,
 };
 use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
@@ -62,6 +63,7 @@ pub struct MacOsDataRootLayout {
     database_identity: FileIdentity,
     database_path: AbsolutePath,
     volume_id: VolumeId,
+    instance_id: thinws_core::InstanceId,
 }
 
 /// Proof of one newly created Workspace container.
@@ -71,6 +73,10 @@ pub struct MacOsPreparedWorkspace {
     root: ValidatedDirectory,
     incomplete_file: File,
     incomplete_identity: FileIdentity,
+    ownership_metadata: ValidatedDirectory,
+    ownership_file: File,
+    ownership_identity: FileIdentity,
+    ownership: WorkspaceOwnership,
     target_root: AbsolutePath,
     volume_id: VolumeId,
 }
@@ -87,7 +93,24 @@ impl PreparedWorkspaceEvidence for MacOsPreparedWorkspace {
             OsStr::new("incomplete"),
             &self.incomplete_file,
             self.incomplete_identity,
-        )
+        )?;
+        revalidate_directory(&self.ownership_metadata)?;
+        let name = ownership_name(self.ownership.workspace_id);
+        validate_file_entry(
+            &self.ownership_metadata.fd,
+            OsStr::new(&name),
+            &self.ownership_file,
+            self.ownership_identity,
+        )?;
+        if read_workspace_ownership(&self.ownership_metadata, self.ownership.workspace_id)?
+            != self.ownership
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace ownership proof changed",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -107,6 +130,20 @@ impl MacOsPreparedWorkspace {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
                 "revalidate Workspace root volume",
+            ));
+        }
+        if !self
+            .ownership
+            .container
+            .permits_current(historical_directory_identity(&self.container)?)
+            || !self
+                .ownership
+                .root
+                .permits_current(historical_directory_identity(&self.root)?)
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace historical directory identity changed",
             ));
         }
         Ok(())
@@ -297,6 +334,7 @@ impl BootstrapStore for MacOsHostAdapter {
             database_identity,
             database_path,
             volume_id: proof.marker.identity().volume_id(),
+            instance_id: proof.marker.identity().instance_id(),
         };
         layout.revalidate()?;
         Ok(layout)
@@ -343,6 +381,7 @@ impl BootstrapStore for MacOsHostAdapter {
             database_identity,
             database_path,
             volume_id: identity.volume_id(),
+            instance_id: identity.instance_id(),
         };
         layout.revalidate()?;
         Ok(layout)
@@ -364,6 +403,32 @@ impl BootstrapStore for MacOsHostAdapter {
             create_private_file(&state, OsStr::new("incomplete"))?;
         let root = create_private_child_directory(&container, OsStr::new("root"))?;
         require_empty_directory(&root)?;
+        let ownership = WorkspaceOwnership {
+            instance_id: layout.instance_id,
+            workspace_id,
+            volume_id: layout.volume_id,
+            container: historical_directory_identity(&container)?,
+            root: historical_directory_identity(&root)?,
+        };
+        let ownership_metadata = duplicate_validated_directory(&layout.controlled_directories[0])?;
+        let ownership_bytes = encode_workspace_ownership(ownership).map_err(document_error)?;
+        let name = ownership_name(workspace_id);
+        let (ownership_file, ownership_identity) = match PrivateTemp::create(
+            &ownership_metadata.fd,
+            "workspace-ownership",
+            &ownership_bytes,
+        )?
+        .publish_noreplace(OsStr::new(&name))
+        {
+            Ok(published) => published,
+            Err(NoReplaceError::Exists) => {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace ownership proof already exists",
+                ));
+            }
+            Err(NoReplaceError::Other(error)) => return Err(error),
+        };
         let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
             PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
                 .with_source(error)
@@ -374,6 +439,10 @@ impl BootstrapStore for MacOsHostAdapter {
             root,
             incomplete_file,
             incomplete_identity,
+            ownership_metadata,
+            ownership_file,
+            ownership_identity,
+            ownership,
             target_root,
             volume_id: layout.volume_id,
         };
@@ -429,6 +498,21 @@ impl BootstrapStore for MacOsHostAdapter {
         }
         let root = open_owned_child_directory(&container, OsStr::new("root"))?;
         revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
+        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
+        if ownership.instance_id != layout.instance_id
+            || ownership.volume_id != layout.volume_id
+            || !ownership
+                .container
+                .permits_current(historical_directory_identity(&container)?)
+            || !ownership
+                .root
+                .permits_current(historical_directory_identity(&root)?)
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace historical ownership changed",
+            ));
+        }
         for directory in [&container, &state, &root] {
             if volume_id_for_directory(directory)? != layout.volume_id {
                 return Err(PortError::new(
@@ -448,6 +532,12 @@ impl BootstrapStore for MacOsHostAdapter {
         )?;
         revalidate_attached_directory(&container, &state, OsStr::new(".state"))?;
         revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
+        if read_workspace_ownership(&layout.controlled_directories[0], workspace_id)? != ownership {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace ownership proof changed",
+            ));
+        }
         layout.revalidate()?;
         Ok(path)
     }
@@ -667,6 +757,38 @@ fn read_marker_at(
     Ok(result)
 }
 
+fn ownership_name(workspace_id: WorkspaceId) -> String {
+    format!("ownership-{workspace_id}.toml")
+}
+
+fn read_workspace_ownership(
+    metadata: &ValidatedDirectory,
+    workspace_id: WorkspaceId,
+) -> Result<WorkspaceOwnership, PortError> {
+    let name = ownership_name(workspace_id);
+    let bytes = read_private_file(&metadata.fd, OsStr::new(&name))?.ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership proof is missing",
+        )
+    })?;
+    let ownership = decode_workspace_ownership(&bytes).map_err(|error| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "decode Workspace ownership proof",
+        )
+        .with_source(error)
+    })?;
+    if ownership.workspace_id != workspace_id {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership ID does not match",
+        ));
+    }
+    revalidate_directory(metadata)?;
+    Ok(ownership)
+}
+
 fn remove_exact_entry(
     directory: &crate::filesystem::ValidatedDirectory,
     name: &OsStr,
@@ -867,6 +989,7 @@ mod tests {
             database_identity,
             database_path,
             volume_id: registered_volume,
+            instance_id: InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
         };
 
         assert_eq!(

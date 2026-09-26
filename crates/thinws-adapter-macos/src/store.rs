@@ -550,6 +550,48 @@ impl BootstrapStore for MacOsHostAdapter {
         Ok(path)
     }
 
+    fn inspect_removal_container(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<AbsolutePath>, PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        let workspaces = &layout.controlled_directories[2];
+        let trash = &layout.controlled_directories[4];
+        let active_name = workspace_id.to_string();
+        let isolated_name = format!("remove-{workspace_id}");
+        let active = open_optional_private_child(workspaces, OsStr::new(&active_name))?;
+        let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
+        let located = match (active, isolated) {
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace exists at both active and isolated paths",
+                ));
+            }
+            (Some(container), None) => Some((workspaces, active_name.as_str(), container)),
+            (None, Some(container)) => Some((trash, isolated_name.as_str(), container)),
+        };
+        let result = if let Some((parent, name, container)) = located {
+            let _ = validate_removal_layout(layout, workspace_id, &container)?;
+            revalidate_attached_directory(parent, &container, OsStr::new(name))?;
+            Some(
+                crate::filesystem::absolute_from_path(&container.path).map_err(|error| {
+                    PortError::new(PortErrorKind::InvalidData, "derive removal container path")
+                        .with_source(error)
+                })?,
+            )
+        } else {
+            None
+        };
+        layout.revalidate()?;
+        self.validate_data_root_lock(lock, layout)?;
+        Ok(result)
+    }
+
     fn remove_workspace(
         &self,
         lock: &Self::LockGuard,

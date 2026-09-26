@@ -166,6 +166,16 @@ pub trait BootstrapStore {
         workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError>;
 
+    /// Finds the single currently owned container before a process-use scan.
+    /// An absent container returns None; active/isolated conflicts and unproven
+    /// entries fail without selecting either path. Requires the data-root lock.
+    fn inspect_removal_container(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<AbsolutePath>, PortError>;
+
     /// Removes one proven-owned Workspace container after Application has persisted
     /// its cleanup intent and authorized the destructive operation. Missing
     /// containers are reported without deleting any path; existing containers

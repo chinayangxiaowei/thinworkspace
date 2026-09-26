@@ -516,6 +516,48 @@ fn p1_12_refuses_a_replacement_in_the_isolated_location() {
 }
 
 #[test]
+fn p1_12_inspection_follows_the_single_proven_container_location() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    let active = adapter
+        .inspect_removal_container(&lock, &layout, id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.as_bytes(), container.as_os_str().as_bytes());
+
+    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
+    fs::rename(&container, &isolated).unwrap();
+    let staged = adapter
+        .inspect_removal_container(&lock, &layout, id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(staged.as_bytes(), isolated.as_os_str().as_bytes());
+
+    private_dir(&container);
+    fs::write(container.join("foreign"), b"keep").unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
+    fs::remove_file(container.join("foreign")).unwrap();
+    fs::remove_dir(&container).unwrap();
+    fs::rename(&isolated, &container).unwrap();
+    assert_eq!(
+        adapter.remove_workspace(&lock, &layout, id).unwrap(),
+        WorkspaceRemoval::Removed { root_entries: 0 }
+    );
+    assert!(
+        adapter
+            .inspect_removal_container(&lock, &layout, id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn p1_12_does_not_report_removed_if_active_name_reappears_during_isolated_cleanup() {
     let (temp, adapter, layout, lock, id, container) = removal_fixture();
     for index in 0..2_000 {

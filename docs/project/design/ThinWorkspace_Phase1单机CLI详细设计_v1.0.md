@@ -152,7 +152,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 
 用户停止相关工具后，按以下顺序执行：
 
-1. 验证实例、WorkspaceId、卷及创建时持久目录归属；运行只读 Git 与进程检查。
+1. 验证实例、WorkspaceId、卷及创建时持久目录归属；运行只读 Git 与进程检查。持锁的 BootstrapStore 只读指出当前唯一且已证明归属的容器位置（原位置或隔离位置）供 ProcessProbe 检查；两处冲突、任一现存容器无证明则拒绝，不由 Application 自行拼路径或择一。
 2. Application 按手册决定普通拒绝或接受显式强制意图；拒绝发生在破坏性写入之前。
 3. 清理前写持久日志，并将 Workspace 标记为 Deleting；日志关联 ID 仅用于定位这次尝试，不用于重放。
 4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Application 只向持有 data-root 锁与目录归属证据的 `BootstrapStore` 授权一个 WorkspaceId。该 Adapter 先以不覆盖的同卷 rename 将已证明归属的 ID 容器隔离到实例私有 `trash/remove-<workspace-id>/`，再核对移动后的历史身份；仅在已确认的私有隔离树内，从目录 FD 以 no-follow 清理副本 `root/` 的全部内容（包括 `.git` 和后来生成的内容）、平台标记及空容器。不得在公开路径上按 stat 后的名称递归 unlink，也不得把可由调用者构造的裸路径当作删除授权。位于 `metadata/` 的归属文件保留，不作为清理目标。

@@ -267,6 +267,15 @@ impl BootstrapStore for FakeBootstrap {
         Ok(record.reservation().target_path().clone())
     }
 
+    fn inspect_removal_container(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _workspace_id: WorkspaceId,
+    ) -> Result<Option<AbsolutePath>, PortError> {
+        unreachable!("init/doctor never inspects a removal container")
+    }
+
     fn remove_workspace(
         &self,
         _lock: &Self::LockGuard,

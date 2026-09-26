@@ -190,7 +190,7 @@ ProcessProbe 通过 macOS Adapter 报告当前用户可见进程对已验证 `wo
 
 GC 仅处理已完成操作留下、归属可证明且明确标为可回收的 staging/trash 残留。`trash/remove-<workspace-id>/` 若仍对应活跃 Deleting/Error Workspace，属于显式清理的隔离残留，普通 GC 不可回收。不删除任何活跃 Workspace（包括 Creating、Deleting、Error）、日志、用户源目录或外部路径；不运行 Git GC/prune，不管理 Git refs。未完成 Workspace 只能由显式 `workspace remove --force` 清理，不能让 GC 绕过清理边界。
 
-计划在一致的只读元数据视图中形成，执行在 lifecycle lock 内重验。空间统计由已有 BootstrapStore 对当前已验证的 Ready `root/` 进行只读、no-follow、同卷的有界扫描，避免新增单方法 Port 或经未绑定路径重新进入；每个普通文件和符号链接目录项的 `st_size` 计入逻辑字节，目录不计入逻辑字节，`st_blocks` 对同一卷内去重后的 inode 计入已分配字节估算。扫描失败、越界、特殊类型、卷变化或扫描期间身份变化时两个数值均为 unknown，不以部分结果冒充完整；非 Ready 不扫描。已分配字节是当前文件系统报告的估算，APFS CoW 共享块可能重复计入，不等于删副本可释放的独占空间。
+计划在一致的只读元数据视图中形成，执行在 lifecycle lock 内重验。空间统计由已有 BootstrapStore 对当前已验证的 Ready `root/` 进行只读、no-follow、同卷的有界扫描，避免新增单方法 Port 或经未绑定路径重新进入；每个普通文件和符号链接目录项的 `st_size` 计入逻辑字节，目录不计入逻辑字节，`st_blocks` 对同一卷内去重后的 inode 计入已分配字节估算。副本内部条目扫描失败、越界、特殊类型、卷变化或条目身份变化时两个数值均为 unknown，不以部分结果冒充完整；受控 `root/` 或容器的归属核验失败仍按 §八拒绝可用路径，不能降为 unknown。非 Ready 不扫描。已分配字节是当前文件系统报告的估算，APFS CoW 共享块可能重复计入，不等于删副本可释放的独占空间。
 
 ## 十一、实现验收重点
 

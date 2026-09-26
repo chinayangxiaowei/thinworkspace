@@ -69,6 +69,10 @@ jobs:
         run: cargo test --locked --workspace --doc
       - name: Release tests
         run: cargo test --locked --release --workspace --all-targets -- --include-ignored --nocapture
+      - name: Release binary black-box E2E
+        run: |
+          cargo build --locked --release --workspace
+          python3 -B tools/ci_release_binary_e2e.py
       - name: Load pinned quality tools
         run: |
           python3 - <<'PY'

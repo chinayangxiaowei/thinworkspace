@@ -141,6 +141,7 @@ thinws workspace create --source /Volumes/data/code/my-app --name auth-refresh -
 输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
 
 `--allow-copy` 不是跨卷开关；跨卷、卷身份变化、空间不足或普通 I/O 错误不触发复制降级。中途失败先按已知范围回滚，无法确认时保留 Error，不发布混合或不完整目录。
+已预留 Workspace 后的创建失败在错误 `context.workspace_id` 中标明受控对象；若物化已产生失败回执，还给出 `materialization_attempt_count`、`rollback_incomplete` 和 `unconfirmed_staging` 摘要。摘要不表示已自动清理，也不把 partial receipt 写成成功的 final receipt。
 
 ## 五、直接使用与查询
 

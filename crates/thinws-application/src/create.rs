@@ -6,8 +6,8 @@ use thinws_core::{
     AbsolutePath, ErrorCode, FallbackPolicy, FallbackReason, InstallationRecord,
     MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
     MaterializationPlan, MaterializationPlanError, MaterializeRequest, MaterializerKind,
-    SupportState, UnixMillis, VolumeId, WorkspaceId, WorkspaceName, WorkspaceRecord,
-    WorkspaceReservation, WorkspaceState,
+    PathCapabilityReport, PathResolution, SupportState, UnixMillis, VolumeId, WorkspaceId,
+    WorkspaceName, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, LifecycleLock,
@@ -223,6 +223,17 @@ where
             .bootstrap
             .inspect_materialization_paths(&paths)
             .map_err(|error| map_port(Stage::Layout, error))?;
+        require_existing_source(report.source())?;
+        let data_root_report = self
+            .bootstrap
+            .inspect_path(identity.data_root())
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        if paths_overlap_with_identity(report.source(), &data_root_report) {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "source and data root must not overlap",
+            ));
+        }
         let plan = select_plan(&report, request.allow_full_copy())?;
         if plan.target_volume_id() != identity.volume_id() {
             return Err(semantic_error(
@@ -279,10 +290,22 @@ where
                 "source and data root must not overlap",
             ));
         }
+        // Classify an already missing or invalid registered root before the
+        // lock's metadata parent can turn that condition into a generic error.
+        self.bootstrap
+            .validate_layout(&identity)
+            .map_err(|error| map_port(Stage::Layout, error))?;
         let lock = self
             .bootstrap
             .acquire_data_root(identity.data_root(), self.lock_timeout)
-            .map_err(|error| map_port(Stage::Lock, error))?;
+            .map_err(|error| {
+                // A registered root may disappear between the preflight and
+                // the lock attempt; reclassify from a fresh layout fact.
+                match self.bootstrap.validate_layout(&identity) {
+                    Err(layout_error) => map_port(Stage::Layout, layout_error),
+                    Ok(_) => map_port(Stage::Lock, error),
+                }
+            })?;
         lock.revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
         let layout = self
@@ -343,6 +366,17 @@ where
             .bootstrap
             .inspect_path(request.source())
             .map_err(|error| map_port(Stage::Layout, error))?;
+        require_existing_source(&source)?;
+        let data_root_report = self
+            .bootstrap
+            .inspect_path(identity.data_root())
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        if paths_overlap_with_identity(&source, &data_root_report) {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "source and data root must not overlap",
+            ));
+        }
         if source.filesystem().type_name() != "apfs" {
             return Err(semantic_error(
                 ErrorCode::DataRootLayout,
@@ -387,26 +421,32 @@ where
         metadata
             .reserve_workspace(&reservation)
             .map_err(|error| map_port(Stage::Metadata, error))?;
-        let result = self.create_reserved(
-            &request,
-            &lock,
-            &layout,
-            metadata.as_mut(),
-            &reservation,
-            staging,
-            trash,
-            clone_materializer,
-            copy_materializer,
-        );
-        if let Err(error) = &result {
-            metadata
-                .record_failure(
-                    workspace_id,
-                    WorkspaceState::Creating,
-                    error.diagnostic().code(),
-                    request.now(),
-                )
-                .map_err(|record_error| map_port(Stage::Metadata, record_error))?;
+        let result = self
+            .create_reserved(
+                &request,
+                &lock,
+                &layout,
+                identity.data_root(),
+                metadata.as_mut(),
+                &reservation,
+                staging,
+                trash,
+                clone_materializer,
+                copy_materializer,
+            )
+            .map_err(|error| error.with_workspace_id(workspace_id));
+        if let Err(error) = &result
+            && let Err(record_error) = metadata.record_failure(
+                workspace_id,
+                WorkspaceState::Creating,
+                error.diagnostic().code(),
+                request.now(),
+            )
+        {
+            let mut mapped =
+                map_port(Stage::Metadata, record_error).with_workspace_id(workspace_id);
+            mapped.partial_receipts = error.partial_receipts.clone();
+            return Err(mapped);
         }
         result
     }
@@ -417,6 +457,7 @@ where
         request: &CreateRequest,
         lock: &<B as BootstrapStore>::LockGuard,
         layout: &<B as BootstrapStore>::DataRootLayout,
+        data_root: &AbsolutePath,
         metadata: &mut dyn MetadataStore,
         reservation: &WorkspaceReservation,
         staging: AbsolutePath,
@@ -449,6 +490,17 @@ where
             .bootstrap
             .inspect_materialization_paths(&probe)
             .map_err(|error| map_port(Stage::Layout, error))?;
+        require_existing_source(report.source())?;
+        let data_root_report = self
+            .bootstrap
+            .inspect_path(data_root)
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        if paths_overlap_with_identity(report.source(), &data_root_report) {
+            return Err(semantic_error(
+                ErrorCode::DataRootLayout,
+                "source and data root must not overlap",
+            ));
+        }
         let mut plan = select_plan(&report, request.allow_full_copy())?;
         if !matches_reserved_volumes(
             plan.source_volume_id(),
@@ -464,8 +516,8 @@ where
             copy_materializer
                 .materialize(&materialize, &plan)
                 .map_err(|failure| {
-                    let (error, _) = failure.into_parts();
-                    map_port(Stage::Layout, error)
+                    let (error, partial) = failure.into_parts();
+                    map_port(Stage::Layout, error).with_partial_receipt(partial)
                 })?
         } else {
             match clone_materializer.materialize(&materialize, &plan) {
@@ -473,7 +525,8 @@ where
                 Err(failure) => {
                     let (error, partial) = failure.into_parts();
                     if partial.failure_kind() != Some(MaterializationFailureKind::CowUnavailable) {
-                        return Err(map_materialization_error(error.kind(), error));
+                        return Err(map_materialization_error(error.kind(), error)
+                            .with_partial_receipt(partial));
                     }
                     if !request.allow_full_copy() {
                         return Err(UseCaseError {
@@ -482,21 +535,27 @@ where
                                 "APFS clone is unavailable and Full Copy was not authorized",
                             ),
                             source: Some(error),
-                        });
+                            partial_receipts: Box::default(),
+                        }
+                        .with_partial_receipt(partial));
                     }
                     let fresh = self
                         .bootstrap
                         .inspect_materialization_paths(&probe)
-                        .map_err(|error| map_port(Stage::Layout, error))?;
+                        .map_err(|error| {
+                            map_port(Stage::Layout, error).with_partial_receipt(partial.clone())
+                        })?;
                     plan = MaterializationPlan::for_full_copy_after_cow_unavailable(
                         &fresh, &plan, &partial,
                     )
-                    .map_err(map_plan_error)?;
+                    .map_err(|error| map_plan_error(error).with_partial_receipt(partial.clone()))?;
                     copy_materializer
                         .materialize(&materialize, &plan)
                         .map_err(|failure| {
-                            let (error, _) = failure.into_parts();
+                            let (error, copy_partial) = failure.into_parts();
                             map_port(Stage::Layout, error)
+                                .with_partial_receipt(partial)
+                                .with_partial_receipt(copy_partial)
                         })?
                 }
             }
@@ -553,6 +612,47 @@ fn paths_overlap(left: &AbsolutePath, right: &AbsolutePath) -> bool {
     contains(left.as_bytes(), right.as_bytes()) || contains(right.as_bytes(), left.as_bytes())
 }
 
+fn require_existing_source(source: &PathCapabilityReport) -> Result<(), UseCaseError> {
+    if source.resolution() == PathResolution::ExistingDirectory {
+        Ok(())
+    } else {
+        Err(semantic_error(
+            ErrorCode::Filesystem,
+            "source directory does not exist",
+        ))
+    }
+}
+
+fn paths_overlap_with_identity(
+    source: &PathCapabilityReport,
+    controlled: &PathCapabilityReport,
+) -> bool {
+    if paths_overlap(source.requested_path(), controlled.requested_path()) {
+        return true;
+    }
+    // Source existence is checked by the caller; the registered root is bound
+    // by the layout proof and revalidated before success. Compare descriptor
+    // identities, not spelling: APFS may fold case or Unicode.
+    let source_leaf = source
+        .ancestry()
+        .last()
+        .expect("a path report has a nonempty ancestry")
+        .identity();
+    let controlled_leaf = controlled
+        .ancestry()
+        .last()
+        .expect("a path report has a nonempty ancestry")
+        .identity();
+    controlled
+        .ancestry()
+        .iter()
+        .any(|entry| entry.identity() == source_leaf)
+        || source
+            .ancestry()
+            .iter()
+            .any(|entry| entry.identity() == controlled_leaf)
+}
+
 fn matches_reserved_volumes(
     source: VolumeId,
     target: VolumeId,
@@ -604,6 +704,7 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
                 "APFS clone is unavailable and Full Copy was not authorized",
             ),
             source: Some(error),
+            partial_receipts: Box::default(),
         }
     } else {
         map_port(Stage::Layout, error)

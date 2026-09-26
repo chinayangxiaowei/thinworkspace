@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -11,10 +12,11 @@ use tempfile::Builder;
 use thinws_adapter_macos::{ApfsCloneMaterializer, FullCopyMaterializer, MacOsHostAdapter};
 use thinws_application::{CreateRequest, InitRequest, ThinWorkspaceService};
 use thinws_core::{
-    AbsolutePath, CowEvidence, ErrorCode, FallbackPolicy, FallbackReason,
+    AbsolutePath, CowEvidence, CreatedObjectEvidence, ErrorCode, FallbackPolicy, FallbackReason,
     MaterializationAttemptEvidence, MaterializationFailureKind, MaterializationMode,
-    MaterializationPlan, MaterializationReceipt, MaterializeRequest, MaterializerKind,
-    RollbackEvidence, RollbackStatus, TreeDigest, UnixMillis, WorkspaceName, WorkspaceState,
+    MaterializationPlan, MaterializationReceipt, MaterializeRequest, MaterializedEntryKind,
+    MaterializerKind, RelativePath, RollbackEvidence, RollbackStatus, TreeDigest, UnixMillis,
+    WorkspaceName, WorkspaceState,
 };
 use thinws_metadata_sqlite::SqliteMetadataStoreFactory;
 use thinws_ports::{
@@ -61,16 +63,53 @@ impl WorkspaceMaterializer for NonCowFailure {
                 MaterializationFailureKind::Filesystem,
                 Vec::new(),
                 false,
-                RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
+                RollbackEvidence::new(RollbackStatus::Incomplete, Vec::new(), Vec::new()),
                 MaterializationAttemptEvidence::default(),
                 0,
-            ),
+            )
+            .with_unconfirmed_staging(CreatedObjectEvidence::new(
+                RelativePath::try_from_bytes(b"orphan".to_vec()).unwrap(),
+                MaterializedEntryKind::RegularFile,
+                None,
+            )),
         ))
     }
 }
 
 struct CleanCowUnavailable {
     source_digest: TreeDigest,
+}
+
+struct PartialFullCopyFailure;
+
+impl WorkspaceMaterializer for PartialFullCopyFailure {
+    fn kind(&self) -> MaterializerKind {
+        MaterializerKind::FullCopy
+    }
+
+    fn materialize(
+        &self,
+        _request: &MaterializeRequest,
+        plan: &MaterializationPlan,
+    ) -> Result<MaterializationReceipt, MaterializationFailure> {
+        Err(MaterializationFailure::new(
+            PortError::new(PortErrorKind::Io, "injected Full Copy failure"),
+            MaterializationReceipt::failed_full_copy(
+                plan,
+                MaterializationFailureKind::Filesystem,
+                Vec::new(),
+                false,
+                RollbackEvidence::new(RollbackStatus::Incomplete, Vec::new(), Vec::new()),
+                MaterializationAttemptEvidence::default(),
+                0,
+            )
+            .with_unconfirmed_staging(CreatedObjectEvidence::new(
+                RelativePath::try_from_bytes(b"copy-orphan".to_vec()).unwrap(),
+                MaterializedEntryKind::RegularFile,
+                None,
+            )),
+        ))
+    }
 }
 
 impl WorkspaceMaterializer for CleanCowUnavailable {
@@ -272,6 +311,28 @@ fn p1_09_non_cow_failure_does_not_become_a_copy_fallback() {
         error.source().is_some(),
         "original clone error must survive"
     );
+    assert_eq!(error.partial_receipts().len(), 1);
+    assert_eq!(
+        error.partial_receipts()[0].rollback().status(),
+        RollbackStatus::Incomplete
+    );
+    assert_eq!(
+        error.partial_receipts()[0]
+            .unconfirmed_staging()
+            .unwrap()
+            .path()
+            .as_bytes(),
+        b"orphan"
+    );
+    assert_eq!(
+        error.diagnostic().context()["unconfirmed_staging"].user_value(),
+        "true"
+    );
+    assert_eq!(
+        error.diagnostic().context()["rollback_incomplete"].user_value(),
+        "true"
+    );
+    assert!(error.diagnostic().context().contains_key("workspace_id"));
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 1);
 }
 
@@ -337,6 +398,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
         )
         .unwrap_err();
     assert_eq!(denied.diagnostic().code(), ErrorCode::CowUnavailable);
+    assert_eq!(denied.partial_receipts().len(), 1);
 
     let allowed = service
         .create(
@@ -361,6 +423,37 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
         Some(FallbackReason::CloneUnavailableAtRuntime)
     );
     assert_eq!(allowed.materialization().failed_attempt_count(), 1);
+
+    let failed_copy = service
+        .create(
+            CreateRequest::new(
+                absolute(&source),
+                WorkspaceName::from_str("copy-failed").unwrap(),
+                true,
+                UnixMillis::new(1_700_000_000_300).unwrap(),
+            ),
+            &failure,
+            &PartialFullCopyFailure,
+        )
+        .unwrap_err();
+    assert_eq!(failed_copy.diagnostic().code(), ErrorCode::Filesystem);
+    assert_eq!(failed_copy.partial_receipts().len(), 2);
+    assert_eq!(
+        failed_copy.partial_receipts()[0].failure_kind(),
+        Some(MaterializationFailureKind::CowUnavailable)
+    );
+    assert_eq!(
+        failed_copy.partial_receipts()[1]
+            .unconfirmed_staging()
+            .unwrap()
+            .path()
+            .as_bytes(),
+        b"copy-orphan"
+    );
+    assert_eq!(
+        failed_copy.diagnostic().context()["materialization_attempt_count"].user_value(),
+        "2"
+    );
 }
 
 #[test]
@@ -625,4 +718,223 @@ fn p1_09_cross_volume_and_containment_fail_before_reserving_a_workspace() {
     let error = service.create(contained, &clone, &copy).unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+}
+
+#[test]
+fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-case-alias-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let data_root = temp.path().join("data-root");
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let service = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    let alias = temp.path().join("DATA-ROOT");
+    let Ok(alias_metadata) = fs::metadata(&alias) else {
+        eprintln!("skipping real case-alias test on a case-sensitive volume");
+        return;
+    };
+    let registered_metadata = fs::metadata(&data_root).unwrap();
+    assert_eq!(alias_metadata.dev(), registered_metadata.dev());
+    assert_eq!(alias_metadata.ino(), registered_metadata.ino());
+    let source = alias.join("logs");
+    let request = CreateRequest::new(
+        absolute(&source),
+        WorkspaceName::from_str("case-alias").unwrap(),
+        false,
+        UnixMillis::new(1_700_000_000_100).unwrap(),
+    );
+    assert_eq!(
+        service
+            .preview_create(&request)
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootLayout
+    );
+    assert_eq!(
+        service
+            .create(
+                request,
+                &ApfsCloneMaterializer::new(adapter.clone()),
+                &FullCopyMaterializer::new(adapter.clone()),
+            )
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootLayout
+    );
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+
+    let ancestor_alias = temp.path().with_file_name(
+        temp.path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_uppercase(),
+    );
+    let ancestor_metadata = fs::metadata(&ancestor_alias).unwrap();
+    assert_eq!(
+        ancestor_metadata.dev(),
+        fs::metadata(temp.path()).unwrap().dev()
+    );
+    assert_eq!(
+        ancestor_metadata.ino(),
+        fs::metadata(temp.path()).unwrap().ino()
+    );
+    let ancestor_request = CreateRequest::new(
+        absolute(&ancestor_alias),
+        WorkspaceName::from_str("ancestor-alias").unwrap(),
+        false,
+        UnixMillis::new(1_700_000_000_101).unwrap(),
+    );
+    assert_eq!(
+        service
+            .preview_create(&ancestor_request)
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootLayout
+    );
+    assert_eq!(
+        service
+            .create(
+                ancestor_request,
+                &ApfsCloneMaterializer::new(adapter.clone()),
+                &FullCopyMaterializer::new(adapter),
+            )
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootLayout
+    );
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+}
+
+#[test]
+fn p1_09_missing_source_is_not_reported_as_cow_unavailable() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-missing-source-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let data_root = temp.path().join("data-root");
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let service = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    let source = absolute(&temp.path().join("missing-source"));
+    for allow_copy in [false, true] {
+        let request = CreateRequest::new(
+            source.clone(),
+            WorkspaceName::from_str(if allow_copy {
+                "missing-copy"
+            } else {
+                "missing-clone"
+            })
+            .unwrap(),
+            allow_copy,
+            UnixMillis::new(1_700_000_000_100).unwrap(),
+        );
+        assert_eq!(
+            service
+                .preview_create(&request)
+                .unwrap_err()
+                .diagnostic()
+                .code(),
+            ErrorCode::Filesystem
+        );
+        assert_eq!(
+            service
+                .create(
+                    request,
+                    &ApfsCloneMaterializer::new(adapter.clone()),
+                    &FullCopyMaterializer::new(adapter.clone()),
+                )
+                .unwrap_err()
+                .diagnostic()
+                .code(),
+            ErrorCode::Filesystem
+        );
+    }
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+}
+
+#[test]
+fn p1_09_missing_registered_data_root_uses_unavailable_error() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-missing-root-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let data_root = temp.path().join("data-root");
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let service = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    fs::rename(&data_root, temp.path().join("data-root-moved")).unwrap();
+    let request = CreateRequest::new(
+        absolute(&source),
+        WorkspaceName::from_str("missing-root").unwrap(),
+        false,
+        UnixMillis::new(1_700_000_000_100).unwrap(),
+    );
+    assert_eq!(
+        service
+            .preview_create(&request)
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootUnavailable
+    );
+    assert_eq!(
+        service
+            .create(
+                request,
+                &ApfsCloneMaterializer::new(adapter.clone()),
+                &FullCopyMaterializer::new(adapter),
+            )
+            .unwrap_err()
+            .diagnostic()
+            .code(),
+        ErrorCode::DataRootUnavailable
+    );
 }

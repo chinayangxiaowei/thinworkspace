@@ -13,8 +13,9 @@ use std::fmt;
 use std::time::Duration;
 
 use thinws_core::{
-    AbsolutePath, CoreError, ErrorCode, InstallationIdentity, InstallationRecord, InstanceId,
-    RootMarkerState, UnixMillis, WorkspaceState,
+    AbsolutePath, ContextValue, CoreError, ErrorCode, InstallationIdentity, InstallationRecord,
+    InstanceId, MaterializationReceipt, RollbackStatus, RootMarkerState, UnixMillis, WorkspaceId,
+    WorkspaceState,
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, LifecycleLockGuard,
@@ -146,6 +147,7 @@ impl DoctorOutcome {
 pub struct UseCaseError {
     diagnostic: CoreError,
     source: Option<PortError>,
+    partial_receipts: Box<[MaterializationReceipt]>,
 }
 
 impl UseCaseError {
@@ -153,6 +155,50 @@ impl UseCaseError {
     #[must_use]
     pub const fn diagnostic(&self) -> &CoreError {
         &self.diagnostic
+    }
+
+    /// Returns any partial materialization attempts retained by this failure.
+    #[must_use]
+    pub fn partial_receipts(&self) -> &[MaterializationReceipt] {
+        self.partial_receipts.as_ref()
+    }
+
+    fn with_partial_receipt(mut self, receipt: MaterializationReceipt) -> Self {
+        let mut receipts = std::mem::take(&mut self.partial_receipts).into_vec();
+        receipts.push(receipt);
+        self.partial_receipts = receipts.into_boxed_slice();
+        let incomplete = self
+            .partial_receipts
+            .iter()
+            .any(|attempt| attempt.rollback().status() == RollbackStatus::Incomplete);
+        let unconfirmed_staging = self
+            .partial_receipts
+            .iter()
+            .any(|attempt| attempt.unconfirmed_staging().is_some());
+        self.diagnostic = self
+            .diagnostic
+            .clone()
+            .with_context(
+                "materialization_attempt_count",
+                ContextValue::public(self.partial_receipts.len().to_string()),
+            )
+            .with_context(
+                "rollback_incomplete",
+                ContextValue::public(incomplete.to_string()),
+            )
+            .with_context(
+                "unconfirmed_staging",
+                ContextValue::public(unconfirmed_staging.to_string()),
+            );
+        self
+    }
+
+    fn with_workspace_id(mut self, workspace_id: WorkspaceId) -> Self {
+        self.diagnostic = self.diagnostic.clone().with_context(
+            "workspace_id",
+            ContextValue::public(workspace_id.to_string()),
+        );
+        self
     }
 }
 
@@ -162,6 +208,7 @@ impl fmt::Debug for UseCaseError {
             .debug_struct("UseCaseError")
             .field("diagnostic", &self.diagnostic)
             .field("has_source", &self.source.is_some())
+            .field("partial_receipt_count", &self.partial_receipts.len())
             .finish()
     }
 }
@@ -432,6 +479,7 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
     UseCaseError {
         diagnostic: CoreError::new(code, message),
         source: Some(error),
+        partial_receipts: Box::default(),
     }
 }
 
@@ -439,5 +487,6 @@ fn semantic_error(code: ErrorCode, message: &'static str) -> UseCaseError {
     UseCaseError {
         diagnostic: CoreError::new(code, message),
         source: None,
+        partial_receipts: Box::default(),
     }
 }

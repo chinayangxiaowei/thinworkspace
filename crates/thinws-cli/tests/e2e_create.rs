@@ -157,3 +157,27 @@ fn real_cli_rejects_cross_volume_even_with_allow_copy() {
         0
     );
 }
+
+#[test]
+fn real_cli_distinguishes_missing_source_from_missing_registered_root() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-missing-paths-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let data_root = temp.path().join("data-root");
+    let source = temp.path().join("source");
+    init(&bootstrap, &data_root);
+    for extra in [&[][..], &["--allow-copy"][..], &["--dry-run"][..]] {
+        let (status, error) = execute(&bootstrap, create_args(&source, "missing", extra));
+        assert_eq!(status, 31, "{error}");
+        assert_eq!(error["error"]["code"], "E_FILESYSTEM");
+    }
+    fs::create_dir(&source).unwrap();
+    fs::rename(&data_root, temp.path().join("data-root-moved")).unwrap();
+    let (status, error) = execute(&bootstrap, create_args(&source, "missing-root", &[]));
+    assert_eq!(status, 32, "{error}");
+    assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+}

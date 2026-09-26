@@ -431,6 +431,7 @@ enum Stage {
     Lock,
     PrepareDataRoot,
     Layout,
+    Source,
     Metadata,
     Publish,
 }
@@ -440,6 +441,7 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         PortErrorKind::Timeout => ErrorCode::LockTimeout,
         PortErrorKind::CapabilityUnavailable => ErrorCode::CapabilityUnavailable,
         PortErrorKind::NotEmpty => ErrorCode::DataRootNotEmpty,
+        PortErrorKind::Unavailable if matches!(stage, Stage::Source) => ErrorCode::Filesystem,
         PortErrorKind::Unavailable => ErrorCode::DataRootUnavailable,
         PortErrorKind::InvalidLayout => ErrorCode::DataRootLayout,
         PortErrorKind::Io => ErrorCode::Filesystem,

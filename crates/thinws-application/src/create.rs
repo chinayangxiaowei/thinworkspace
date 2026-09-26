@@ -212,6 +212,11 @@ where
                 self.sqlite_timeout,
             )
             .map_err(|error| map_port(Stage::Metadata, error))?;
+        let source = self
+            .bootstrap
+            .inspect_path(request.source())
+            .map_err(|error| map_port(Stage::Source, error))?;
+        require_existing_source(&source)?;
         let target_parent = derived_path(identity.data_root(), &[b"workspaces"])?;
         let paths = MaterializationPathProbeRequest::new(
             request.source().clone(),
@@ -365,7 +370,7 @@ where
         let source = self
             .bootstrap
             .inspect_path(request.source())
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Source, error))?;
         require_existing_source(&source)?;
         let data_root_report = self
             .bootstrap
@@ -445,7 +450,9 @@ where
         {
             let mut mapped =
                 map_port(Stage::Metadata, record_error).with_workspace_id(workspace_id);
-            mapped.partial_receipts = error.partial_receipts.clone();
+            for receipt in error.partial_receipts.iter().cloned() {
+                mapped = mapped.with_partial_receipt(receipt);
+            }
             return Err(mapped);
         }
         result
@@ -613,13 +620,22 @@ fn paths_overlap(left: &AbsolutePath, right: &AbsolutePath) -> bool {
 }
 
 fn require_existing_source(source: &PathCapabilityReport) -> Result<(), UseCaseError> {
-    if source.resolution() == PathResolution::ExistingDirectory {
-        Ok(())
-    } else {
-        Err(semantic_error(
+    if source.resolution() != PathResolution::ExistingDirectory {
+        return Err(semantic_error(
             ErrorCode::Filesystem,
             "source directory does not exist",
-        ))
+        ));
+    }
+    match source.readability() {
+        SupportState::Supported => Ok(()),
+        SupportState::Unsupported => Err(semantic_error(
+            ErrorCode::Filesystem,
+            "source directory is not readable and searchable",
+        )),
+        SupportState::Unknown => Err(semantic_error(
+            ErrorCode::CapabilityUnavailable,
+            "source directory access could not be determined",
+        )),
     }
 }
 

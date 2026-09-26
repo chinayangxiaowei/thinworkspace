@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -882,6 +882,71 @@ fn p1_09_missing_source_is_not_reported_as_cow_unavailable() {
             ErrorCode::Filesystem
         );
     }
+    assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
+}
+
+#[test]
+fn p1_09_unreadable_source_is_not_reported_as_cow_unavailable() {
+    let controlled =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("create-unreadable-source-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file.txt"), b"source").unwrap();
+    let data_root = temp.path().join("data-root");
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let service = ThinWorkspaceService::new(
+        adapter.clone(),
+        SqliteMetadataStoreFactory,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+    service
+        .init(InitRequest::new(
+            absolute(&data_root),
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        ))
+        .unwrap();
+    for (mode, name_prefix) in [(0o400, "no-search"), (0o100, "no-read")] {
+        fs::set_permissions(&source, fs::Permissions::from_mode(mode)).unwrap();
+        for allow_copy in [false, true] {
+            let request = CreateRequest::new(
+                absolute(&source),
+                WorkspaceName::from_str(&format!(
+                    "{name_prefix}-{}",
+                    if allow_copy { "copy" } else { "clone" }
+                ))
+                .unwrap(),
+                allow_copy,
+                UnixMillis::new(1_700_000_000_100).unwrap(),
+            );
+            assert_eq!(
+                service
+                    .preview_create(&request)
+                    .unwrap_err()
+                    .diagnostic()
+                    .code(),
+                ErrorCode::Filesystem
+            );
+            assert_eq!(
+                service
+                    .create(
+                        request,
+                        &ApfsCloneMaterializer::new(adapter.clone()),
+                        &FullCopyMaterializer::new(adapter.clone()),
+                    )
+                    .unwrap_err()
+                    .diagnostic()
+                    .code(),
+                ErrorCode::Filesystem
+            );
+        }
+    }
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
 }
 

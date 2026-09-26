@@ -554,6 +554,8 @@ P1-15 发布二进制黑盒 CI 切片（2026-09-26）：现有流程已用发布
 
 P1-15 全工作区变异 CI 时间边界（2026-09-26）：历史 P0 批次曾因 712 项变异触及 60 分钟上限，现有 120 分钟 job 可能不足以容纳约 3029 项。仅对手动 `workflow_dispatch` 且明确选择 `mutation_scope=workspace` 的运行，将 job 上限设为 GitHub-hosted 允许的 360 分钟；普通 push/PR 及手动 modules/crates 仍为 120 分钟，触发条件、变异选择和测试预算不变。精确提交 `aa9df46375d1327ff71c59844c6631a3bf3d8e99` 经 GPT-6 Astra / `xhigh` 只读审核为 Approve；本机 YAML 解析、11 项相关 CI 辅助测试和差异检查通过。未实际启动全量变异或在线 CI，六小时包括整个 job，不能据此承诺批次完成或阶段通过。
 
+P1-15 长预算 fuzz 入口（2026-09-26）：本地提交 `74f35630bb72df0177776f8db0cfe7782f561a25` 增加仅可手动触发的 `P1 release fuzz` 工作流，不改变普通 push/PR 的短预算门禁；目标直接从 `fuzz/Cargo.toml` 读取并拒绝空/重复清单，当前 10 个目标各使用 300 秒预算及 5 秒单输入超时，任一失败或进程超时即停止且不得把余下目标标为通过。固定 nightly 与 `cargo-fuzz` 版本沿用 `tools/quality-tools.toml`；失败时保存默认 `fuzz/artifacts/` 崩溃样本 14 天。主 Agent 本机运行 39 项辅助测试、工作流 YAML 解析、fmt、全目标全 feature Clippy、带真实 P1 异卷参数的全 workspace/all-targets 普通测试、依赖方向检查和差异检查，均退出 0。GPT-6 Astra / `xhigh` 对精确提交只读审核为 Approve，独立验证上述 39 项辅助测试及成功/失败调度路径。120 分钟 job 上限含安装、构建和 50 分钟目标预算，不保证执行完成；长预算 fuzz、线上 CI 和 artifact 上传均未实际运行，P1-15、P1.f 与 Phase 1 均未因此放行。
+
 ---
 
 ## 五、依赖摘要

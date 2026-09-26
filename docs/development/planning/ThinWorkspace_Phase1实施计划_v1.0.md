@@ -409,6 +409,8 @@ P1-12 创建链路补充纠偏（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对 `
 
 P1-12 进程占用探测（2026-09-26 UTC）：首个 macOS libproc 实现 `d181de9` 经 GPT-6 Astra / `xhigh` 只读审核为 Changes requested（High/P1 两项）：把可变化的 FD 数作为进程身份会漏掉占用，且用输入路径直接匹配会漏掉 `/System/Volumes/Data` 与 `/Volumes/data` 的同目录别名。修正为以 PID、UID、启动秒/微秒复核身份；由 no-follow 打开的容器 FD 取 `F_GETPATH`，核验目录设备号和 inode 后按内核路径匹配。真实 macOS 子进程 cwd、open-vnode 与 firmlink 别名，以及 FD 数变化和各身份字段单测通过。`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets` 退出 0；`same_process` 定向 9 个变异全部 caught（`target/p1-12-process-identity-mutants/mutants.out`，25 秒）。GPT-6 Astra / `xhigh` 对精确生产修正提交 `537e964e47a7158c7f636f7ae9705ab9d53c6b61` 只读复核为 Approve，未重复全量门禁或变异。2 秒为合作式扫描预算，不是阻塞系统调用的硬超时；该审核不代表 `remove` 编排、删除、持久日志或 CLI 已完成。
 
+P1-12 受控删除底层（进行中）：为避免把可由调用者构造的普通路径误当删除授权，现有 `BootstrapStore` 增量提供持 data-root 锁、布局和 WorkspaceId 的清理调用；macOS Adapter 对照创建时位于 `metadata/` 的历史归属，逐层 no-follow 打开并清理 `root/` 内容、平台标记和空 ID 容器。外部符号链接目标不被跟随，归属文件不删除；容器已不存在只返回无路径删除结果。真实 APFS 用例已覆盖普通嵌套树、符号链接、原 root/容器替换、证明缺失、未知平台项、root 已缺失后的收口以及删除前路径替换；相关行为先 RED 后 GREEN。此次职责调整已同步详细设计和跨平台物化设计，不新建 Port，也不提供 `destroy_materialization(&WorkspacePath)` 裸路径删除入口。全 workspace/all-targets 测试、fmt 和全目标/全 feature Clippy 退出 0；Application 清理策略、持久日志、SQLite 收口、CLI、任务级变异/fuzz 和最终独立审核仍未完成，P1-12 不放行。
+
 ### 4.6 P1.f 契约与发布
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |

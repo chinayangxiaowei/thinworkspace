@@ -3,6 +3,7 @@
 
 //! macOS bootstrap document and lifecycle-lock Adapter.
 
+mod destroy;
 mod document;
 #[allow(unsafe_code)]
 mod ffi;

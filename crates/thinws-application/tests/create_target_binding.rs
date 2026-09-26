@@ -150,6 +150,15 @@ impl BootstrapStore for SwapBeforeTargetProbe {
         self.inner.validate_ready_workspace(layout, workspace_id)
     }
 
+    fn remove_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<thinws_ports::WorkspaceRemoval, PortError> {
+        self.inner.remove_workspace(lock, layout, workspace_id)
+    }
+
     fn publish_ready(
         &self,
         lock: &Self::LockGuard,

@@ -22,9 +22,9 @@ Core/Application 不直接调用 OS、Git CLI 或 SQLite。Phase 1 只有以下�
 
 | Port | 唯一职责 |
 |---|---|
-| BootstrapStore | 准备/校验 bootstrap 与 data root 布局，读取并发布实例配置与 root 标记 |
+| BootstrapStore | 准备/校验实例与受控目录，读取并发布标记，按历史归属证明清理 ID 容器 |
 | PlatformProbe | 报告实际路径与候选后端能力 |
-| WorkspaceMaterializer | 目录物化、空间测量及获准的范围内清理 |
+| WorkspaceMaterializer | 目录物化；空间测量在 P1-13 增量加入 |
 | GitInspector | 发现工作区内仓库并只读报告已跟踪变更；不写 refs/index/config、不提交、不联网 |
 | ProcessProbe | 尽力报告当前用户可见的外部进程占用，不托管或终止进程 |
 | MetadataStore | 初始化/只读打开 SQLite，并持久化 Workspace 状态、最终物化 Receipt 和删除结果 |
@@ -155,7 +155,7 @@ Ready 由物化 Receipt、归属和持久化状态一致决定，不要求 Git c
 1. 验证实例、WorkspaceId、卷及创建时持久目录归属；运行只读 Git 与进程检查。
 2. Application 按手册决定普通拒绝或接受显式强制意图；拒绝发生在破坏性写入之前。
 3. 清理前写持久日志，并将 Workspace 标记为 Deleting；日志关联 ID 仅用于定位这次尝试，不用于重放。
-4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Materializer 从已验证目录 FD 以 no-follow 清理副本 `root/` 的全部内容，包括其中 `.git` 和后来生成的内容；Application 随后清理同一 WorkspaceId 下的平台标记与空容器目录。位于 `metadata/` 的归属文件保留，不作为清理目标。
+4. 每个破坏性步骤前重验范围、历史目录身份、卷和适用的占用保护；Application 只向持有 data-root 锁与目录归属证据的 `BootstrapStore` 授权一个 WorkspaceId。该 Adapter 从已验证目录 FD 以 no-follow 清理副本 `root/` 的全部内容（包括 `.git` 和后来生成的内容），再清理同一容器下的平台标记与空容器。不得把可由调用者构造的裸路径当作删除授权。位于 `metadata/` 的归属文件保留，不作为清理目标。
 5. 确认整个 `workspaces/<workspace-id>/` 已不存在；在同一事务删除活跃记录并保留最小 tombstone；记录完成结果。data root 内的日志不随工作区删除。
 
 强制操作不要求说明理由、commit 证明、主管批准或在线服务；只保留日志。日志字段与敏感信息边界见《开发规范》§13。清理前无法持久化日志时停止且报告 I/O 错误；已开始后失败/中断保留非 Ready 状态和剩余范围，不能写成成功。

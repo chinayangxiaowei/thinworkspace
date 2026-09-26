@@ -267,6 +267,15 @@ impl BootstrapStore for FakeBootstrap {
         Ok(record.reservation().target_path().clone())
     }
 
+    fn remove_workspace(
+        &self,
+        _lock: &Self::LockGuard,
+        _layout: &Self::DataRootLayout,
+        _workspace_id: WorkspaceId,
+    ) -> Result<thinws_ports::WorkspaceRemoval, PortError> {
+        unreachable!("init/doctor never removes a Workspace")
+    }
+
     fn publish_ready(
         &self,
         _lock: &Self::LockGuard,

@@ -49,6 +49,18 @@ pub enum PublishResult {
     AlreadyCurrent,
 }
 
+/// Result of an explicitly authorized, ownership-checked Workspace cleanup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceRemoval {
+    /// The ID-derived container was already absent; no path was deleted.
+    AlreadyAbsent,
+    /// The controlled container was removed after deleting this many entries inside root.
+    Removed {
+        /// Number of entries removed from the former root tree.
+        root_entries: usize,
+    },
+}
+
 /// Opaque evidence for one prepared data root held by a platform Adapter.
 pub trait PreparedDataRootEvidence {
     /// Returns the canonical path bound to the held directory descriptor.
@@ -153,6 +165,17 @@ pub trait BootstrapStore {
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
     ) -> Result<AbsolutePath, PortError>;
+
+    /// Removes one proven-owned Workspace container after Application has persisted
+    /// its cleanup intent and authorized the destructive operation. Missing
+    /// containers are reported without deleting any path; existing containers
+    /// require the creation-time ownership proof even for explicit force.
+    fn remove_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceRemoval, PortError>;
 
     /// Consumes same-run evidence and atomically advances that exact marker to Ready.
     fn publish_ready(

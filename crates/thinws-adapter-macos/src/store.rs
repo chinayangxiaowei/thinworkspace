@@ -1,14 +1,18 @@
 use std::ffi::OsStr;
 use std::fs::File;
 
+use rustix::fs::AtFlags;
+
 use thinws_core::{
     AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId, WorkspaceId,
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
     PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
+    WorkspaceRemoval,
 };
 
+use crate::destroy::remove_root_contents;
 use crate::document::{
     DocumentError, WorkspaceOwnership, decode_bootstrap_config, decode_root_marker,
     decode_workspace_ownership, encode_config, encode_marker, encode_workspace_ownership,
@@ -546,6 +550,107 @@ impl BootstrapStore for MacOsHostAdapter {
         Ok(path)
     }
 
+    fn remove_workspace(
+        &self,
+        lock: &Self::LockGuard,
+        layout: &Self::DataRootLayout,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceRemoval, PortError> {
+        self.validate_data_root_lock(lock, layout)?;
+        layout.revalidate()?;
+        let workspaces = &layout.controlled_directories[2];
+        let name = workspace_id.to_string();
+        let Some(container) = open_optional_private_child(workspaces, OsStr::new(&name))? else {
+            return Ok(WorkspaceRemoval::AlreadyAbsent);
+        };
+        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
+        if ownership.instance_id != layout.instance_id
+            || ownership.volume_id != layout.volume_id
+            || !ownership
+                .container
+                .permits_current(historical_directory_identity(&container)?)
+            || volume_id_for_directory(&container)? != layout.volume_id
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace container historical ownership changed",
+            ));
+        }
+        let state = open_optional_private_child(&container, OsStr::new(".state"))?;
+        let root = open_optional_owned_child(&container, OsStr::new("root"))?;
+        if let Some(root) = &root
+            && (!ownership
+                .root
+                .permits_current(historical_directory_identity(root)?)
+                || volume_id_for_directory(root)? != layout.volume_id)
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace root historical ownership changed",
+            ));
+        }
+        if let Some(state) = &state
+            && volume_id_for_directory(state)? != layout.volume_id
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace state volume changed",
+            ));
+        }
+        require_only_entries(&container, &[".state", "root"])?;
+        if let Some(state) = &state {
+            require_only_entries(state, &["incomplete"])?;
+            let _ = read_private_file(&state.fd, OsStr::new("incomplete"))?;
+        }
+        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
+        let mut root_entries = 0;
+        if let Some(root) = &root {
+            revalidate_attached_directory(&container, root, OsStr::new("root"))?;
+            let verify_scope = || {
+                self.validate_data_root_lock(lock, layout)
+                    .and_then(|()| {
+                        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))
+                    })
+                    .and_then(|()| {
+                        revalidate_attached_directory(&container, root, OsStr::new("root"))
+                    })
+                    .map_err(|_| std::io::Error::from_raw_os_error(libc::ESTALE))
+            };
+            root_entries = remove_root_contents(&root.fd, root.identity.as_core(), &verify_scope)
+                .map_err(|error| match error.raw_os_error() {
+                Some(libc::ESTALE | libc::EXDEV | libc::ELOOP) => PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace root changed during removal",
+                )
+                .with_source(error),
+                _ => io_error("remove Workspace root contents", error),
+            })?;
+            revalidate_attached_directory(&container, root, OsStr::new("root"))?;
+            rustix::fs::unlinkat(&container.fd, "root", AtFlags::REMOVEDIR)
+                .map_err(|error| io_error("remove Workspace root directory", error))?;
+            sync_directory(&container.fd)?;
+        }
+        if let Some(state) = &state {
+            revalidate_attached_directory(&container, state, OsStr::new(".state"))?;
+            if read_private_file(&state.fd, OsStr::new("incomplete"))?.is_some() {
+                unlink_entry(&state.fd, OsStr::new("incomplete"))?;
+                sync_directory(&state.fd)?;
+            }
+            require_empty_directory(state)?;
+            revalidate_attached_directory(&container, state, OsStr::new(".state"))?;
+            rustix::fs::unlinkat(&container.fd, ".state", AtFlags::REMOVEDIR)
+                .map_err(|error| io_error("remove Workspace state directory", error))?;
+            sync_directory(&container.fd)?;
+        }
+        require_empty_directory(&container)?;
+        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
+        rustix::fs::unlinkat(&workspaces.fd, name.as_str(), AtFlags::REMOVEDIR)
+            .map_err(|error| io_error("remove Workspace container", error))?;
+        sync_directory(&workspaces.fd)?;
+        layout.revalidate()?;
+        Ok(WorkspaceRemoval::Removed { root_entries })
+    }
+
     fn publish_ready(
         &self,
         lock: &Self::LockGuard,
@@ -791,6 +896,43 @@ fn read_workspace_ownership(
     }
     revalidate_directory(metadata)?;
     Ok(ownership)
+}
+
+fn open_optional_private_child(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<Option<ValidatedDirectory>, PortError> {
+    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => open_private_child_directory(parent, name).map(Some),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(io_error("inspect Workspace private child", error)),
+    }
+}
+
+fn open_optional_owned_child(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<Option<ValidatedDirectory>, PortError> {
+    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => open_owned_child_directory(parent, name).map(Some),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(io_error("inspect Workspace owned child", error)),
+    }
+}
+
+fn require_only_entries(directory: &ValidatedDirectory, allowed: &[&str]) -> Result<(), PortError> {
+    let names = crate::ffi::read_directory(&directory.fd)
+        .map_err(|error| io_error("inspect Workspace platform entries", error))?;
+    if names
+        .iter()
+        .any(|name| !allowed.iter().any(|allowed| name == OsStr::new(allowed)))
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace container has unrecognized platform entries",
+        ));
+    }
+    Ok(())
 }
 
 fn remove_exact_entry(

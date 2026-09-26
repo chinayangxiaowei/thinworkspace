@@ -227,6 +227,30 @@ fn decode_identity(
     ))
 }
 
+#[cfg(test)]
+mod ownership_fuzz_seed_tests {
+    use super::*;
+
+    #[test]
+    fn ownership_fuzz_corpus_reaches_both_valid_and_invalid_identity_paths() {
+        let valid =
+            include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
+        let ownership = decode_workspace_ownership(valid).unwrap();
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(ownership).unwrap()),
+            Ok(ownership)
+        );
+
+        let invalid = include_bytes!(
+            "../../../fuzz/corpus/thinws_bootstrap_document/invalid-birth-nanoseconds"
+        );
+        assert_eq!(
+            decode_workspace_ownership(invalid),
+            Err(DocumentError::InvalidIdentity)
+        );
+    }
+}
+
 fn decode_hex(value: &str) -> Result<Vec<u8>, DocumentError> {
     let bytes = value.as_bytes();
     if !bytes.len().is_multiple_of(2)

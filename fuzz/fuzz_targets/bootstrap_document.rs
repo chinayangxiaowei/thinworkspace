@@ -3,7 +3,9 @@
 use std::str::FromStr;
 
 use libfuzzer_sys::fuzz_target;
-use thinws_adapter_macos::{decode_bootstrap_config, decode_root_marker};
+use thinws_adapter_macos::{
+    decode_bootstrap_config, decode_root_marker, fuzz_workspace_ownership_document,
+};
 use thinws_core::{AbsolutePath, InstanceId, VolumeId};
 
 fuzz_target!(|data: &[u8]| {
@@ -28,4 +30,5 @@ fuzz_target!(|data: &[u8]| {
             *marker.identity().data_root()
         );
     }
+    fuzz_workspace_ownership_document(data);
 });

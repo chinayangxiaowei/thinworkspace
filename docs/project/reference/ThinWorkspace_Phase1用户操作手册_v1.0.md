@@ -236,7 +236,7 @@ Delivery verification: not performed
 
 ### 6.4 外部占用
 
-尽力检查返回 `confirmed-in-use / no-evidence / scan-incomplete`。已确认占用返回 E_WORKSPACE_BUSY，force 也不能绕过；后两者分别表示无证据和不完整，不能证明绝对无人使用。不完整必须警告并记日志，但不单独阻止清理。
+尽力检查返回 `confirmed-in-use / no-evidence / scan-incomplete`。已确认占用返回 E_WORKSPACE_BUSY，force 也不能绕过；后两者分别表示无证据和不完整，不能证明绝对无人使用。不完整必须警告并记日志，但不单独阻止清理。即使本次因 Git 或非 Ready 状态拒绝清理，若进程扫描不完整，JSON 错误仍含 `context.process_use="scan-incomplete"`，人类错误仍显示 `Warning: process scan incomplete`。
 
 ThinWorkspace 不终止用户进程；调用者负责停止写入。扫描与清理之间仍存在竞态，不承诺安全 Sandbox。
 

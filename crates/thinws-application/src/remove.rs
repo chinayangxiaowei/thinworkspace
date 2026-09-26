@@ -413,14 +413,15 @@ where
                 None,
             )
             .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-            return Err(semantic_error(
+            let failure = semantic_error(
                 ErrorCode::WorkspaceIncomplete,
                 "Workspace cleanup is incomplete; explicit force is required",
             )
             .with_workspace_id(id)
             .with_remediation(
                 "Inspect the incomplete copy, then use workspace remove <name-or-id> --force only to discard it.",
-            ));
+            );
+            return Err(with_process_scan_warning(failure, process_use));
         }
         let decision = decide_removal(
             git_state,
@@ -433,10 +434,11 @@ where
                 let code = refusal_code(reason);
                 append(RemovalLogEvent::Refused, Some(reason), Some(code), None)
                     .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-                return Err(semantic_error(code, refusal_message(reason))
+                let failure = semantic_error(code, refusal_message(reason))
                     .with_workspace_id(id)
                     .with_remediation(refusal_remediation(reason))
-                    .with_git_inspection(inspection.clone()));
+                    .with_git_inspection(inspection.clone());
+                return Err(with_process_scan_warning(failure, process_use));
             }
         };
         let log_path = append(RemovalLogEvent::Started, None, None, None)
@@ -513,6 +515,14 @@ where
             log_path,
             warning,
         })
+    }
+}
+
+fn with_process_scan_warning(error: UseCaseError, process_use: Option<ProcessUse>) -> UseCaseError {
+    if process_use == Some(ProcessUse::ScanIncomplete) {
+        error.with_public_context("process_use", "scan-incomplete")
+    } else {
+        error
     }
 }
 

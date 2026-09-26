@@ -305,7 +305,7 @@ fn p1_12_complete_discovery_with_unknown_repository_is_not_logged_as_a_complete_
         .remove(
             RemoveRequest::try_from_raw("remove-case", false, 1_700_000_000_001).unwrap(),
             &unknown,
-            &NoExternalUse,
+            &FixedProcess(ProcessUse::ScanIncomplete),
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::GitCheckIncomplete);
@@ -313,7 +313,16 @@ fn p1_12_complete_discovery_with_unknown_repository_is_not_logged_as_a_complete_
         error.diagnostic().message(),
         "tracked-change check is incomplete"
     );
+    assert_eq!(
+        error
+            .diagnostic()
+            .context()
+            .get("process_use")
+            .map(|value| value.user_value()),
+        Some("scan-incomplete")
+    );
     assert_eq!(log_events(&temp)[0]["git_check_complete"], false);
+    assert_eq!(log_events(&temp)[0]["process_use"], "scan-incomplete");
     assert!(target(&temp, id).join("root/note.txt").is_file());
 }
 
@@ -394,10 +403,18 @@ fn p1_12_error_workspace_requires_new_explicit_force_without_replaying_creation(
         .remove(
             RemoveRequest::try_from_raw("remove-case", false, 1_700_000_000_002).unwrap(),
             &NoRepositories,
-            &NoExternalUse,
+            &FixedProcess(ProcessUse::ScanIncomplete),
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::WorkspaceIncomplete);
+    assert_eq!(
+        error
+            .diagnostic()
+            .context()
+            .get("process_use")
+            .map(|value| value.user_value()),
+        Some("scan-incomplete")
+    );
     assert!(target(&temp, id).join("root/note.txt").is_file());
     let forced = service
         .remove(

@@ -1150,6 +1150,15 @@ fn render_error(
                 Ok(())
             })
             .and_then(|()| {
+                if error.context.get("process_use").and_then(Value::as_str)
+                    == Some("scan-incomplete")
+                {
+                    writeln!(stderr, "Warning: process scan incomplete")
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| {
                 if let Some(remediation) = &error.remediation {
                     writeln!(stderr, "{remediation}")
                 } else {
@@ -1323,6 +1332,35 @@ const fn fallback_name(reason: FallbackReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_refusal_displays_an_incomplete_process_scan_warning() {
+        let error = ErrorView {
+            code: "E_GIT_CHECK_INCOMPLETE".to_owned(),
+            message: "tracked-change check is incomplete".to_owned(),
+            context: serde_json::from_value(json!({"process_use": "scan-incomplete"})).unwrap(),
+            remediation: None,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(render_error(&error, false, &mut stdout, &mut stderr), 25);
+        assert!(stdout.is_empty());
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("Warning: process scan incomplete")
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(render_error(&error, true, &mut stdout, &mut stderr), 25);
+        assert!(stderr.is_empty());
+        let envelope: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            envelope["error"]["context"]["process_use"],
+            "scan-incomplete"
+        );
+    }
 
     #[test]
     fn query_renderers_keep_raw_path_bytes_and_lossless_hex() {

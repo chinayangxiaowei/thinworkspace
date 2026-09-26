@@ -394,7 +394,7 @@ P1-16 独立审核纠偏（2026-09-26 UTC）：首轮 GPT-6 Astra / `xhigh` 对�
 
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Review |
+| P1-12 remove 与强制清理日志 | tracked-only 普通拒绝、显式 force、普通持久日志、ProcessProbe 和受控整目录清理 | P1-09、P1-16 | R4 | In Progress |
 | P1-13 GC 与空间统计 | 快照计划、锁内重验和受限回收范围 | P1-12 | R4 | Backlog |
 
 小阶段退出：未跟踪文件不提示/不阻塞；tracked/unknown 可显式 force 且日志可读；不加交付硬门禁；路径/卷/占用保护和 GC 范围不被绕过。
@@ -450,6 +450,10 @@ P1-12 CLI 错误渲染定向变异启动记录（2026-09-26 19:18 UTC）：主 A
 CLI 定向变异结果：实际 19:17:44–19:18:09 UTC，按预计 19:20 UTC 一次读取；4 个为 3 caught、1 unviable、0 missed/timeout，退出 0。`outcomes.json` 与 `mutants.json` SHA-256 分别为 `ca403f54e4159af4a5205cb5a240e4a236efea93e89b212b79dea6a0da060476`、`abc52000a3b7229f51618dc9c09a91969669c5dd9296db25f13166285c6850a3`。该证据仅覆盖选定函数变异，JSON 拒绝上下文的字段形态由真实 CLI E2E 和契约检查验证。任务级复核与通用门禁仍待完成。
 
 P1-12 任务级候选自测（2026-09-26 UTC，macOS/APFS）：Application remove 13 项、CLI remove 真实 E2E 4 项及同 4 项 release 配置均通过；公开手册的拒绝 JSON 示例修正为现行消息、修复建议、`issues` 与无损仓库相对路径字段，并在真实 CLI E2E 精确断言，JSON 示例用 `jq` 解析通过。`cargo fmt --all -- --check`、全目标全 feature Clippy、带 `/Volumes/data` P1 异卷端的全 workspace/all-targets 普通测试及 `git diff --check` 均退出 0。相关底层、Application、CLI 定向变异与 remove 参数 30 秒 fuzz 结果见本节上方；未执行 P1.e 小阶段全受影响 crate 变异、阶段长预算 fuzz、专用 submount 和线上 CI/PR/push，这些不冒称任务级通过证据。任务风险仍为 R4，需对精确本地 commit 完成独立审核；审核通过后再进入 Verification/Done，不以本段自行放行。
+
+P1-12 任务级首轮独立审核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对干净 `main` 的精确提交 `e18fbc7adb84ed6b74701e339f9d55409b00ea15` 给出 Changes requested：未发现新数据误删问题，但新增 Core 删除策略及 Adapter 持久日志尚缺受影响函数的定向变异证据；归属 TOML 解码尚未进入文档 fuzz harness；普通 Git 拒绝与扫描不完整同时发生时，日志虽记录但用户错误未显示扫描警告。审核者只读运行 68 项 Adapter/Application/CLI 定向测试均通过，核对 Application 存活项闭合与公布哈希；remove 参数 fuzz 的运行量仅能引用主 Agent 记录，审核者未发现原始输出，不能冒称独立复验。已确认 `lifecycle.lock` 仅在 data root 的 `metadata/`，`path/status` 不取锁，镜像 root 不写该文件。任务返回 In Progress；主 Agent 将补上述定向门禁和组合告警，不扩大清理机制。
+
+审核修订候选（2026-09-26 UTC）：先使普通 Git unknown＋进程扫描不完整、非 Ready＋进程扫描不完整的 Application 断言，以及拒绝时人类告警的 CLI 断言按预期失败，再复用现有诊断 context 写 `process_use=scan-incomplete`，人类错误输出该告警；手册 §6.4 同步，日志与拒绝策略不变。定向 Application 13 项与 CLI 单测转绿，全 workspace/all-targets 测试、fmt、全目标全 feature Clippy、`git diff --check` 退出 0。归属 TOML 解析接入既有纯内存 bootstrap document fuzz harness，不新增删除入口；有效与纳秒越界种子各一，Adapter 普通单测验证两者分别进入成功/拒绝分支。固定 nightly/cargo-fuzz 构建通过；首次 smoke 因目标语料输出目录不存在而未启动，不作为结果；创建目录后 30 秒 smoke 运行 563,722 次，退出 0，无 crash/hang。fuzz manifest 的 deny 与本地 advisory 库的离线 audit 退出 0，deny 仅既有未命中例外警告。单文件 fuzz rustfmt 通过，尚待 Core 清理策略、Adapter 日志及本次告警渲染的定向变异；不以目前候选关闭 P1-12。
 
 ### 4.6 P1.f 契约与发布
 

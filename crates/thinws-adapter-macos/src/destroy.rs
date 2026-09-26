@@ -16,7 +16,7 @@ const MAX_DELETE_DEPTH: usize = 512;
 pub(crate) fn remove_root_contents(
     root: &OwnedFd,
     expected: FileIdentity,
-    verify_scope: &impl Fn() -> io::Result<()>,
+    verify_scope: &dyn Fn() -> io::Result<()>,
 ) -> io::Result<usize> {
     verify_scope()?;
     let metadata = node_metadata(root)?;
@@ -29,7 +29,7 @@ fn remove_directory_contents(
     expected: FileIdentity,
     root_device: u64,
     depth: usize,
-    verify_scope: &impl Fn() -> io::Result<()>,
+    verify_scope: &dyn Fn() -> io::Result<()>,
 ) -> io::Result<usize> {
     if depth > MAX_DELETE_DEPTH {
         return Err(io::Error::from_raw_os_error(libc::ELOOP));
@@ -50,13 +50,21 @@ fn remove_directory_contents(
             let child = open_directory_at(directory, &component)?;
             let child_identity = file_identity(before);
             require_directory(node_metadata(&child)?, child_identity)?;
+            let verify_child = || {
+                verify_scope()?;
+                let named = node_metadata_at(directory, &component)?;
+                if named.kind != RawFileKind::Directory || file_identity(named) != child_identity {
+                    return Err(io::Error::from_raw_os_error(libc::ESTALE));
+                }
+                Ok(())
+            };
             removed = removed
                 .checked_add(remove_directory_contents(
                     &child,
                     child_identity,
                     root_device,
                     depth + 1,
-                    verify_scope,
+                    &verify_child,
                 )?)
                 .ok_or_else(|| io::Error::other("removed entry count overflow"))?;
             require_directory(node_metadata(&child)?, child_identity)?;
@@ -180,5 +188,33 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(libc::ESTALE));
         assert_eq!(fs::read(detached.join("old")).unwrap(), b"old");
         assert_eq!(fs::read(root.join("foreign")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn detached_child_is_not_deleted_through_its_held_descriptor() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let detached = temp.path().join("detached-child");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/keep"), b"outside").unwrap();
+        let held: OwnedFd = File::open(&root).unwrap().into();
+        let metadata = node_metadata(&held).unwrap();
+        let checks = Cell::new(0);
+        let verify = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                fs::rename(root.join("nested"), &detached)?;
+            }
+            Ok(())
+        };
+        assert!(
+            remove_root_contents(
+                &held,
+                FileIdentity::new(metadata.device, metadata.inode),
+                &verify,
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(detached.join("keep")).unwrap(), b"outside");
     }
 }

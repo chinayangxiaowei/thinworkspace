@@ -443,6 +443,79 @@ fn p1_12_finishes_proven_container_after_root_was_already_removed() {
 }
 
 #[test]
+fn p1_12_explicit_retry_cleans_proven_isolation_after_a_partial_delete() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    let nested = container.join("root/nested");
+    private_dir(&nested);
+    fs::write(nested.join("keep"), b"copy").unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
+
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::Io
+    );
+    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
+    assert!(!container.exists());
+    assert_eq!(
+        fs::read(isolated.join("root/nested/keep")).unwrap(),
+        b"copy"
+    );
+
+    fs::set_permissions(
+        isolated.join("root/nested"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert_eq!(
+        adapter.remove_workspace(&lock, &layout, id).unwrap(),
+        WorkspaceRemoval::Removed { root_entries: 2 }
+    );
+    assert!(!isolated.exists());
+}
+
+#[test]
+fn p1_12_refuses_conflicting_active_and_isolated_containers() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
+    fs::rename(&container, &isolated).unwrap();
+    private_dir(&container);
+    fs::write(container.join("foreign"), b"keep").unwrap();
+
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
+    assert!(isolated.join("root").exists());
+}
+
+#[test]
+fn p1_12_refuses_a_replacement_in_the_isolated_location() {
+    let (temp, adapter, layout, lock, id, container) = removal_fixture();
+    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
+    let original = temp.path().join("original-container");
+    fs::rename(&container, &original).unwrap();
+    private_dir(&isolated);
+    fs::write(isolated.join("foreign"), b"keep").unwrap();
+
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(fs::read(isolated.join("foreign")).unwrap(), b"keep");
+    assert!(original.join("root").exists());
+}
+
+#[test]
 fn p1_12_ready_validation_rejects_an_ordinary_replacement_root() {
     let temp = controlled_tempdir();
     let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();

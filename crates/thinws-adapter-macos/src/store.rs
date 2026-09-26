@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 
-use rustix::fs::AtFlags;
+use rustix::fs::{AtFlags, RenameFlags};
 
 use thinws_core::{
     AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId, WorkspaceId,
@@ -559,57 +559,90 @@ impl BootstrapStore for MacOsHostAdapter {
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
         let workspaces = &layout.controlled_directories[2];
+        let trash = &layout.controlled_directories[4];
         let name = workspace_id.to_string();
-        let Some(container) = open_optional_private_child(workspaces, OsStr::new(&name))? else {
-            return Ok(WorkspaceRemoval::AlreadyAbsent);
+        let isolated_name = format!("remove-{workspace_id}");
+        let source = open_optional_private_child(workspaces, OsStr::new(&name))?;
+        let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
+        let (container, newly_isolated) = match (source, isolated) {
+            (None, None) => return Ok(WorkspaceRemoval::AlreadyAbsent),
+            (Some(_), Some(_)) => {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace exists at both active and isolated paths",
+                ));
+            }
+            (None, Some(container)) => (container, false),
+            (Some(source), None) => {
+                let _ = validate_removal_layout(layout, workspace_id, &source)?;
+                revalidate_attached_directory(workspaces, &source, OsStr::new(&name))?;
+                self.validate_data_root_lock(lock, layout)?;
+                rustix::fs::renameat_with(
+                    &workspaces.fd,
+                    name.as_str(),
+                    &trash.fd,
+                    isolated_name.as_str(),
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(|error| io_error("isolate Workspace without replacement", error))?;
+                sync_directory(&workspaces.fd)?;
+                sync_directory(&trash.fd)?;
+                let moved = open_private_child_directory(trash, OsStr::new(&isolated_name));
+                let matches_source = moved
+                    .as_ref()
+                    .is_ok_and(|moved| moved.identity == source.identity);
+                if !matches_source {
+                    return Err(PortError::new(
+                        PortErrorKind::InvalidLayout,
+                        "isolated Workspace identity changed; unsafe to restore or remove",
+                    ));
+                }
+                (moved.expect("matched isolated Workspace is open"), true)
+            }
         };
-        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-        if ownership.instance_id != layout.instance_id
-            || ownership.volume_id != layout.volume_id
-            || !ownership
-                .container
-                .permits_current(historical_directory_identity(&container)?)
-            || volume_id_for_directory(&container)? != layout.volume_id
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace container historical ownership changed",
-            ));
-        }
-        let state = open_optional_private_child(&container, OsStr::new(".state"))?;
-        let root = open_optional_owned_child(&container, OsStr::new("root"))?;
-        if let Some(root) = &root
-            && (!ownership
-                .root
-                .permits_current(historical_directory_identity(root)?)
-                || volume_id_for_directory(root)? != layout.volume_id)
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace root historical ownership changed",
-            ));
-        }
-        if let Some(state) = &state
-            && volume_id_for_directory(state)? != layout.volume_id
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace state volume changed",
-            ));
-        }
-        require_only_entries(&container, &[".state", "root"])?;
-        if let Some(state) = &state {
-            require_only_entries(state, &["incomplete"])?;
-            let _ = read_private_file(&state.fd, OsStr::new("incomplete"))?;
-        }
-        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
+        let post_isolation = self
+            .validate_data_root_lock(lock, layout)
+            .and_then(|()| {
+                revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
+            })
+            .and_then(|()| validate_removal_layout(layout, workspace_id, &container));
+        let (state, root) = match post_isolation {
+            Ok(validated) => validated,
+            Err(error) if newly_isolated => {
+                let restored =
+                    revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
+                        .is_ok()
+                        && rustix::fs::renameat_with(
+                            &trash.fd,
+                            isolated_name.as_str(),
+                            &workspaces.fd,
+                            name.as_str(),
+                            RenameFlags::NOREPLACE,
+                        )
+                        .is_ok_and(|()| {
+                            sync_directory(&trash.fd).is_ok()
+                                && sync_directory(&workspaces.fd).is_ok()
+                        });
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    if restored {
+                        "isolated Workspace validation failed and was restored"
+                    } else {
+                        "isolated Workspace validation failed; restoration unconfirmed"
+                    },
+                )
+                .with_source(error));
+            }
+            Err(error) => return Err(error),
+        };
+        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))?;
         let mut root_entries = 0;
         if let Some(root) = &root {
             revalidate_attached_directory(&container, root, OsStr::new("root"))?;
             let verify_scope = || {
                 self.validate_data_root_lock(lock, layout)
                     .and_then(|()| {
-                        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))
+                        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
                     })
                     .and_then(|()| {
                         revalidate_attached_directory(&container, root, OsStr::new("root"))
@@ -643,10 +676,10 @@ impl BootstrapStore for MacOsHostAdapter {
             sync_directory(&container.fd)?;
         }
         require_empty_directory(&container)?;
-        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
-        rustix::fs::unlinkat(&workspaces.fd, name.as_str(), AtFlags::REMOVEDIR)
+        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))?;
+        rustix::fs::unlinkat(&trash.fd, isolated_name.as_str(), AtFlags::REMOVEDIR)
             .map_err(|error| io_error("remove Workspace container", error))?;
-        sync_directory(&workspaces.fd)?;
+        sync_directory(&trash.fd)?;
         layout.revalidate()?;
         Ok(WorkspaceRemoval::Removed { root_entries })
     }
@@ -896,6 +929,62 @@ fn read_workspace_ownership(
     }
     revalidate_directory(metadata)?;
     Ok(ownership)
+}
+
+fn require_removal_ownership(
+    layout: &MacOsDataRootLayout,
+    workspace_id: WorkspaceId,
+    container: &ValidatedDirectory,
+) -> Result<WorkspaceOwnership, PortError> {
+    let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
+    if ownership.instance_id != layout.instance_id
+        || ownership.volume_id != layout.volume_id
+        || !ownership
+            .container
+            .permits_current(historical_directory_identity(container)?)
+        || volume_id_for_directory(container)? != layout.volume_id
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace container historical ownership changed",
+        ));
+    }
+    Ok(ownership)
+}
+
+fn validate_removal_layout(
+    layout: &MacOsDataRootLayout,
+    workspace_id: WorkspaceId,
+    container: &ValidatedDirectory,
+) -> Result<(Option<ValidatedDirectory>, Option<ValidatedDirectory>), PortError> {
+    let ownership = require_removal_ownership(layout, workspace_id, container)?;
+    let state = open_optional_private_child(container, OsStr::new(".state"))?;
+    let root = open_optional_owned_child(container, OsStr::new("root"))?;
+    if let Some(root) = &root
+        && (!ownership
+            .root
+            .permits_current(historical_directory_identity(root)?)
+            || volume_id_for_directory(root)? != layout.volume_id)
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace root historical ownership changed",
+        ));
+    }
+    if let Some(state) = &state
+        && volume_id_for_directory(state)? != layout.volume_id
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace state volume changed",
+        ));
+    }
+    require_only_entries(container, &[".state", "root"])?;
+    if let Some(state) = &state {
+        require_only_entries(state, &["incomplete"])?;
+        let _ = read_private_file(&state.fd, OsStr::new("incomplete"))?;
+    }
+    Ok((state, root))
 }
 
 fn open_optional_private_child(

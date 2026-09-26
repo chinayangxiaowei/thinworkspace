@@ -413,7 +413,7 @@ P1-12 受控删除底层（进行中）：为避免把可由调用者构造的�
 
 P1-12 隔离清理终态复核（2026-09-26 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `910358b` 给出 Changes requested（P2 一项，未发现新增 P0/P1）：隔离树清空后未核对原位置与隔离位置均仍缺失。审核者以生产 `BootstrapStore` API 的真实临时目录复现：清理期间原位置重建后返回 `Removed { root_entries: 1000 }`，但原位置仍在；后续若直接写 tombstone 会错误收口。主 Agent 已在成功返回前加持锁、布局及两处 no-follow 缺失重验，任一位置重现即报错且不删除新对象；补两位置缺失/重现的受控目录检查，并把真实并发重建用例连续执行五次均得到 `InvalidLayout`、外来文件保留。`cargo fmt --all -- --check`、全目标全 feature Clippy 与全 workspace/all-targets 测试通过。审核者对精确提交 `595f6964c6e24b141a5c7341650164c358a86708` 只读复核为 Approve：重跑 1000 文件真实 API 复现及普通文件、悬空符号链接重现均被拒绝且外来对象保留；未重跑全量门禁、变异或 fuzz。此结论仅覆盖底层删除，不代表 Application/CLI 或 P1-12 放行。
 
-P1-12 删除编排接入（进行中）：BootstrapStore 增量提供持 data-root 锁的只读容器定位，返回已验证且唯一的原位置或隔离位置供 ProcessProbe 扫描；容器不存在返回 None，两处冲突或归属不符拒绝。先写针对原位置、隔离位置、冲突及不存在的 APFS 用例并确认未实现时失败，再补实现；全工作区普通门禁通过。仍需接入 Application 的 Git/进程决策、持久日志、SQLite tombstone 和 CLI；此阶段不把只读定位当作完成清理。
+P1-12 删除编排接入（进行中）：BootstrapStore 增量提供持 data-root 锁的只读容器定位，返回已验证且唯一的原位置或隔离位置供 ProcessProbe 扫描；容器不存在返回 None，两处冲突或归属不符拒绝。先写针对原位置、隔离位置、冲突及不存在的 APFS 用例并确认未实现时失败，再补实现；全工作区普通门禁通过。MetadataStore 增量提供按完整 WorkspaceId 读取最小 tombstone，供重复 remove 返回 already-removed；先验证未实现时测试因缺失 tombstone 失败，再从既有 SQLite 表读取并跨重新打开验证。仍需接入 Application 的 Git/进程决策、持久日志、SQLite 收口编排和 CLI；此阶段不把只读定位或 tombstone 读取当作完成清理。
 
 ### 4.6 P1.f 契约与发布
 

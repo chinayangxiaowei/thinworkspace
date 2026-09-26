@@ -192,6 +192,12 @@ pub trait MetadataStore {
     /// Reads one active Workspace without modifying durable state.
     fn workspace(&self, workspace_id: WorkspaceId) -> Result<Option<WorkspaceRecord>, PortError>;
 
+    /// Reads an immutable deletion tombstone for exact-ID repeated remove handling.
+    fn deletion_tombstone(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<DeletionTombstone>, PortError>;
+
     /// Reads the immutable final receipt as typed facts without exposing storage JSON.
     fn final_materialization(
         &self,

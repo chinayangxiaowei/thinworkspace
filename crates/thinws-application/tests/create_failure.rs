@@ -103,6 +103,13 @@ impl MetadataStore for FailMetadataStore {
         self.inner.workspace(workspace_id)
     }
 
+    fn deletion_tombstone(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<thinws_core::DeletionTombstone>, PortError> {
+        self.inner.deletion_tombstone(workspace_id)
+    }
+
     fn final_materialization(
         &self,
         workspace_id: WorkspaceId,

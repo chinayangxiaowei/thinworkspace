@@ -1147,6 +1147,12 @@ fn store_transitions_preserve_unfinished_state_and_tombstone_identity() {
     drop(store);
 
     let mut reopened = open(&path);
+    assert!(
+        reopened
+            .deletion_tombstone(alpha.workspace_id())
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         reopened
             .workspace(alpha.workspace_id())
@@ -1172,6 +1178,16 @@ fn store_transitions_preserve_unfinished_state_and_tombstone_identity() {
         .unwrap();
     assert_eq!(tombstone.workspace_id(), alpha.workspace_id());
     assert!(reopened.workspace(alpha.workspace_id()).unwrap().is_none());
+    assert_eq!(
+        reopened.deletion_tombstone(alpha.workspace_id()).unwrap(),
+        Some(tombstone.clone())
+    );
+    drop(reopened);
+    let mut reopened = open(&path);
+    assert_eq!(
+        reopened.deletion_tombstone(alpha.workspace_id()).unwrap(),
+        Some(tombstone)
+    );
 
     let reused = WorkspaceReservation::new(
         alpha.workspace_id(),

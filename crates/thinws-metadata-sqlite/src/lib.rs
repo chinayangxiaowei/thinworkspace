@@ -491,6 +491,40 @@ impl MetadataStore for SqliteMetadataStore {
         read_workspace(&self.connection, workspace_id)
     }
 
+    fn deletion_tombstone(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<DeletionTombstone>, PortError> {
+        let row: Option<(String, i64)> = self
+            .connection
+            .query_row(
+                "SELECT instance_id, deleted_at_unix_ms
+                 FROM deletion_tombstones WHERE workspace_id = ?1",
+                [workspace_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| storage_error("read Workspace deletion tombstone", error))?;
+        row.map(|(instance, deleted_at)| {
+            let instance_id = InstanceId::from_str(&instance)
+                .map_err(|error| invalid_data("parse deletion instance ID", error))?;
+            if instance_id != self.installation.identity().instance_id() {
+                return Err(PortError::conflict(
+                    "read Workspace deletion tombstone",
+                    PortConflict::InstallationIdentity,
+                ));
+            }
+            let deleted_at = UnixMillis::new(deleted_at)
+                .map_err(|error| invalid_data("parse deletion time", error))?;
+            Ok(DeletionTombstone::new(
+                workspace_id,
+                instance_id,
+                deleted_at,
+            ))
+        })
+        .transpose()
+    }
+
     fn final_materialization(
         &self,
         workspace_id: WorkspaceId,

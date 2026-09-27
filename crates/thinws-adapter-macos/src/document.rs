@@ -270,6 +270,48 @@ mod ownership_fuzz_seed_tests {
             Err(DocumentError::InvalidIdentity)
         );
     }
+
+    #[test]
+    fn ownership_rejects_each_zero_inode_field() {
+        let valid =
+            include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
+        let ownership = decode_workspace_ownership(valid).unwrap();
+
+        let mut invalid_container = ownership;
+        invalid_container.container.inode = 0;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(invalid_container).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+
+        let mut invalid_root = ownership;
+        invalid_root.root.inode = 0;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(invalid_root).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn ownership_accepts_each_zero_birth_seconds_field() {
+        let valid =
+            include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
+        let ownership = decode_workspace_ownership(valid).unwrap();
+
+        let mut zero_container = ownership;
+        zero_container.container.birth_seconds = 0;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(zero_container).unwrap()),
+            Ok(zero_container)
+        );
+
+        let mut zero_root = ownership;
+        zero_root.root.birth_seconds = 0;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(zero_root).unwrap()),
+            Ok(zero_root)
+        );
+    }
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, DocumentError> {

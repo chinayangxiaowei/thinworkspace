@@ -162,7 +162,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 - 源与 data root 不相等且互不包含；目标仍不存在或是本操作已验证的空目录；
 - 写入性和剩余空间未出现已知阻断条件。
 
-重验失败必须以结构化的 plan-stale/路径变化事实返回 Application，由 Application 回到 Probe/Plan；不能带着过期 Plan 执行。Adapter 在逐项遍历和发布等关键边界仍须使用 no-follow 身份检查，不能把入口重验当成整个执行期间的永久保证。
+重验失败必须以结构化的 plan-stale/路径变化事实返回 Application；本次创建按状态机以非 Ready 失败结束，用户重新发起创建时才重新 Probe/Plan，不带着过期 Plan 自动重试。仅 §7.2 中已获准、克隆不支持且回滚确认后的 Full Copy 降级，允许在同一次请求内重新 Probe/Plan。Adapter 在逐项遍历和发布等关键边界仍须使用 no-follow 身份检查，不能把入口重验当成整个执行期间的永久保证。
 
 ---
 

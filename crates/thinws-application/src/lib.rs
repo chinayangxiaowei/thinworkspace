@@ -560,4 +560,88 @@ mod probe_error_tests {
             ErrorCode::DataRootUnavailable
         );
     }
+
+    #[test]
+    fn stage_guards_keep_unrelated_port_failures_out_of_layout_errors() {
+        for (index, (stage, kind, expected)) in [
+            (
+                Stage::Publish,
+                PortErrorKind::Conflict,
+                ErrorCode::DataRootLayout,
+            ),
+            (
+                Stage::Source,
+                PortErrorKind::Conflict,
+                ErrorCode::Filesystem,
+            ),
+            (
+                Stage::Lock,
+                PortErrorKind::UnsupportedVersion,
+                ErrorCode::Filesystem,
+            ),
+            (
+                Stage::PrepareDataRoot,
+                PortErrorKind::InvalidData,
+                ErrorCode::DataRootLayout,
+            ),
+            (
+                Stage::Source,
+                PortErrorKind::InvalidData,
+                ErrorCode::Filesystem,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = map_port(stage, PortError::new(kind, "injected port failure"));
+            assert_eq!(error.diagnostic().code(), expected, "case {index}");
+        }
+    }
+
+    #[test]
+    fn mapped_diagnostics_keep_specific_safe_messages_and_display() {
+        for (stage, kind, code, message) in [
+            (
+                Stage::Lock,
+                PortErrorKind::Timeout,
+                ErrorCode::LockTimeout,
+                "lifecycle lock wait timed out",
+            ),
+            (
+                Stage::Source,
+                PortErrorKind::CapabilityUnavailable,
+                ErrorCode::CapabilityUnavailable,
+                "required platform capability is unavailable",
+            ),
+            (
+                Stage::PrepareDataRoot,
+                PortErrorKind::NotEmpty,
+                ErrorCode::DataRootNotEmpty,
+                "data root is not empty",
+            ),
+            (
+                Stage::Layout,
+                PortErrorKind::Unavailable,
+                ErrorCode::DataRootUnavailable,
+                "registered data root is unavailable",
+            ),
+            (
+                Stage::Layout,
+                PortErrorKind::InvalidLayout,
+                ErrorCode::DataRootLayout,
+                "data-root identity or layout is invalid",
+            ),
+            (
+                Stage::Metadata,
+                PortErrorKind::Storage,
+                ErrorCode::Metadata,
+                "metadata database validation failed",
+            ),
+        ] {
+            let error = map_port(stage, PortError::new(kind, "internal source detail"));
+            assert_eq!(error.diagnostic().code(), code);
+            assert_eq!(error.diagnostic().message(), message);
+            assert_eq!(error.to_string(), error.diagnostic().to_string());
+        }
+    }
 }

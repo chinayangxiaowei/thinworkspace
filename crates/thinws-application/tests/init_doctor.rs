@@ -35,6 +35,8 @@ struct State {
     final_materializations: Vec<(WorkspaceId, FinalMaterializationSummary)>,
     change_ready_during_validation: bool,
     change_ready_during_measure: bool,
+    publish_non_ready: bool,
+    publish_mismatched_identity: bool,
 }
 
 struct FakePrepared {
@@ -327,7 +329,19 @@ impl BootstrapStore for FakeBootstrap {
         proof: Self::InitializingProof,
     ) -> Result<RootMarker, PortError> {
         self.state.borrow_mut().events.push("marker.ready");
-        let marker = RootMarker::new(proof, RootMarkerState::Ready);
+        let state = self.state.borrow();
+        let marker_state = if state.publish_non_ready {
+            RootMarkerState::Initializing
+        } else {
+            RootMarkerState::Ready
+        };
+        let marker_identity = if state.publish_mismatched_identity {
+            identity(b"/another-data-root")
+        } else {
+            proof
+        };
+        drop(state);
+        let marker = RootMarker::new(marker_identity, marker_state);
         self.state.borrow_mut().marker = Some(marker.clone());
         Ok(marker)
     }
@@ -468,6 +482,28 @@ fn first_init_uses_the_frozen_publication_order() {
             "config.publish",
         ]
     );
+}
+
+#[test]
+fn init_refuses_each_invalid_published_marker_without_writing_config() {
+    for (publish_non_ready, publish_mismatched_identity) in [(true, false), (false, true)] {
+        let state = Rc::new(RefCell::new(State {
+            publish_non_ready,
+            publish_mismatched_identity,
+            ..State::default()
+        }));
+        let error = service(Rc::clone(&state))
+            .init(InitRequest::new(
+                AbsolutePath::try_from_bytes(b"/data".to_vec()).unwrap(),
+                UnixMillis::new(123).unwrap(),
+            ))
+            .unwrap_err();
+
+        assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+        assert!(state.borrow().events.contains(&"marker.ready"));
+        assert!(!state.borrow().events.contains(&"config.publish"));
+        assert!(state.borrow().config.is_none());
+    }
 }
 
 #[test]

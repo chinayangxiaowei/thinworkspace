@@ -803,6 +803,24 @@ mod tests {
     }
 
     #[test]
+    fn preview_exposes_the_selected_preflight_fallback_reason() {
+        let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let preview = CreatePreview {
+            target_parent: path("/data/workspaces"),
+            source_volume_id: volume,
+            target_volume_id: volume,
+            effective_mode: MaterializationMode::FullCopy,
+            selected_adapter: MaterializerKind::FullCopy,
+            fallback_reason: Some(FallbackReason::CloneUnsupportedAtPreflight),
+        };
+
+        assert_eq!(
+            preview.fallback_reason(),
+            Some(FallbackReason::CloneUnsupportedAtPreflight)
+        );
+    }
+
+    #[test]
     fn plan_error_classes_keep_distinct_public_codes() {
         assert_eq!(
             map_plan_error(MaterializationPlanError::CandidateUnsupported)

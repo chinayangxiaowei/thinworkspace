@@ -11,11 +11,12 @@ use std::time::Duration;
 use rusqlite::{Connection, TransactionBehavior, params};
 use tempfile::{Builder, TempDir};
 use thinws_core::{
-    AbsolutePath, CandidateEvidence, CowEvidence, DirectoryIdentityEvidence, ErrorCode, Evidence,
-    FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity, InstallationIdentity,
-    InstallationRecord, InstanceId, MaterializationAttemptEvidence, MaterializationFailureKind,
-    MaterializationMode, MaterializationPathReport, MaterializationPlan, MaterializationReceipt,
-    MaterializerKind, MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest,
+    AbsolutePath, CandidateEvidence, CowEvidence, CreatedObjectEvidence, DirectoryIdentityEvidence,
+    ErrorCode, Evidence, FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity,
+    InstallationIdentity, InstallationRecord, InstanceId, MaterializationAttemptEvidence,
+    MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
+    MaterializationPlan, MaterializationReceipt, MaterializedEntryKind, MaterializerKind,
+    MountEvidence, PathCapabilityReport, PathResolution, ProbeEvidenceDigest, RelativePath,
     RemovalMode, RollbackEvidence, RollbackStatus, SupportState, TreeDigest, UnixMillis, VolumeId,
     WorkspaceId, WorkspaceName, WorkspaceReservation, WorkspaceState,
 };
@@ -824,6 +825,125 @@ fn p1_09_full_copy_receipt_requires_workspace_permission() {
     );
 }
 
+#[test]
+fn p1_15_runtime_fallback_persists_failed_attempt_and_created_identity() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    let mut store = open(&database);
+    let reserved = reservation(
+        0,
+        "writer-ready",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+    );
+    store.reserve_workspace(&reserved).unwrap();
+    let volume = VolumeId::from_str(VOLUME_ID).unwrap();
+    let original_report = materialization_report(
+        volume,
+        "/Volumes/data/source-0",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+        SupportState::Supported,
+        vec![],
+        9,
+    );
+    let clone_plan = MaterializationPlan::for_apfs_clone(
+        &original_report,
+        FallbackPolicy::AllowFullCopyOnCowUnsupported,
+    )
+    .unwrap();
+    let relative = RelativePath::try_from_bytes(b"artifact-\xff".to_vec()).unwrap();
+    let created = CreatedObjectEvidence::new(
+        relative.clone(),
+        MaterializedEntryKind::RegularFile,
+        Some(FileIdentity::new(11, 23)),
+    );
+    let digest = TreeDigest::new([7; 32]);
+    let failed = MaterializationReceipt::failed_apfs_clone(
+        &clone_plan,
+        MaterializationFailureKind::CowUnavailable,
+        vec![created.clone()],
+        true,
+        RollbackEvidence::new(
+            RollbackStatus::ConfirmedBaseline,
+            vec![relative],
+            Vec::new(),
+        ),
+        MaterializationAttemptEvidence::new(Some(17), Some(17), Some(1), 0, Some(digest), None),
+        4,
+    );
+    let fresh_report = materialization_report(
+        volume,
+        "/Volumes/data/source-0",
+        "/Volumes/data/thinws/workspaces/writer-ready",
+        SupportState::Supported,
+        vec![],
+        10,
+    );
+    let full_copy_plan = MaterializationPlan::for_full_copy_after_cow_unavailable(
+        &fresh_report,
+        &clone_plan,
+        &failed,
+    )
+    .unwrap();
+    let receipt = MaterializationReceipt::successful_full_copy(
+        &full_copy_plan,
+        1,
+        vec![created],
+        digest,
+        digest,
+        6,
+        17,
+        Some(17),
+    )
+    .unwrap();
+    let at = UnixMillis::new(reserved.created_at().get() + 1).unwrap();
+    store
+        .complete_materialization(reserved.workspace_id(), &full_copy_plan, &receipt, at)
+        .unwrap();
+
+    let raw = Connection::open(&database).unwrap();
+    let json: String = raw
+        .query_row(
+            "SELECT receipt_json FROM materialization_receipts WHERE workspace_id = ?1",
+            [reserved.workspace_id().to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let expected_created = serde_json::json!({
+        "path_hex": "61727469666163742dff",
+        "kind": "regular_file",
+        "identity": {"device": 11, "inode": 23},
+    });
+    assert_eq!(value["created"], serde_json::json!([expected_created]));
+    assert_eq!(
+        value["failed_attempts"],
+        serde_json::json!([{
+            "probe_evidence_digest": "09".repeat(32),
+            "attempted_mode": "cow_clone",
+            "actual_adapter": "apfs_file_clone",
+            "outcome": "partial",
+            "failure_kind": "cow_unavailable",
+            "source_volume_id": volume.to_string(),
+            "target_volume_id": volume.to_string(),
+            "created": [expected_created],
+            "rollback": {
+                "status": "confirmed_baseline",
+                "removed_hex": ["61727469666163742dff"],
+                "quarantined_hex": [],
+                "unconfirmed_quarantined_hex": [],
+                "remaining": [],
+            },
+            "elapsed_millis": 4,
+            "logical_bytes": 17,
+            "physical_bytes": 17,
+            "regular_file_count": 1,
+            "clone_calls_succeeded": 0,
+            "source_manifest_digest": "07".repeat(32),
+            "target_manifest_digest": null,
+        }])
+    );
+}
+
 fn open(path: &std::path::Path) -> SqliteMetadataStore {
     SqliteMetadataStore::open(path, &installation(), Duration::from_secs(2)).unwrap()
 }
@@ -988,6 +1108,40 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
         error.conflict_kind(),
         Some(PortConflict::InstallationIdentity)
     );
+}
+
+#[test]
+fn p1_15_reader_paths_distinguish_future_and_old_schema() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("state.db");
+    drop(open(&database));
+    let layout = TestLayout::new(&database);
+    let expected = installation();
+    let factory = SqliteMetadataStoreFactory;
+
+    for (version, expected_kind) in [
+        (SCHEMA_VERSION + 1, PortErrorKind::UnsupportedVersion),
+        (SCHEMA_VERSION - 1, PortErrorKind::InvalidData),
+    ] {
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+
+        let inspect_error = factory
+            .inspect(&layout, &expected, Duration::from_millis(50))
+            .expect_err("reader must reject unsupported schema");
+        assert_eq!(inspect_error.kind(), expected_kind);
+        assert_eq!(inspect_error.operation(), "validate SQLite schema version");
+
+        let writer_error = factory
+            .open_existing(&layout, &expected, Duration::from_millis(50))
+            .err()
+            .expect("existing writer must reject unsupported schema");
+        assert_eq!(writer_error.kind(), expected_kind);
+        assert_eq!(writer_error.operation(), "validate SQLite schema version");
+    }
 }
 
 #[test]

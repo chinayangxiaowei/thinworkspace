@@ -9,8 +9,9 @@ use tempfile::{Builder, TempDir};
 use thinws_adapter_macos::{FullCopyMaterializer, MacOsHostAdapter};
 use thinws_core::{
     AbsolutePath, CandidateEvidence, CowEvidence, FallbackPolicy, FallbackReason,
-    MaterializationMode, MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
-    MaterializeRequest, MaterializerKind, RollbackStatus, SupportState,
+    MaterializationFailureKind, MaterializationMode, MaterializationOutcome,
+    MaterializationPathReport, MaterializationPlan, MaterializeRequest, MaterializerKind,
+    RollbackStatus, SupportState,
 };
 use thinws_ports::{
     MaterializationPathProbeRequest, PlatformProbe, PortErrorKind, WorkspaceMaterializer,
@@ -234,4 +235,56 @@ fn full_copy_rejects_a_nonempty_target_without_touching_caller_data() {
     );
     assert_eq!(fs::read(target.join("caller.txt")).unwrap(), b"keep");
     assert!(!target.join("source.txt").exists());
+}
+
+#[test]
+#[ignore = "requires THINWS_P1_SUBMOUNT_SOURCE with a dedicated mounted APFS child"]
+fn real_source_submount_blocks_full_copy_before_target_write() {
+    let source = PathBuf::from(
+        std::env::var_os("THINWS_P1_SUBMOUNT_SOURCE")
+            .expect("THINWS_P1_SUBMOUNT_SOURCE must name the borrowed source"),
+    );
+    assert!(source.is_absolute());
+    let source_before = fs::symlink_metadata(&source).unwrap();
+    let mounted_before = fs::symlink_metadata(source.join("mounted")).unwrap();
+    assert!(source_before.is_dir());
+    assert!(mounted_before.is_dir());
+    assert_ne!(source_before.dev(), mounted_before.dev());
+
+    let temp = Builder::new()
+        .prefix("tw-p1-copy-submount-")
+        .tempdir_in(source.parent().unwrap())
+        .unwrap();
+    let target = temp.path().join("target");
+    let staging = temp.path().join("staging");
+    let trash = temp.path().join("trash");
+    for directory in [&target, &staging, &trash] {
+        fs::create_dir(directory).unwrap();
+    }
+    assert_eq!(
+        source_before.dev(),
+        fs::symlink_metadata(&target).unwrap().dev()
+    );
+
+    let host = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let (request, plan) = request_and_full_copy_plan(&host, &source, &target, &staging, &trash);
+    let failure = FullCopyMaterializer::new(host)
+        .materialize(&request, &plan)
+        .unwrap_err();
+
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::UnsupportedSourceEntry)
+    );
+    assert!(failure.receipt().created().is_empty());
+    assert!(fs::read_dir(&target).unwrap().next().is_none());
+    assert!(fs::read_dir(&staging).unwrap().next().is_none());
+    assert_eq!(
+        fs::symlink_metadata(&source).unwrap().ino(),
+        source_before.ino()
+    );
+    assert_eq!(
+        fs::symlink_metadata(source.join("mounted")).unwrap().ino(),
+        mounted_before.ino()
+    );
 }

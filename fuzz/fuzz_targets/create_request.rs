@@ -14,7 +14,10 @@ fuzz_target!(|data: &[u8]| {
     let expected_source = AbsolutePath::try_from_bytes(source.clone());
     let expected_name = WorkspaceName::from_str(name);
     let actual = CreateRequest::try_from_raw(source.clone(), name, allow_copy, 0);
-    assert_eq!(actual.is_ok(), expected_source.is_ok() && expected_name.is_ok());
+    assert_eq!(
+        actual.is_ok(),
+        expected_source.is_ok() && expected_name.is_ok()
+    );
     if let Ok(request) = actual {
         assert_eq!(request.source(), &expected_source.unwrap());
         assert_eq!(request.name(), &expected_name.unwrap());
@@ -23,5 +26,8 @@ fuzz_target!(|data: &[u8]| {
     }
     let negative_clock = CreateRequest::try_from_raw(source, name, allow_copy, -1);
     assert!(negative_clock.is_err());
-    assert_eq!(negative_clock.unwrap_err().diagnostic().code(), ErrorCode::Usage);
+    assert_eq!(
+        negative_clock.unwrap_err().diagnostic().code(),
+        ErrorCode::Usage
+    );
 });

@@ -62,6 +62,34 @@ fn prepared_identity(
     (prepared, identity)
 }
 
+#[test]
+fn initializing_never_writes_a_marker_for_a_different_same_volume_path() {
+    let temp = controlled_tempdir();
+    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    adapter.prepare_bootstrap().unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let prepared_path = temp.path().join("prepared");
+    let claimed_path = temp.path().join("claimed");
+    let prepared = adapter
+        .prepare_data_root(
+            &AbsolutePath::try_from_bytes(prepared_path.as_os_str().as_bytes().to_vec()).unwrap(),
+        )
+        .unwrap();
+    let claimed = identity(&claimed_path, INSTANCE_ID, prepared.volume_id());
+
+    let error = adapter
+        .create_initializing(&lock, prepared, &claimed)
+        .err()
+        .expect("a different path on the same volume must not receive a marker");
+
+    assert_eq!(error.kind(), PortErrorKind::Conflict);
+    assert_eq!(error.operation(), "validate prepared data root");
+    assert!(!prepared_path.join(".thinws-root.toml").exists());
+    assert!(!claimed_path.join(".thinws-root.toml").exists());
+}
+
 fn encoded_marker(identity: &InstallationIdentity, state: &str) -> Vec<u8> {
     let root_hex: String = identity
         .data_root()

@@ -141,20 +141,28 @@ impl MacOsPreparedWorkspace {
                 "revalidate Workspace root volume",
             ));
         }
-        if !self
-            .ownership
-            .container
-            .permits_current(historical_directory_identity(&self.container)?)
-            || !self
-                .ownership
-                .root
-                .permits_current(historical_directory_identity(&self.root)?)
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace historical directory identity changed",
-            ));
-        }
+        require_prepared_historical_ownership(&self.ownership, &self.container, &self.root)?;
+        Ok(())
+    }
+}
+
+fn require_prepared_historical_ownership(
+    ownership: &WorkspaceOwnership,
+    container: &ValidatedDirectory,
+    root: &ValidatedDirectory,
+) -> Result<(), PortError> {
+    if !ownership
+        .container
+        .permits_current(historical_directory_identity(container)?)
+        || !ownership
+            .root
+            .permits_current(historical_directory_identity(root)?)
+    {
+        Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace historical directory identity changed",
+        ))
+    } else {
         Ok(())
     }
 }
@@ -508,20 +516,13 @@ impl BootstrapStore for MacOsHostAdapter {
         let root = open_owned_child_directory(&container, OsStr::new("root"))?;
         revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
         let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-        if ownership.instance_id != layout.instance_id
-            || ownership.volume_id != layout.volume_id
-            || !ownership
-                .container
-                .permits_current(historical_directory_identity(&container)?)
-            || !ownership
-                .root
-                .permits_current(historical_directory_identity(&root)?)
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Ready Workspace historical ownership changed",
-            ));
-        }
+        require_ready_ownership(
+            &ownership,
+            layout.instance_id,
+            layout.volume_id,
+            &container,
+            &root,
+        )?;
         for directory in [&container, &state, &root] {
             if volume_id_for_directory(directory)? != layout.volume_id {
                 return Err(PortError::new(
@@ -564,21 +565,13 @@ impl BootstrapStore for MacOsHostAdapter {
         revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
         revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
         let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-        if ownership.instance_id != layout.instance_id
-            || ownership.volume_id != layout.volume_id
-            || !ownership
-                .container
-                .permits_current(historical_directory_identity(&container)?)
-            || !ownership
-                .root
-                .permits_current(historical_directory_identity(&root)?)
-            || volume_id_for_directory(&root)? != layout.volume_id
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Ready Workspace space-scan ownership changed",
-            ));
-        }
+        require_space_scan_ownership(
+            &ownership,
+            layout.instance_id,
+            layout.volume_id,
+            &container,
+            &root,
+        )?;
         let measurement = measure_root(&root.fd);
         revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
         revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
@@ -1006,19 +999,81 @@ fn require_removal_ownership(
     container: &ValidatedDirectory,
 ) -> Result<WorkspaceOwnership, PortError> {
     let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-    if ownership.instance_id != layout.instance_id
-        || ownership.volume_id != layout.volume_id
+    validate_removal_ownership(&ownership, layout.instance_id, layout.volume_id, container)?;
+    Ok(ownership)
+}
+
+fn require_ready_ownership(
+    ownership: &WorkspaceOwnership,
+    instance_id: thinws_core::InstanceId,
+    volume_id: VolumeId,
+    container: &ValidatedDirectory,
+    root: &ValidatedDirectory,
+) -> Result<(), PortError> {
+    if ownership.instance_id != instance_id
+        || ownership.volume_id != volume_id
         || !ownership
             .container
             .permits_current(historical_directory_identity(container)?)
-        || volume_id_for_directory(container)? != layout.volume_id
+        || !ownership
+            .root
+            .permits_current(historical_directory_identity(root)?)
     {
-        return Err(PortError::new(
+        Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Ready Workspace historical ownership changed",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_space_scan_ownership(
+    ownership: &WorkspaceOwnership,
+    instance_id: thinws_core::InstanceId,
+    volume_id: VolumeId,
+    container: &ValidatedDirectory,
+    root: &ValidatedDirectory,
+) -> Result<(), PortError> {
+    if ownership.instance_id != instance_id
+        || ownership.volume_id != volume_id
+        || !ownership
+            .container
+            .permits_current(historical_directory_identity(container)?)
+        || !ownership
+            .root
+            .permits_current(historical_directory_identity(root)?)
+        || volume_id_for_directory(root)? != volume_id
+    {
+        Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Ready Workspace space-scan ownership changed",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_removal_ownership(
+    ownership: &WorkspaceOwnership,
+    instance_id: thinws_core::InstanceId,
+    volume_id: VolumeId,
+    container: &ValidatedDirectory,
+) -> Result<(), PortError> {
+    if ownership.instance_id != instance_id
+        || ownership.volume_id != volume_id
+        || !ownership
+            .container
+            .permits_current(historical_directory_identity(container)?)
+        || volume_id_for_directory(container)? != volume_id
+    {
+        Err(PortError::new(
             PortErrorKind::InvalidLayout,
             "Workspace container historical ownership changed",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    Ok(ownership)
 }
 
 fn validate_removal_layout(
@@ -1181,6 +1236,232 @@ mod tests {
     use thinws_core::{AbsolutePath, InstanceId, VolumeId};
 
     use super::*;
+    use crate::filesystem::HistoricalDirectoryIdentity;
+
+    fn ownership_guard_fixture() -> (
+        tempfile::TempDir,
+        ValidatedDirectory,
+        ValidatedDirectory,
+        WorkspaceOwnership,
+    ) {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-15-ownership-tests");
+        fs::create_dir_all(&root).unwrap();
+        let temp = Builder::new()
+            .prefix("ownership-guard-")
+            .tempdir_in(fs::canonicalize(root).unwrap())
+            .unwrap();
+        let container_path = temp.path().join("container");
+        let root_path = container_path.join("root");
+        fs::create_dir(&container_path).unwrap();
+        fs::create_dir(&root_path).unwrap();
+        fs::set_permissions(&container_path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let container = open_private_directory(&container_path).unwrap();
+        let root = open_private_directory(&root_path).unwrap();
+        let ownership = WorkspaceOwnership {
+            instance_id: InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
+            workspace_id: WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40").unwrap(),
+            volume_id: volume_id_for_directory(&container).unwrap(),
+            container: historical_directory_identity(&container).unwrap(),
+            root: historical_directory_identity(&root).unwrap(),
+        };
+        (temp, container, root, ownership)
+    }
+
+    #[test]
+    fn prepared_workspace_rejects_each_historical_directory_mismatch() {
+        let (_temp, container, root, ownership) = ownership_guard_fixture();
+        require_prepared_historical_ownership(&ownership, &container, &root).unwrap();
+        for changed in [
+            WorkspaceOwnership {
+                container: HistoricalDirectoryIdentity {
+                    inode: ownership.container.inode + 1,
+                    ..ownership.container
+                },
+                ..ownership
+            },
+            WorkspaceOwnership {
+                root: HistoricalDirectoryIdentity {
+                    inode: ownership.root.inode + 1,
+                    ..ownership.root
+                },
+                ..ownership
+            },
+        ] {
+            let error =
+                require_prepared_historical_ownership(&changed, &container, &root).unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+            assert_eq!(
+                error.operation(),
+                "Workspace historical directory identity changed"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_ownership_rejects_each_single_identity_mismatch() {
+        let (_temp, container, root, ownership) = ownership_guard_fixture();
+        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
+        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        require_ready_ownership(
+            &ownership,
+            ownership.instance_id,
+            ownership.volume_id,
+            &container,
+            &root,
+        )
+        .unwrap();
+        for changed in [
+            WorkspaceOwnership {
+                instance_id: other_instance,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                volume_id: other_volume,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                container: HistoricalDirectoryIdentity {
+                    inode: ownership.container.inode + 1,
+                    ..ownership.container
+                },
+                ..ownership
+            },
+            WorkspaceOwnership {
+                root: HistoricalDirectoryIdentity {
+                    inode: ownership.root.inode + 1,
+                    ..ownership.root
+                },
+                ..ownership
+            },
+        ] {
+            let error = require_ready_ownership(
+                &changed,
+                ownership.instance_id,
+                ownership.volume_id,
+                &container,
+                &root,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+            assert_eq!(
+                error.operation(),
+                "Ready Workspace historical ownership changed"
+            );
+        }
+    }
+
+    #[test]
+    fn space_scan_rechecks_each_identity_after_ready_validation() {
+        let (_temp, container, root, ownership) = ownership_guard_fixture();
+        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
+        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        require_space_scan_ownership(
+            &ownership,
+            ownership.instance_id,
+            ownership.volume_id,
+            &container,
+            &root,
+        )
+        .unwrap();
+        for changed in [
+            WorkspaceOwnership {
+                instance_id: other_instance,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                volume_id: other_volume,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                container: HistoricalDirectoryIdentity {
+                    inode: ownership.container.inode + 1,
+                    ..ownership.container
+                },
+                ..ownership
+            },
+            WorkspaceOwnership {
+                root: HistoricalDirectoryIdentity {
+                    inode: ownership.root.inode + 1,
+                    ..ownership.root
+                },
+                ..ownership
+            },
+        ] {
+            let error = require_space_scan_ownership(
+                &changed,
+                ownership.instance_id,
+                ownership.volume_id,
+                &container,
+                &root,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+            assert_eq!(
+                error.operation(),
+                "Ready Workspace space-scan ownership changed"
+            );
+        }
+        let mut matching_foreign_claim = ownership;
+        matching_foreign_claim.volume_id = other_volume;
+        let error = require_space_scan_ownership(
+            &matching_foreign_claim,
+            ownership.instance_id,
+            other_volume,
+            &container,
+            &root,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.operation(),
+            "Ready Workspace space-scan ownership changed"
+        );
+    }
+
+    #[test]
+    fn removal_ownership_rejects_each_single_container_mismatch() {
+        let (_temp, container, _root, ownership) = ownership_guard_fixture();
+        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
+        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        validate_removal_ownership(
+            &ownership,
+            ownership.instance_id,
+            ownership.volume_id,
+            &container,
+        )
+        .unwrap();
+        for changed in [
+            WorkspaceOwnership {
+                instance_id: other_instance,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                volume_id: other_volume,
+                ..ownership
+            },
+            WorkspaceOwnership {
+                container: HistoricalDirectoryIdentity {
+                    inode: ownership.container.inode + 1,
+                    ..ownership.container
+                },
+                ..ownership
+            },
+        ] {
+            let error = validate_removal_ownership(
+                &changed,
+                ownership.instance_id,
+                ownership.volume_id,
+                &container,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+            assert_eq!(
+                error.operation(),
+                "Workspace container historical ownership changed"
+            );
+        }
+    }
 
     #[test]
     fn root_removal_classifies_identity_and_depth_failures_as_layout_errors() {

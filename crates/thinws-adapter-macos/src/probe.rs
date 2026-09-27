@@ -126,21 +126,9 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
                 current = next;
             }
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-                match node_metadata_at(&current, &name) {
-                    Err(metadata_error) if metadata_error.raw_os_error() == Some(libc::ENOENT) => {
-                        missing_components.extend(components[index..].iter().cloned());
-                        break;
-                    }
-                    Ok(_) => {
-                        return Err(PortError::new(
-                            PortErrorKind::InvalidLayout,
-                            "reject non-directory path component",
-                        ));
-                    }
-                    Err(metadata_error) => {
-                        return Err(probe_io("inspect missing path component", metadata_error));
-                    }
-                }
+                confirm_missing_component(node_metadata_at(&current, &name))?;
+                missing_components.extend(components[index..].iter().cloned());
+                break;
             }
             Err(error) => return Err(open_component_error(error)),
         }
@@ -183,6 +171,17 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         apfs_clone,
     )
     .map_err(|error| probe_invalid("build path capability report", error))
+}
+
+fn confirm_missing_component(metadata: io::Result<RawNodeMetadata>) -> Result<(), PortError> {
+    match metadata {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+        Ok(_) => Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "reject non-directory path component",
+        )),
+        Err(error) => Err(probe_io("inspect missing path component", error)),
+    }
 }
 
 fn combined_clone_support(
@@ -357,7 +356,11 @@ fn path_clone_support(fd: &OwnedFd, filesystem: &FileSystemIdentity) -> SupportS
 }
 
 fn clone_support(fd: &OwnedFd) -> SupportState {
-    match clone_capability(fd) {
+    clone_support_from_capability(clone_capability(fd))
+}
+
+fn clone_support_from_capability(result: io::Result<Option<RawCloneCapability>>) -> SupportState {
+    match result {
         Ok(Some(RawCloneCapability {
             interface_capabilities,
             interface_valid,
@@ -373,7 +376,13 @@ fn clone_support(fd: &OwnedFd) -> SupportState {
 }
 
 fn volume_evidence(fd: &OwnedFd) -> Evidence<thinws_core::VolumeId> {
-    match volume_uuid(fd) {
+    volume_evidence_from_uuid(volume_uuid(fd))
+}
+
+fn volume_evidence_from_uuid(
+    result: io::Result<Option<[u8; 16]>>,
+) -> Evidence<thinws_core::VolumeId> {
+    match result {
         Ok(Some(bytes)) if bytes.iter().any(|byte| *byte != 0) => {
             match decode_volume_id(Some(bytes)) {
                 Ok(volume_id) => Evidence::Known(volume_id),
@@ -606,6 +615,175 @@ mod tests {
             clone_support,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn missing_component_is_confirmed_only_by_a_second_enoent() {
+        confirm_missing_component(Err(io::Error::from_raw_os_error(libc::ENOENT))).unwrap();
+        for errno in [libc::EACCES, libc::EIO] {
+            let error =
+                confirm_missing_component(Err(io::Error::from_raw_os_error(errno))).unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::Io);
+            assert_eq!(error.operation(), "inspect missing path component");
+        }
+        let root = open_root_directory().unwrap();
+        assert_eq!(
+            confirm_missing_component(Ok(node_metadata(&root).unwrap()))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn path_containment_uses_component_boundaries_and_is_directional() {
+        for (parent, child, expected) in [
+            ("/a", "/a/b", true),
+            ("/a", "/ab", false),
+            ("/", "/a", true),
+            ("/a", "/a", true),
+            ("/a/b", "/a", false),
+        ] {
+            assert_eq!(path_contains(&absolute(parent), &absolute(child)), expected);
+        }
+    }
+
+    #[test]
+    fn overlap_detects_nested_missing_paths_without_leaf_identity() {
+        let volume =
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap());
+        let missing = |path: &str, components: &[&[u8]]| {
+            PathCapabilityReport::new(
+                absolute(path),
+                PathResolution::MissingTarget,
+                absolute("/"),
+                components
+                    .iter()
+                    .map(|component| component.to_vec())
+                    .collect(),
+                vec![DirectoryIdentityEvidence::new(
+                    absolute("/"),
+                    FileIdentity::new(1, 1),
+                )],
+                FileSystemIdentity::new("apfs", [7, 8], volume.clone()),
+                MountEvidence::new(0, true),
+                SupportState::Supported,
+                SupportState::Supported,
+                SupportState::Supported,
+            )
+            .unwrap()
+        };
+        let parent = missing("/missing", &[b"missing"]);
+        let child = missing("/missing/child", &[b"missing", b"child"]);
+        assert!(roots_overlap(&parent, &child));
+        assert!(roots_overlap(&child, &parent));
+    }
+
+    #[test]
+    fn overlap_detects_a_one_way_leaf_alias_in_ancestry() {
+        let volume =
+            Evidence::Known(VolumeId::from_str("1a42c888-32e3-489c-9bfa-67fd640a94e8").unwrap());
+        let make = |path: &str, ancestry: Vec<DirectoryIdentityEvidence>| {
+            PathCapabilityReport::new(
+                absolute(path),
+                PathResolution::ExistingDirectory,
+                absolute(path),
+                Vec::new(),
+                ancestry,
+                FileSystemIdentity::new("apfs", [7, 8], volume.clone()),
+                MountEvidence::new(0, true),
+                SupportState::Supported,
+                SupportState::Supported,
+                SupportState::Supported,
+            )
+            .unwrap()
+        };
+        let root = DirectoryIdentityEvidence::new(absolute("/"), FileIdentity::new(1, 1));
+        let source = make(
+            "/Tree",
+            vec![
+                root.clone(),
+                DirectoryIdentityEvidence::new(absolute("/Tree"), FileIdentity::new(1, 2)),
+            ],
+        );
+        let target = make(
+            "/tree/sub",
+            vec![
+                root,
+                DirectoryIdentityEvidence::new(absolute("/tree"), FileIdentity::new(1, 2)),
+                DirectoryIdentityEvidence::new(absolute("/tree/sub"), FileIdentity::new(1, 3)),
+            ],
+        );
+        assert!(roots_overlap(&source, &target));
+        assert!(roots_overlap(&target, &source));
+    }
+
+    #[test]
+    fn clone_capability_uses_both_valid_and_supported_bits() {
+        let bit = libc::VOL_CAP_INT_CLONE;
+        let support = |valid, capabilities| {
+            clone_support_from_capability(Ok(Some(RawCloneCapability {
+                interface_valid: valid,
+                interface_capabilities: capabilities,
+            })))
+        };
+        assert_eq!(support(0, bit), SupportState::Unknown);
+        assert_eq!(support(bit, 0), SupportState::Unsupported);
+        assert_eq!(support(bit, bit), SupportState::Supported);
+        assert_eq!(
+            clone_support_from_capability(Ok(None)),
+            SupportState::Unknown
+        );
+        assert_eq!(
+            clone_support_from_capability(Err(io::Error::from_raw_os_error(libc::EIO))),
+            SupportState::Unknown
+        );
+    }
+
+    #[test]
+    fn volume_evidence_preserves_the_zero_sentinel_reason() {
+        match volume_evidence_from_uuid(Ok(Some([0; 16]))) {
+            Evidence::Unknown { reason, errno } => {
+                assert_eq!(reason, "APFS volume UUID was the all-zero sentinel");
+                assert_eq!(errno, None);
+            }
+            Evidence::Known(_) => panic!("zero volume UUID must not be accepted"),
+        }
+        assert!(matches!(
+            volume_evidence_from_uuid(Ok(None)),
+            Evidence::Unknown { .. }
+        ));
+        assert!(matches!(
+            volume_evidence_from_uuid(Err(io::Error::from_raw_os_error(libc::EIO))),
+            Evidence::Unknown {
+                errno: Some(libc::EIO),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn access_and_digest_enums_keep_unknown_distinct() {
+        assert_eq!(access_support(Ok(())), SupportState::Supported);
+        assert_eq!(
+            access_support(Err(io::Error::from_raw_os_error(libc::EACCES))),
+            SupportState::Unsupported
+        );
+        assert_eq!(
+            access_support(Err(io::Error::from_raw_os_error(libc::EPERM))),
+            SupportState::Unsupported
+        );
+        assert_eq!(
+            access_support(Err(io::Error::from_raw_os_error(libc::EIO))),
+            SupportState::Unknown
+        );
+        assert_eq!(
+            access_support(Err(io::Error::other("no errno"))),
+            SupportState::Unknown
+        );
+        assert_eq!(enum_byte(SupportState::Supported), 1);
+        assert_eq!(enum_byte(SupportState::Unsupported), 2);
+        assert_eq!(enum_byte(SupportState::Unknown), 3);
     }
 
     fn digest_for(

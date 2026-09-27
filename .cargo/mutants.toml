@@ -1,4 +1,4 @@
-# Exact reviewed exceptions for P0-01/P0-02/P0-06/P0-07; no function/file-wide skips.
+# Exact reviewed exceptions for P0/P1; no function/file-wide skips.
 # Proofs, ownership, and invalidation conditions are in:
 # docs/development/implementation/P0-01_HostPathProbe实验.md
 # docs/development/implementation/P0-02_APFS物化实验.md
@@ -6,6 +6,8 @@
 # docs/development/implementation/P0-07_已跟踪检查与清理提示实验.md
 # Issue #10 ASCII separator equivalence proof and invalidation conditions:
 # https://github.com/chinayangxiaowei/thinworkspace/issues/10#issuecomment-5656789234
+# P1-15 proof, reviewer decisions, and invalidation conditions are in:
+# docs/development/planning/ThinWorkspace_Phase1实施计划_v1.0.md
 exclude_re = [
     '^experiments/p0/probe/src/lib\.rs:1408:57: replace \| with \^ in decode_hex$',
     '^experiments/p0/probe/src/ffi\.rs:61:(32|52): replace \| with \^ in open_root_directory$',
@@ -33,4 +35,24 @@ exclude_re = [
     '^crates/thinws-adapter-git-cli/src/git_query/inspect\.rs:1987:5: replace exercise_pure_parsers with \(\)$',
     # Test/fuzz oracle body, not a production mutation target; keep its parser targets.
     '^crates/thinws-adapter-git-cli/src/git_query/inspect\.rs:1992:5: replace exercise_pure_parser_inputs with \(\)$',
+    # Only compiled by the fuzz target, not by cargo-mutants' ordinary test build.
+    '^crates/thinws-adapter-macos/src/lib\.rs:30:5: replace fuzz_workspace_ownership_document with \(\)$',
+    # Valid hex high and low nibbles have disjoint bit positions.
+    '^crates/thinws-adapter-macos/src/document\.rs:328:51: replace \| with \^ in decode_hex$',
+    # Each pair of Darwin open/access/volume-attribute flags is bit-disjoint in pinned libc.
+    '^crates/thinws-adapter-macos/src/ffi\.rs:333:(32|51): replace \| with \^ in open_root_directory$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:343:(32|51): replace \| with \^ in open_directory_at$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:353:(32|51|70): replace \| with \^ in open_file_read_at$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:363:(32|48|63|82): replace \| with \^ in create_file_at$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:667:38: replace \| with \^ in volume_uuid$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:700:38: replace \| with \^ in clone_capability$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:741:37: replace \| with \^ in effective_write_search_access$',
+    '^crates/thinws-adapter-macos/src/ffi\.rs:745:37: replace \| with \^ in effective_read_search_access$',
+    # Rust Path::components emits RootDir only once, before any Normal component.
+    '^crates/thinws-adapter-macos/src/filesystem\.rs:210:35: replace match guard !saw_root with true in prepare_private_directory$',
+    '^crates/thinws-adapter-macos/src/filesystem\.rs:469:35: replace match guard !saw_root && !saw_normal with true in open_absolute_directory_nofollow$',
+    '^crates/thinws-adapter-macos/src/filesystem\.rs:469:45: replace && with \|\| in open_absolute_directory_nofollow$',
+    # Positive internal buffer size changes chunking, not the Phase 1 result contract.
+    '^crates/thinws-adapter-macos/src/materializer\.rs:899:32: replace \* with \+ in digest_file$',
+    '^crates/thinws-adapter-macos/src/materializer\.rs:1134:32: replace \* with \+ in copy_file_bytes$',
 ]

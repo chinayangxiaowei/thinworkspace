@@ -581,10 +581,7 @@ pub(crate) fn historical_directory_identity(
 ) -> Result<HistoricalDirectoryIdentity, PortError> {
     let stat = rustix::fs::fstat(&directory.fd)
         .map_err(|error| io_error("inspect historical directory identity", error))?;
-    if !FileType::from_raw_mode(stat.st_mode).is_dir()
-        || stat.st_uid != rustix::process::geteuid().as_raw()
-        || !(0..1_000_000_000).contains(&stat.st_birthtime_nsec)
-    {
+    if !historical_stat_is_safe(&stat, rustix::process::geteuid().as_raw()) {
         return Err(validation_error("historical directory identity is unsafe"));
     }
     Ok(HistoricalDirectoryIdentity {
@@ -593,6 +590,12 @@ pub(crate) fn historical_directory_identity(
         birth_nanoseconds: u32::try_from(stat.st_birthtime_nsec)
             .map_err(|_| validation_error("historical directory birthtime is invalid"))?,
     })
+}
+
+fn historical_stat_is_safe(stat: &rustix::fs::Stat, effective_uid: u32) -> bool {
+    FileType::from_raw_mode(stat.st_mode).is_dir()
+        && stat.st_uid == effective_uid
+        && (0..1_000_000_000).contains(&stat.st_birthtime_nsec)
 }
 
 /// Revalidates a child whose application-owned mode may change after materialization.
@@ -740,6 +743,66 @@ mod tests {
         assert_eq!(after.inode, before.inode);
         assert!(before.permits_current(after));
         assert_eq!(after.birth_seconds, 946_684_800);
+    }
+
+    #[test]
+    fn historical_identity_rejects_inode_and_birthtime_drift_independently() {
+        let expected = HistoricalDirectoryIdentity {
+            inode: 42,
+            birth_seconds: 100,
+            birth_nanoseconds: 200,
+        };
+        assert!(expected.permits_current(expected));
+        assert!(!expected.permits_current(HistoricalDirectoryIdentity {
+            inode: 43,
+            ..expected
+        }));
+        assert!(!expected.permits_current(HistoricalDirectoryIdentity {
+            birth_nanoseconds: 201,
+            ..expected
+        }));
+    }
+
+    #[test]
+    fn historical_stat_rejects_single_owner_or_time_range_mismatch() {
+        let (_temp, _, directory) = controlled_directory("historical-stat-");
+        let stat = rustix::fs::fstat(&directory.fd).unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        assert!(historical_stat_is_safe(&stat, uid));
+
+        let mut wrong_owner = rustix::fs::fstat(&directory.fd).unwrap();
+        wrong_owner.st_uid ^= 1;
+        assert!(!historical_stat_is_safe(&wrong_owner, uid));
+        let mut wrong_birthtime = rustix::fs::fstat(&directory.fd).unwrap();
+        wrong_birthtime.st_birthtime_nsec = 1_000_000_000;
+        assert!(!historical_stat_is_safe(&wrong_birthtime, uid));
+    }
+
+    #[test]
+    fn relative_private_directory_path_is_rejected_without_creation() {
+        let (temp, _, _) = controlled_directory("private-relative-");
+        let absent = temp.path().join("relative-candidate");
+        let relative = absent.strip_prefix("/").unwrap();
+
+        assert_eq!(
+            prepare_private_directory(relative, false)
+                .err()
+                .expect("relative path must be rejected")
+                .operation(),
+            "private directory path is not canonical"
+        );
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn filesystem_root_is_not_a_private_directory_candidate() {
+        assert_eq!(
+            prepare_private_directory(Path::new("/"), false)
+                .err()
+                .expect("filesystem root must be rejected")
+                .operation(),
+            "private directory path is not canonical"
+        );
     }
 
     #[test]

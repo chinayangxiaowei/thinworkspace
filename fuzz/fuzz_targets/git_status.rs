@@ -1,12 +1,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use thinws_p0_cleanup::removal_log::{
-    EventOutcome, RemovalLogEvent, RepositoryEvidence, RepositoryRelativePath, SafeId,
-};
 use thinws_core::{
     DiscoveryCompleteness, GitState, RepositoryState, aggregate_git_state,
     parse_tracked_change_count,
+};
+use thinws_p0_cleanup::removal_log::{
+    EventOutcome, RemovalLogEvent, RepositoryEvidence, RepositoryRelativePath, SafeId,
 };
 use thinws_p0_cleanup::{
     PathValidation, ProcessUse, RemovalDecision, RemovalMode, RemovalPreflight, VolumeValidation,

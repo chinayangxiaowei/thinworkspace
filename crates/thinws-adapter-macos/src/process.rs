@@ -35,15 +35,7 @@ impl ProcessProbe for MacOsHostAdapter {
             .map_err(|error| io_error("inspect held process-scan root", error))?;
         let kernel_metadata = fs::metadata(&kernel_path)
             .map_err(|error| io_error("inspect resolved process-scan root", error))?;
-        if !kernel_metadata.is_dir()
-            || kernel_metadata.dev() != held_metadata.st_dev as u64
-            || kernel_metadata.ino() != held_metadata.st_ino
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace process-scan root identity changed",
-            ));
-        }
+        validate_scan_root_identity(&kernel_metadata, &held_metadata)?;
         revalidate_directory(&held)?;
         let use_state = scan_visible_processes(&kernel_path);
         let observed_at = SystemTime::now()
@@ -78,7 +70,7 @@ fn scan_visible_processes(container: &Path) -> ProcessUse {
             incomplete = true;
             continue;
         };
-        if identity.pid != pid || identity.uid != own_uid {
+        if !matches_scan_identity(identity, pid, own_uid) {
             incomplete = true;
             continue;
         }
@@ -93,6 +85,27 @@ fn scan_visible_processes(container: &Path) -> ProcessUse {
     } else {
         ProcessUse::NoEvidence
     }
+}
+
+fn validate_scan_root_identity(
+    kernel_metadata: &fs::Metadata,
+    held_metadata: &rustix::fs::Stat,
+) -> Result<(), PortError> {
+    if !kernel_metadata.is_dir()
+        || kernel_metadata.dev() != held_metadata.st_dev as u64
+        || kernel_metadata.ino() != held_metadata.st_ino
+    {
+        Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace process-scan root identity changed",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn matches_scan_identity(identity: RawProcessIdentity, pid: i32, uid: u32) -> bool {
+    identity.pid == pid && identity.uid == uid
 }
 
 fn inspect_process(
@@ -229,6 +242,68 @@ mod tests {
         assert!(current.start_microseconds < 1_000_000);
         let (pids, _) = visible_user_pids().unwrap();
         assert!(pids.contains(&current.pid));
+    }
+
+    #[test]
+    fn resolved_scan_root_rejects_device_and_inode_drift_separately() {
+        let (_temp, container, _) = controlled_container("scan-root-identity-");
+        let held = open_private_directory(&container).unwrap();
+        let resolved = fs::metadata(&container).unwrap();
+        let stat = rustix::fs::fstat(&held.fd).unwrap();
+        validate_scan_root_identity(&resolved, &stat).unwrap();
+
+        let mut wrong_device = rustix::fs::fstat(&held.fd).unwrap();
+        wrong_device.st_dev ^= 1;
+        assert_eq!(
+            validate_scan_root_identity(&resolved, &wrong_device)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+
+        let mut wrong_inode = rustix::fs::fstat(&held.fd).unwrap();
+        wrong_inode.st_ino += 1;
+        assert_eq!(
+            validate_scan_root_identity(&resolved, &wrong_inode)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn scan_identity_requires_both_pid_and_user_to_match() {
+        let identity = RawProcessIdentity {
+            pid: 123,
+            uid: 501,
+            start_seconds: 1,
+            start_microseconds: 2,
+            open_file_count: 0,
+        };
+        assert!(matches_scan_identity(identity, 123, 501));
+        assert!(!matches_scan_identity(identity, 124, 501));
+        assert!(!matches_scan_identity(identity, 123, 502));
+        assert!(!matches_scan_identity(identity, 124, 502));
+    }
+
+    #[test]
+    fn disappeared_process_with_zero_reported_fds_keeps_scan_incomplete() {
+        let identity = RawProcessIdentity {
+            pid: i32::MAX,
+            uid: rustix::process::geteuid().as_raw(),
+            start_seconds: 1,
+            start_microseconds: 2,
+            open_file_count: 0,
+        };
+        assert_eq!(
+            inspect_process(
+                i32::MAX,
+                identity,
+                Path::new("/"),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            ProcessUse::ScanIncomplete
+        );
     }
 
     #[test]

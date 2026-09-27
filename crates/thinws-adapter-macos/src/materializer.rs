@@ -909,10 +909,14 @@ fn digest_file(file: OwnedFd, expected: RawNodeMetadata) -> Result<(u64, [u8; 32
     }
     let after =
         node_metadata(&file).map_err(|error| Failure::io("reinspect manifest file", error))?;
-    if after != expected || length != expected.size {
+    if !digest_snapshot_matches(after, expected, length) {
         return Err(source_changed());
     }
     Ok((length, *hasher.finalize().as_bytes()))
+}
+
+fn digest_snapshot_matches(after: RawNodeMetadata, expected: RawNodeMetadata, length: u64) -> bool {
+    after == expected && length == expected.size
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1325,7 +1329,7 @@ fn set_preserved_metadata(
     let after = node_metadata(target)
         .map_err(|error| Failure::io("inspect target after metadata update", error))?;
     ensure_identity(after, expected_identity, source.kind)?;
-    if after.mode != source.mode || after.mtime() != source.mtime() {
+    if !preserved_metadata_matches(after, source) {
         return Err(Failure::new(
             MaterializationFailureKind::ManifestMismatch,
             PortErrorKind::InvalidData,
@@ -1333,6 +1337,10 @@ fn set_preserved_metadata(
         ));
     }
     Ok(())
+}
+
+fn preserved_metadata_matches(after: RawNodeMetadata, source: RawNodeMetadata) -> bool {
+    after.mode == source.mode && after.mtime() == source.mtime()
 }
 
 trait ExecutionHook {
@@ -1393,6 +1401,14 @@ trait ExecutionHook {
 
     fn before_rollback_detach(&self, _relative: &[OsString]) -> Result<(), Failure> {
         Ok(())
+    }
+
+    fn before_rollback_entry_recheck(&self, _relative: &[OsString]) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn restore_rollback_root_mode(&self, target: &OwnedFd, mode: u32) -> io::Result<()> {
+        set_mode(target, mode)
     }
 
     fn after_rollback_detach(&self, _relative: &[OsString]) {}
@@ -1495,6 +1511,9 @@ fn rollback_created(
         let Ok((parent, component)) = open_rollback_parent(target.directory, entry, created) else {
             break;
         };
+        if hook.before_rollback_entry_recheck(&entry.relative).is_err() {
+            break;
+        }
         let Ok(current) = node_metadata_at(&parent, &component) else {
             break;
         };
@@ -1538,13 +1557,11 @@ fn rollback_created(
                     baseline.modified_nanoseconds,
                 )
                 .is_ok()
-                && set_mode(target.directory, baseline.mode).is_ok()
-                && node_metadata(target.directory).is_ok_and(|after| {
-                    after.identity() == baseline.identity()
-                        && after.kind == RawFileKind::Directory
-                        && after.mode == baseline.mode
-                        && after.mtime() == baseline.mtime()
-                })
+                && hook
+                    .restore_rollback_root_mode(target.directory, baseline.mode)
+                    .is_ok()
+                && node_metadata(target.directory)
+                    .is_ok_and(|after| root_matches_baseline(after, baseline))
         });
     let remaining = created[..active_count]
         .iter()
@@ -1558,6 +1575,13 @@ fn rollback_created(
     RollbackEvidence::new(status, removed, remaining)
         .with_quarantined(quarantined)
         .with_unconfirmed_quarantined(unconfirmed_quarantined)
+}
+
+fn root_matches_baseline(after: RawNodeMetadata, baseline: RawNodeMetadata) -> bool {
+    after.identity() == baseline.identity()
+        && after.kind == RawFileKind::Directory
+        && after.mode == baseline.mode
+        && after.mtime() == baseline.mtime()
 }
 
 fn path_points_to_bound(
@@ -1612,11 +1636,18 @@ fn detach_created_to_trash(
                     DetachOutcome::UnconfirmedQuarantine(quarantine_path)
                 };
             }
-            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
-            Err(_) => return DetachOutcome::NotDetached,
+            Err(error) => {
+                if !is_quarantine_name_collision(&error) {
+                    return DetachOutcome::NotDetached;
+                }
+            }
         }
     }
     DetachOutcome::NotDetached
+}
+
+fn is_quarantine_name_collision(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EEXIST)
 }
 
 enum DetachOutcome {
@@ -1639,9 +1670,12 @@ fn quarantined_entry_matches(
     let Ok(directory) = open_directory_at(trash, quarantine) else {
         return false;
     };
-    node_metadata(&directory).is_ok_and(|held| {
-        held.identity() == expected_identity && held.kind == RawFileKind::Directory
-    }) && read_directory(&directory).is_ok_and(|entries| entries.is_empty())
+    node_metadata(&directory).is_ok_and(|held| held_directory_matches(held, expected_identity))
+        && read_directory(&directory).is_ok_and(|entries| entries.is_empty())
+}
+
+fn held_directory_matches(held: RawNodeMetadata, expected_identity: FileIdentity) -> bool {
+    held.identity() == expected_identity && held.kind == RawFileKind::Directory
 }
 
 fn rollback_set_matches(target: &OwnedFd, created: &[TrackedCreated]) -> bool {
@@ -1697,7 +1731,7 @@ fn observe_target_entries(
         if metadata.kind == RawFileKind::Directory {
             let child_fd = open_directory_at(directory, &component)?;
             let held = node_metadata(&child_fd)?;
-            if held.identity() != metadata.identity() || held.kind != RawFileKind::Directory {
+            if !held_directory_matches(held, metadata.identity()) {
                 return Err(io::Error::from_raw_os_error(libc::ESTALE));
             }
             observe_target_entries(&child_fd, &child, root_device, observed)?;
@@ -2060,9 +2094,13 @@ mod tests {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use tempfile::{Builder, TempDir};
-    use thinws_core::{FallbackPolicy, MaterializationOutcome, MaterializationPlan};
+    use thinws_core::{
+        DirectoryIdentityEvidence, Evidence, FallbackPolicy, FileIdentity, FileSystemIdentity,
+        MaterializationOutcome, MaterializationPlan, MountEvidence, PathCapabilityReport,
+    };
 
     use super::*;
 
@@ -2238,6 +2276,86 @@ mod tests {
         );
         assert!(!Backend::ApfsClone.candidate_is_executable(&unsupported_clone));
         assert!(!Backend::FullCopy.candidate_is_executable(&unsupported_copy));
+    }
+
+    #[test]
+    fn bound_directory_rejects_each_independent_plan_evidence_drift() {
+        let (temp, request, _, adapter) = fixture("directory-evidence-drift-");
+        let report = adapter
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let original = report.target_root();
+        let held = open_absolute_directory(&absolute(&temp.path().join("target"))).unwrap();
+        verify_directory_evidence(&held, original).unwrap();
+
+        let altered = |ancestry: Vec<DirectoryIdentityEvidence>,
+                       filesystem: FileSystemIdentity,
+                       mount: MountEvidence| {
+            PathCapabilityReport::new(
+                original.requested_path().clone(),
+                original.resolution(),
+                original.nearest_existing_ancestor().clone(),
+                original.missing_components().to_vec(),
+                ancestry,
+                filesystem,
+                mount,
+                original.readability(),
+                original.writability(),
+                original.apfs_clone(),
+            )
+            .unwrap()
+        };
+        let ancestry = original.ancestry().to_vec();
+        let filesystem = original.filesystem().clone();
+        let mount = original.mount();
+        let actual = node_metadata(&held).unwrap();
+        let mut wrong_ancestry = ancestry.clone();
+        *wrong_ancestry.last_mut().unwrap() = DirectoryIdentityEvidence::new(
+            original.requested_path().clone(),
+            FileIdentity::new(actual.device, actual.inode + 1),
+        );
+        let cases = [
+            altered(wrong_ancestry, filesystem.clone(), mount),
+            altered(
+                ancestry.clone(),
+                FileSystemIdentity::new(
+                    "not-apfs",
+                    filesystem.fsid(),
+                    filesystem.volume_id().clone(),
+                ),
+                mount,
+            ),
+            altered(
+                ancestry.clone(),
+                FileSystemIdentity::new(
+                    filesystem.type_name(),
+                    [filesystem.fsid()[0] ^ 1, filesystem.fsid()[1]],
+                    filesystem.volume_id().clone(),
+                ),
+                mount,
+            ),
+            altered(
+                ancestry.clone(),
+                filesystem.clone(),
+                MountEvidence::new(mount.raw_flags() ^ 1, mount.writable()),
+            ),
+            altered(
+                ancestry,
+                FileSystemIdentity::new(
+                    filesystem.type_name(),
+                    filesystem.fsid(),
+                    Evidence::Known("550e8400-e29b-41d4-a716-446655440000".parse().unwrap()),
+                ),
+                mount,
+            ),
+        ];
+        for (index, case) in cases.iter().enumerate() {
+            assert_eq!(
+                verify_directory_evidence(&held, case).unwrap_err().kind,
+                MaterializationFailureKind::PlanStale,
+                "drift case {index}"
+            );
+        }
     }
 
     struct FailAfterFirstCopyChunk;
@@ -3582,6 +3700,53 @@ mod tests {
         );
     }
 
+    struct ReplaceBeforeRollbackEntryRecheck {
+        target_file: PathBuf,
+        detached: Cell<bool>,
+    }
+
+    impl ExecutionHook for ReplaceBeforeRollbackEntryRecheck {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            Err(target_changed())
+        }
+
+        fn before_rollback_entry_recheck(&self, _relative: &[OsString]) -> Result<(), Failure> {
+            fs::remove_file(&self.target_file).unwrap();
+            fs::write(&self.target_file, b"foreign replacement before recheck").unwrap();
+            Ok(())
+        }
+
+        fn after_rollback_detach(&self, _relative: &[OsString]) {
+            self.detached.set(true);
+        }
+    }
+
+    #[test]
+    fn rollback_rechecks_both_identity_and_kind_before_detaching() {
+        let (temp, request, plan, adapter) = fixture("rollback-entry-recheck-");
+        let target_file = temp.path().join("target/file.txt");
+        let hook = ReplaceBeforeRollbackEntryRecheck {
+            target_file: target_file.clone(),
+            detached: Cell::new(false),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert!(failure.receipt().rollback().removed().is_empty());
+        assert_eq!(failure.receipt().rollback().remaining().len(), 1);
+        assert!(!hook.detached.get());
+        assert_eq!(
+            fs::read(target_file).unwrap(),
+            b"foreign replacement before recheck"
+        );
+    }
+
     struct AddUnknownChildBeforeDirectoryDetachHook {
         target_directory: PathBuf,
     }
@@ -3665,6 +3830,278 @@ mod tests {
         assert_eq!(node_metadata(&target).unwrap(), baseline);
     }
 
+    struct RefuseRollbackDetach;
+
+    impl ExecutionHook for RefuseRollbackDetach {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            Err(Failure::io(
+                "inject failure before rollback",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+
+        fn before_rollback_detach(&self, _relative: &[OsString]) -> Result<(), Failure> {
+            Err(Failure::io(
+                "inject failed rollback detach",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+    }
+
+    #[test]
+    fn rollback_with_a_registered_entry_remaining_never_reports_baseline() {
+        let (temp, request, plan, adapter) = fixture("rollback-entry-remains-");
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &RefuseRollbackDetach)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(failure.receipt().rollback().remaining().len(), 1);
+        assert_eq!(
+            fs::read(temp.path().join("target/file.txt")).unwrap(),
+            b"source bytes"
+        );
+    }
+
+    struct ChangeRootModeAfterDetach(PathBuf);
+
+    impl ExecutionHook for ChangeRootModeAfterDetach {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            Err(Failure::io(
+                "inject failure before rollback",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+
+        fn after_rollback_detach(&self, _relative: &[OsString]) {
+            fs::set_permissions(&self.0, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_rechecks_and_restores_root_mode_after_the_last_detach() {
+        let (temp, request, plan, adapter) = fixture("rollback-root-mode-");
+        let root_path = temp.path().join("target");
+        let root = open_absolute_directory(&absolute(&root_path)).unwrap();
+        let baseline = node_metadata(&root).unwrap();
+        assert_ne!(baseline.mode, 0o500);
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &ChangeRootModeAfterDetach(root_path))
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert_eq!(node_metadata(&root).unwrap().mode, baseline.mode);
+    }
+
+    struct ChangeRootModeBeforeRollback(PathBuf);
+
+    impl ExecutionHook for ChangeRootModeBeforeRollback {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            fs::set_permissions(&self.0, fs::Permissions::from_mode(0o500)).unwrap();
+            Err(Failure::io(
+                "inject failure after target root permission drift",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+    }
+
+    #[test]
+    fn rollback_restores_changed_root_mode_before_detaching() {
+        let (temp, request, plan, adapter) = fixture("rollback-early-root-mode-");
+        let root_path = temp.path().join("target");
+        let root = open_absolute_directory(&absolute(&root_path)).unwrap();
+        let baseline = node_metadata(&root).unwrap();
+        assert_ne!(baseline.mode, 0o500);
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &ChangeRootModeBeforeRollback(root_path))
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert_eq!(failure.receipt().rollback().removed().len(), 1);
+        assert_eq!(node_metadata(&root).unwrap().mode, baseline.mode);
+    }
+
+    struct FailFinalRootModeRestore;
+
+    impl ExecutionHook for FailFinalRootModeRestore {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            Err(Failure::io(
+                "inject failure before rollback",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+
+        fn restore_rollback_root_mode(&self, _target: &OwnedFd, _mode: u32) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        }
+    }
+
+    #[test]
+    fn rollback_does_not_confirm_baseline_when_final_root_chmod_fails() {
+        let (_temp, request, plan, adapter) = fixture("rollback-final-chmod-failure-");
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &FailFinalRootModeRestore)
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(failure.receipt().rollback().removed().len(), 1);
+        assert!(failure.receipt().rollback().remaining().is_empty());
+    }
+
+    struct RebindTrashAfterFirstDetach {
+        trash: PathBuf,
+        relocated: PathBuf,
+        fired: Cell<bool>,
+    }
+
+    impl ExecutionHook for RebindTrashAfterFirstDetach {
+        fn before_root_metadata(&self, _target: &OwnedFd) -> Result<(), Failure> {
+            Err(Failure::io(
+                "inject failure before rollback",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+
+        fn after_rollback_detach(&self, _relative: &[OsString]) {
+            if !self.fired.replace(true) {
+                fs::rename(&self.trash, &self.relocated).unwrap();
+                fs::create_dir(&self.trash).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_stops_when_trash_path_rebinds_between_entries() {
+        let (temp, request, plan, adapter) = fixture("rollback-trash-rebound-");
+        fs::write(temp.path().join("source/second.txt"), b"second").unwrap();
+        let hook = RebindTrashAfterFirstDetach {
+            trash: temp.path().join("trash"),
+            relocated: temp.path().join("trash-relocated"),
+            fired: Cell::new(false),
+        };
+
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+
+        assert!(hook.fired.get());
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(failure.receipt().rollback().removed().len(), 1);
+        assert_eq!(failure.receipt().rollback().remaining().len(), 1);
+        assert_eq!(
+            fs::read(temp.path().join("target/file.txt")).unwrap(),
+            b"source bytes"
+        );
+    }
+
+    struct OccupyFirstQuarantineName(PathBuf);
+
+    impl ExecutionHook for OccupyFirstQuarantineName {
+        fn before_root_metadata(&self, target: &OwnedFd) -> Result<(), Failure> {
+            let identity = node_metadata_at(target, c"file.txt").unwrap().identity();
+            let name = format!(
+                ".thinws-rollback-{}-{}-0-0",
+                identity.device(),
+                identity.inode()
+            );
+            fs::write(self.0.join(name), b"unrelated occupant").unwrap();
+            Err(Failure::io(
+                "inject quarantine-name collision",
+                io::Error::from_raw_os_error(libc::EIO),
+            ))
+        }
+    }
+
+    #[test]
+    fn rollback_retries_only_an_existing_quarantine_name() {
+        assert!(is_quarantine_name_collision(&io::Error::from_raw_os_error(
+            libc::EEXIST
+        )));
+        assert!(!is_quarantine_name_collision(
+            &io::Error::from_raw_os_error(libc::EACCES)
+        ));
+        assert!(!is_quarantine_name_collision(
+            &io::Error::from_raw_os_error(libc::ENOENT)
+        ));
+
+        let (temp, request, plan, adapter) = fixture("rollback-quarantine-collision-");
+        let failure = ApfsCloneMaterializer::new(adapter)
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &OccupyFirstQuarantineName(temp.path().join("trash")),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert_eq!(failure.receipt().rollback().quarantined().len(), 1);
+        let quarantine = &failure.receipt().rollback().quarantined()[0];
+        assert!(quarantine.as_bytes().ends_with(b"-0-1"));
+        let occupied_name = &quarantine.as_bytes()[..quarantine.as_bytes().len() - 1];
+        let mut occupied_name = occupied_name.to_vec();
+        occupied_name.push(b'0');
+        assert_eq!(
+            fs::read(
+                temp.path()
+                    .join("trash")
+                    .join(OsString::from_vec(occupied_name))
+            )
+            .unwrap(),
+            b"unrelated occupant"
+        );
+    }
+
+    #[test]
+    fn rollback_parent_rejects_one_mismatched_parent_identity() {
+        let (temp, _, _, _) = fixture("rollback-parent-identity-");
+        let target_path = temp.path().join("target");
+        fs::create_dir(target_path.join("dir")).unwrap();
+        fs::write(target_path.join("dir/file.txt"), b"nested").unwrap();
+        let target = open_absolute_directory(&absolute(&target_path)).unwrap();
+        let parent = open_directory_at(&target, c"dir").unwrap();
+        let mut wrong_identity = node_metadata(&parent).unwrap().identity();
+        wrong_identity = FileIdentity::new(wrong_identity.device(), wrong_identity.inode() ^ 1);
+        let entries = [
+            TrackedCreated {
+                relative: vec![OsString::from("dir")],
+                kind: RawFileKind::Directory,
+                identity: Some(wrong_identity),
+            },
+            TrackedCreated {
+                relative: vec![OsString::from("dir"), OsString::from("file.txt")],
+                kind: RawFileKind::RegularFile,
+                identity: Some(node_metadata_at(&parent, c"file.txt").unwrap().identity()),
+            },
+        ];
+
+        assert_eq!(
+            open_rollback_parent(&target, &entries[1], &entries)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESTALE)
+        );
+    }
+
     #[test]
     fn submount_guard_rejects_a_directory_entry_from_another_device() {
         let (temp, _, _, _) = fixture("submount-guard-");
@@ -3710,6 +4147,145 @@ mod tests {
         first.entries[0].path = b"b".to_vec();
 
         assert_ne!(first.digest(), second.digest());
+    }
+
+    #[test]
+    fn promised_manifest_requires_each_logical_field_independently() {
+        let promised = TreeManifest {
+            root_mode: 0o700,
+            root_mtime: (12, 34),
+            entries: vec![ManifestEntry {
+                path: b"file".to_vec(),
+                kind: RawFileKind::RegularFile,
+                mode: Some(0o600),
+                mtime: Some((56, 78)),
+                length: 5,
+                content_digest: Some([9; 32]),
+            }],
+            regular_files: 1,
+            logical_bytes: 5,
+            physical_bytes: 4096,
+        };
+        assert!(promised.matches_promised(&promised));
+
+        let mut changed = promised.clone();
+        changed.root_mode ^= 0o100;
+        assert!(!changed.matches_promised(&promised));
+        changed = promised.clone();
+        changed.root_mtime.0 += 1;
+        assert!(!changed.matches_promised(&promised));
+        changed = promised.clone();
+        changed.entries[0].path = b"other".to_vec();
+        assert!(!changed.matches_promised(&promised));
+        changed = promised.clone();
+        changed.regular_files += 1;
+        assert!(!changed.matches_promised(&promised));
+        changed = promised.clone();
+        changed.logical_bytes += 1;
+        assert!(!changed.matches_promised(&promised));
+        changed = promised.clone();
+        changed.physical_bytes += 1;
+        assert!(changed.matches_promised(&promised));
+    }
+
+    #[test]
+    fn manifest_file_digest_uses_all_bytes_and_reports_the_real_length() {
+        let (temp, _, _, _) = fixture("manifest-file-digest-");
+        let bytes = (0..(128 * 1024 + 17))
+            .map(|index| index as u8)
+            .collect::<Vec<_>>();
+        fs::write(temp.path().join("source/file.txt"), &bytes).unwrap();
+        let source = open_absolute_directory(&absolute(&temp.path().join("source"))).unwrap();
+        let file = open_file_read_at(&source, c"file.txt").unwrap();
+        let expected = node_metadata(&file).unwrap();
+
+        let (length, digest) = digest_file(file, expected).unwrap();
+
+        assert_eq!(length, bytes.len() as u64);
+        assert_eq!(digest, *blake3::hash(&bytes).as_bytes());
+    }
+
+    #[test]
+    fn digest_and_preserved_metadata_require_each_postcondition_independently() {
+        let (temp, _, _, _) = fixture("metadata-postconditions-");
+        let file = open_file_read_at(
+            &open_absolute_directory(&absolute(&temp.path().join("source"))).unwrap(),
+            c"file.txt",
+        )
+        .unwrap();
+        let expected = node_metadata(&file).unwrap();
+        assert!(digest_snapshot_matches(expected, expected, expected.size));
+        assert!(!digest_snapshot_matches(
+            expected,
+            expected,
+            expected.size + 1
+        ));
+        let mut changed = expected;
+        changed.modified_nanoseconds ^= 1;
+        assert!(!digest_snapshot_matches(changed, expected, expected.size));
+
+        assert!(preserved_metadata_matches(expected, expected));
+        changed = expected;
+        changed.mode ^= 0o100;
+        assert!(!preserved_metadata_matches(changed, expected));
+        changed = expected;
+        changed.modified_seconds -= 1;
+        assert!(!preserved_metadata_matches(changed, expected));
+    }
+
+    #[test]
+    fn rollback_root_and_held_directory_check_each_identity_field() {
+        let (temp, _, _, _) = fixture("rollback-identity-fields-");
+        let root = open_absolute_directory(&absolute(&temp.path().join("target"))).unwrap();
+        let baseline = node_metadata(&root).unwrap();
+        assert!(root_matches_baseline(baseline, baseline));
+        assert!(held_directory_matches(baseline, baseline.identity()));
+
+        let mut changed = baseline;
+        changed.inode ^= 1;
+        assert!(!root_matches_baseline(changed, baseline));
+        assert!(!held_directory_matches(changed, baseline.identity()));
+        changed = baseline;
+        changed.kind = RawFileKind::RegularFile;
+        assert!(!root_matches_baseline(changed, baseline));
+        assert!(!held_directory_matches(changed, baseline.identity()));
+        changed = baseline;
+        changed.mode ^= 0o100;
+        assert!(!root_matches_baseline(changed, baseline));
+        changed = baseline;
+        changed.modified_nanoseconds ^= 1;
+        assert!(!root_matches_baseline(changed, baseline));
+    }
+
+    #[test]
+    fn manifest_encoding_helpers_preserve_time_and_distinguish_node_kinds() {
+        let mut actual = blake3::Hasher::new();
+        update_time(&mut actual, (123, 456));
+        let mut expected = blake3::Hasher::new();
+        expected.update(&123_i64.to_le_bytes());
+        expected.update(&456_i64.to_le_bytes());
+        assert_eq!(actual.finalize(), expected.finalize());
+
+        for (kind, byte) in [
+            (RawFileKind::Directory, 1),
+            (RawFileKind::RegularFile, 2),
+            (RawFileKind::SymbolicLink, 3),
+            (RawFileKind::Fifo, 4),
+            (RawFileKind::Socket, 5),
+            (RawFileKind::CharacterDevice, 6),
+            (RawFileKind::BlockDevice, 7),
+            (RawFileKind::Unknown, 8),
+        ] {
+            assert_eq!(kind_byte(kind), byte);
+        }
+        assert!(elapsed_millis(Instant::now() - Duration::from_millis(10)) >= 10);
+
+        let (temp, _, _, _) = fixture("raw-node-mtime-");
+        let root = open_absolute_directory(&absolute(&temp.path().join("source"))).unwrap();
+        let mut metadata = node_metadata(&root).unwrap();
+        metadata.modified_seconds = 123;
+        metadata.modified_nanoseconds = 456;
+        assert_eq!(metadata.mtime(), (123, 456));
     }
 
     #[test]

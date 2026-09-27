@@ -9,6 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PlatformWorkflowEnvironmentTests(unittest.TestCase):
+    def test_fuzz_lint_enables_the_fuzz_only_bridge(self) -> None:
+        workflow = (ROOT / ".github/workflows/p0.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            'RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features -- -D warnings',
+            workflow,
+        )
+
     def test_p1_cross_volume_tests_use_the_prepared_apfs_mount(self) -> None:
         workflow = (ROOT / ".github/workflows/p0.yml").read_text(encoding="utf-8")
 

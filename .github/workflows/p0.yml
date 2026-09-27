@@ -62,7 +62,7 @@ jobs:
       - name: Lint
         run: |
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-          cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+          RUSTFLAGS="--cfg fuzzing" cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features -- -D warnings
       - name: Prepare distinct APFS volume
         id: cross-volume
         run: |

@@ -94,9 +94,7 @@ pub(crate) fn visible_user_pids() -> io::Result<(Vec<i32>, bool)> {
         return Err(libproc_error("list current-user processes"));
     }
     let item_size = std::mem::size_of::<i32>();
-    let capacity = (estimated_bytes as usize / item_size)
-        .saturating_add(64)
-        .min(MAX_VISIBLE_PIDS);
+    let capacity = list_capacity(estimated_bytes, item_size, 64, MAX_VISIBLE_PIDS);
     let mut pids = vec![0_i32; capacity];
     let buffer_size = c_int_buffer_bytes(capacity, item_size)?;
     // SAFETY: the vector owns writable storage for exactly buffer_size bytes.
@@ -108,16 +106,8 @@ pub(crate) fn visible_user_pids() -> io::Result<(Vec<i32>, bool)> {
             buffer_size,
         )
     };
-    if bytes <= 0
-        || !(bytes as usize).is_multiple_of(item_size)
-        || bytes as usize > capacity * item_size
-    {
-        return Err(libproc_error("read current-user process list"));
-    }
-    let count = bytes as usize / item_size;
-    pids.truncate(count);
-    pids.retain(|pid| *pid > 0);
-    Ok((pids, count == capacity))
+    let count = checked_list_count(bytes, item_size, capacity, "read current-user process list")?;
+    Ok(complete_pid_list(pids, count, capacity))
 }
 
 pub(crate) fn fd_kernel_path(fd: &impl AsRawFd) -> io::Result<OsString> {
@@ -128,6 +118,10 @@ pub(crate) fn fd_kernel_path(fd: &impl AsRawFd) -> io::Result<OsString> {
     if result == -1 {
         return Err(io::Error::last_os_error());
     }
+    decode_kernel_path(&bytes)
+}
+
+fn decode_kernel_path(bytes: &[u8]) -> io::Result<OsString> {
     let length = bytes
         .iter()
         .position(|byte| *byte == 0)
@@ -197,9 +191,7 @@ pub(crate) fn process_vnode_fds(pid: i32, expected: u32) -> io::Result<(Vec<i32>
         return Err(libproc_error("size process fd list"));
     }
     let item_size = std::mem::size_of::<libc::proc_fdinfo>();
-    let capacity = (estimated_bytes as usize / item_size)
-        .saturating_add(32)
-        .min(MAX_PROCESS_FDS);
+    let capacity = list_capacity(estimated_bytes, item_size, 32, MAX_PROCESS_FDS);
     let mut fds = vec![
         libc::proc_fdinfo {
             proc_fd: 0,
@@ -218,21 +210,51 @@ pub(crate) fn process_vnode_fds(pid: i32, expected: u32) -> io::Result<(Vec<i32>
             buffer_size,
         )
     };
+    let count = checked_list_count(bytes, item_size, capacity, "read process fd list")?;
+    Ok(complete_fd_list(fds, count, capacity))
+}
+
+fn list_capacity(estimated_bytes: i32, item_size: usize, spare: usize, limit: usize) -> usize {
+    (estimated_bytes as usize / item_size)
+        .saturating_add(spare)
+        .min(limit)
+}
+
+fn checked_list_count(
+    bytes: i32,
+    item_size: usize,
+    capacity: usize,
+    operation: &'static str,
+) -> io::Result<usize> {
     if bytes <= 0
         || !(bytes as usize).is_multiple_of(item_size)
         || bytes as usize > capacity * item_size
     {
-        return Err(libproc_error("read process fd list"));
+        Err(libproc_error(operation))
+    } else {
+        Ok(bytes as usize / item_size)
     }
-    let count = bytes as usize / item_size;
+}
+
+fn complete_pid_list(mut pids: Vec<i32>, count: usize, capacity: usize) -> (Vec<i32>, bool) {
+    pids.truncate(count);
+    pids.retain(|pid| *pid > 0);
+    (pids, count == capacity)
+}
+
+fn complete_fd_list(
+    mut fds: Vec<libc::proc_fdinfo>,
+    count: usize,
+    capacity: usize,
+) -> (Vec<i32>, bool) {
     fds.truncate(count);
-    Ok((
+    (
         fds.into_iter()
             .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
             .map(|fd| fd.proc_fd)
             .collect(),
         count == capacity,
-    ))
+    )
 }
 
 pub(crate) fn process_vnode_fd(pid: i32, fd: i32) -> io::Result<Option<RawProcessVnode>> {
@@ -700,15 +722,19 @@ pub(crate) fn clone_capability(fd: &OwnedFd) -> io::Result<Option<RawCloneCapabi
     // SAFETY: the zeroed buffer is read only after syscall success; length and
     // returned bits below gate use of the capability payload.
     let buffer = unsafe { buffer.assume_init() };
+    Ok(decode_clone_capability_buffer(&buffer))
+}
+
+fn decode_clone_capability_buffer(buffer: &VolumeCapabilitiesBuffer) -> Option<RawCloneCapability> {
     if usize::try_from(buffer.length).unwrap_or(0) < size_of::<VolumeCapabilitiesBuffer>()
         || buffer.returned.volattr & libc::ATTR_VOL_CAPABILITIES == 0
     {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(RawCloneCapability {
+    Some(RawCloneCapability {
         interface_capabilities: buffer.capabilities.capabilities[libc::VOL_CAPABILITIES_INTERFACES],
         interface_valid: buffer.capabilities.valid[libc::VOL_CAPABILITIES_INTERFACES],
-    }))
+    })
 }
 
 pub(crate) fn effective_write_search_access(fd: &OwnedFd) -> io::Result<()> {
@@ -765,7 +791,7 @@ pub(crate) fn product_version() -> io::Result<String> {
     if size_result != 0 {
         return Err(io::Error::last_os_error());
     }
-    if !(2..=4096).contains(&length) {
+    if !valid_product_version_length(length) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "kern.osproductversion returned an invalid size",
@@ -787,6 +813,14 @@ pub(crate) fn product_version() -> io::Result<String> {
     if value_result != 0 {
         return Err(io::Error::last_os_error());
     }
+    decode_product_version_bytes(value, length)
+}
+
+fn valid_product_version_length(length: usize) -> bool {
+    (2..=4096).contains(&length)
+}
+
+fn decode_product_version_bytes(mut value: Vec<u8>, length: usize) -> io::Result<String> {
     value.truncate(length);
     if value.last() == Some(&0) {
         value.pop();
@@ -890,6 +924,12 @@ impl Drop for DirectoryStream {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::{Command, Stdio};
+
     use super::*;
 
     #[test]
@@ -907,6 +947,61 @@ mod tests {
         );
         assert_eq!(read_directory_bounded(&directory, 2).unwrap().len(), 2);
         assert_eq!(read_directory(&directory).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn libproc_list_capacity_and_byte_count_enforce_each_boundary() {
+        assert_eq!(list_capacity(8, 4, 64, MAX_VISIBLE_PIDS), 66);
+        assert_eq!(list_capacity(64, 16, 32, MAX_PROCESS_FDS), 36);
+        assert_eq!(list_capacity(i32::MAX, 4, 64, 100), 100);
+
+        assert_eq!(checked_list_count(4, 4, 3, "test").unwrap(), 1);
+        assert_eq!(checked_list_count(12, 4, 3, "test").unwrap(), 3);
+        for invalid_bytes in [0, -1, 3, 16] {
+            assert!(checked_list_count(invalid_bytes, 4, 3, "test").is_err());
+        }
+    }
+
+    #[test]
+    fn libproc_error_preserves_real_errno_and_explains_a_zero_errno_failure() {
+        // SAFETY: Darwin's __error points to this test thread's errno slot.
+        let saved_errno = unsafe { *libc::__error() };
+        // SAFETY: only this thread's errno slot is changed and it is restored
+        // before assertions can panic.
+        unsafe { *libc::__error() = libc::EBADF };
+        let real_error = libproc_error("read process fd list");
+        // SAFETY: this is the same thread-local errno slot.
+        unsafe { *libc::__error() = 0 };
+        let zero_errno_error = libproc_error("read process fd list");
+        // SAFETY: restore the caller-visible errno before checking results.
+        unsafe { *libc::__error() = saved_errno };
+
+        assert_eq!(real_error.raw_os_error(), Some(libc::EBADF));
+        assert_eq!(zero_errno_error.raw_os_error(), None);
+        assert_eq!(zero_errno_error.to_string(), "read process fd list");
+    }
+
+    #[test]
+    fn libproc_lists_filter_invalid_entries_and_keep_truncation_evidence() {
+        assert_eq!(
+            complete_pid_list(vec![0, 42, -1, 23], 4, 4),
+            (vec![42, 23], true)
+        );
+        assert_eq!(
+            complete_pid_list(vec![0, 42, -1, 23], 2, 4),
+            (vec![42], false)
+        );
+
+        let vnode = libc::proc_fdinfo {
+            proc_fd: 7,
+            proc_fdtype: libc::PROX_FDTYPE_VNODE as u32,
+        };
+        let other = libc::proc_fdinfo {
+            proc_fd: 8,
+            proc_fdtype: 0,
+        };
+        assert_eq!(complete_fd_list(vec![vnode, other], 2, 2), (vec![7], true));
+        assert_eq!(complete_fd_list(vec![vnode, other], 1, 2), (vec![7], false));
     }
 
     #[test]
@@ -997,6 +1092,57 @@ mod tests {
     }
 
     #[test]
+    fn clone_capability_requires_complete_payload_and_returned_bit() {
+        let complete = u32::try_from(size_of::<VolumeCapabilitiesBuffer>()).unwrap();
+        let mut buffer = VolumeCapabilitiesBuffer {
+            length: complete,
+            returned: libc::attribute_set_t {
+                commonattr: 0,
+                volattr: libc::ATTR_VOL_CAPABILITIES,
+                dirattr: 0,
+                fileattr: 0,
+                forkattr: 0,
+            },
+            capabilities: libc::vol_capabilities_attr_t {
+                capabilities: [0; 4],
+                valid: [0; 4],
+            },
+        };
+        buffer.capabilities.capabilities[libc::VOL_CAPABILITIES_INTERFACES] =
+            libc::VOL_CAP_INT_CLONE;
+        buffer.capabilities.valid[libc::VOL_CAPABILITIES_INTERFACES] = libc::VOL_CAP_INT_CLONE;
+        assert_eq!(
+            decode_clone_capability_buffer(&buffer),
+            Some(RawCloneCapability {
+                interface_capabilities: libc::VOL_CAP_INT_CLONE,
+                interface_valid: libc::VOL_CAP_INT_CLONE,
+            })
+        );
+        buffer.length = complete - 1;
+        assert_eq!(decode_clone_capability_buffer(&buffer), None);
+        buffer.length = complete;
+        buffer.returned.volattr = 0;
+        assert_eq!(decode_clone_capability_buffer(&buffer), None);
+    }
+
+    #[test]
+    fn product_version_length_and_terminator_are_validated_independently() {
+        assert!(!valid_product_version_length(1));
+        assert!(valid_product_version_length(2));
+        assert!(valid_product_version_length(4096));
+        assert!(!valid_product_version_length(4097));
+        assert_eq!(
+            decode_product_version_bytes(b"15.7.2\0".to_vec(), 7).unwrap(),
+            "15.7.2"
+        );
+        assert_eq!(
+            decode_product_version_bytes(b"15.7.2".to_vec(), 6).unwrap(),
+            "15.7.2"
+        );
+        assert!(decode_product_version_bytes(vec![0xff, 0], 2).is_err());
+    }
+
+    #[test]
     fn filesystem_type_decode_is_bounded_when_the_fixed_buffer_has_no_nul() {
         let full = [b'a' as libc::c_char; 16];
         assert_eq!(decode_file_system_type(&full), "aaaaaaaaaaaaaaaa");
@@ -1010,5 +1156,183 @@ mod tests {
             b'x' as libc::c_char,
         ];
         assert_eq!(decode_file_system_type(&terminated), "apfs");
+    }
+
+    #[test]
+    fn dirfd_components_reject_every_non_normal_name() {
+        for invalid in [c"", c".", c"..", c"a/b"] {
+            assert_eq!(
+                validate_component(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        validate_component(c"ordinary").unwrap();
+    }
+
+    #[test]
+    fn kernel_path_decode_requires_a_terminated_absolute_path() {
+        assert_eq!(
+            decode_kernel_path(b"/private/tmp\0tail")
+                .unwrap()
+                .as_bytes(),
+            b"/private/tmp"
+        );
+        for invalid in [b"\0".as_slice(), b"relative\0", b"/unterminated"] {
+            assert!(decode_kernel_path(invalid).is_err());
+        }
+
+        struct InvalidFd;
+        impl AsRawFd for InvalidFd {
+            fn as_raw_fd(&self) -> i32 {
+                -1
+            }
+        }
+        assert_eq!(
+            fd_kernel_path(&InvalidFd).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
+
+    #[test]
+    fn owned_fd_accepts_descriptor_zero() {
+        const CHILD: &str = "THINWS_TEST_OWNED_FD_ZERO_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let owned = owned_fd(0).expect("stdin is explicitly installed in this child");
+            assert_eq!(owned.as_raw_fd(), 0);
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("ffi::tests::owned_fd_accepts_descriptor_zero")
+            .env(CHILD, "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[test]
+    fn kernel_open_helpers_do_not_follow_links_and_keep_required_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("directory")).unwrap();
+        fs::write(temp.path().join("file"), b"content").unwrap();
+        symlink("directory", temp.path().join("directory-link")).unwrap();
+        symlink("file", temp.path().join("file-link")).unwrap();
+        let parent: OwnedFd = fs::File::open(temp.path()).unwrap().into();
+
+        let root = open_root_directory().unwrap();
+        let directory = open_directory_at(&parent, c"directory").unwrap();
+        let file = open_file_read_at(&parent, c"file").unwrap();
+        assert!(open_directory_at(&parent, c"directory-link").is_err());
+        assert!(open_file_read_at(&parent, c"file-link").is_err());
+
+        for fd in [&root, &directory, &file] {
+            // SAFETY: both fcntl commands only query a live descriptor.
+            let descriptor_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        }
+        // SAFETY: F_GETFL only queries live descriptors.
+        let root_flags = unsafe { libc::fcntl(root.as_raw_fd(), libc::F_GETFL) };
+        // SAFETY: F_GETFL only queries live descriptors.
+        let directory_flags = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETFL) };
+        // SAFETY: F_GETFL only queries live descriptors.
+        let file_flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(root_flags & libc::O_SEARCH, 0);
+        assert_ne!(directory_flags & libc::O_SEARCH, 0);
+        assert_ne!(file_flags & libc::O_NONBLOCK, 0);
+        assert_eq!(file_flags & libc::O_ACCMODE, libc::O_RDONLY);
+    }
+
+    #[test]
+    fn readlink_grows_beyond_the_initial_buffer_without_truncation() {
+        let temp = tempfile::tempdir().unwrap();
+        let text = "x".repeat(300);
+        symlink(&text, temp.path().join("long-link")).unwrap();
+        let parent: OwnedFd = fs::File::open(temp.path()).unwrap().into();
+        assert_eq!(
+            read_link_at(&parent, c"long-link").unwrap(),
+            text.as_bytes()
+        );
+    }
+
+    #[test]
+    fn live_host_and_apfs_volume_facts_are_not_placeholder_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory: OwnedFd = fs::File::open(temp.path()).unwrap().into();
+        let uuid = volume_uuid(&directory)
+            .unwrap()
+            .expect("APFS must return a UUID");
+        assert_ne!(uuid, [1; 16]);
+        assert_ne!(uuid, [0; 16]);
+        let host = host_identity().unwrap();
+        assert_eq!(host.system_name, "Darwin");
+        assert!(!host.kernel_release.is_empty());
+        assert!(!host.architecture.is_empty());
+        let version = product_version().unwrap();
+        assert!(version.starts_with(|byte: char| byte.is_ascii_digit()));
+        assert!(version.contains('.'));
+    }
+
+    #[test]
+    fn effective_access_requires_both_write_and_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory_path = temp.path().join("read-only-directory");
+        fs::create_dir(&directory_path).unwrap();
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o500)).unwrap();
+        let directory: OwnedFd = fs::File::open(&directory_path).unwrap().into();
+        effective_read_search_access(&directory).unwrap();
+        assert_eq!(
+            effective_write_search_access(&directory)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EACCES)
+        );
+    }
+
+    #[test]
+    fn metadata_decoders_keep_nondefault_fsid_and_special_file_kinds() {
+        let mut fsid = MaybeUninit::<libc::fsid_t>::zeroed();
+        // SAFETY: fsid_t has the asserted representation of two adjacent i32 words.
+        let fsid = unsafe {
+            fsid.as_mut_ptr().cast::<[i32; 2]>().write([123, -456]);
+            fsid.assume_init()
+        };
+        assert_eq!(fsid_components(&fsid), [123, -456]);
+        assert_eq!(decode_c_char_array(&[b'A' as libc::c_char, 0, 0]), "A");
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = fs::File::create(temp.path().join("metadata-file")).unwrap();
+        let mut stat = MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fstat fully initializes the output on success and file owns a live FD.
+        let mut stat = unsafe {
+            assert_eq!(libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()), 0);
+            stat.assume_init()
+        };
+        for (mode, expected) in [
+            (libc::S_IFIFO, RawFileKind::Fifo),
+            (libc::S_IFSOCK, RawFileKind::Socket),
+            (libc::S_IFCHR, RawFileKind::CharacterDevice),
+            (libc::S_IFBLK, RawFileKind::BlockDevice),
+        ] {
+            stat.st_mode = (stat.st_mode & !libc::S_IFMT) | mode;
+            assert_eq!(raw_node_metadata(stat).kind, expected);
+        }
+    }
+
+    #[test]
+    fn directory_stream_drop_closes_its_owned_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = fs::File::open(temp.path()).unwrap();
+        // SAFETY: dup returns a separate owned descriptor or -1, checked below.
+        let raw = unsafe { libc::dup(directory.as_raw_fd()) };
+        assert!(raw >= 0);
+        // SAFETY: fdopendir takes ownership of raw on success; the wrapper closes it on drop.
+        let stream = unsafe { libc::fdopendir(raw) };
+        assert!(!stream.is_null());
+        drop(DirectoryStream(stream));
+        // SAFETY: F_GETFD reports EBADF for the descriptor closed by DirectoryStream.
+        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
 }

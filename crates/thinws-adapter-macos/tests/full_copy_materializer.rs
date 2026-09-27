@@ -250,6 +250,12 @@ fn real_source_submount_blocks_full_copy_before_target_write() {
     assert!(source_before.is_dir());
     assert!(mounted_before.is_dir());
     assert_ne!(source_before.dev(), mounted_before.dev());
+    let mut entries = fs::read_dir(&source).unwrap();
+    assert_eq!(
+        entries.next().unwrap().unwrap().file_name(),
+        OsStr::new("mounted")
+    );
+    assert!(entries.next().is_none());
 
     let temp = Builder::new()
         .prefix("tw-p1-copy-submount-")

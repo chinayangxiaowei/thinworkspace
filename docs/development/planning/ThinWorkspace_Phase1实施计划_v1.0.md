@@ -626,6 +626,8 @@ P1-15 阶段长预算 fuzz 适用性中途核验（2026-09-27 UTC）：相对 10
 
 P1-15 Ports 包首批终态及测试集核对（2026-09-27 UTC）：未变异基线通过，实际 07:30:18–07:37:46 UTC、约 7 分 28 秒结束；预定约 25 分钟后首次读取时进程已退出 0。当前 56 项枚举与结果名称逐项相等，为 23 caught＋33 unviable、0 missed/timeout；`target/p1-stage-ports-mutants-20260927/mutants.out/outcomes.json` SHA-256 `c15b6441a408c78c0d01f60ef66496ec899611fbecc37312c4f6c7e40da5a163`。执行器的未变异 baseline 只运行被变异包，不能用该 argv 判断正式变异的测试集；实际 caught 变异的 `phase_results[].argv` 包含启动登记的 Ports、两个 Adapter、Metadata、Application 和 CLI 六包，`debug.log` 亦列出同一显式集合。独立抽查 Application、SQLite 和 macOS 结果中的实际变异 argv，也确认各批所登记的逗号分隔多包范围有效，无须重跑。另用一个已知 unviable 的 Ports 变异做参数诊断，重复传入 `--test-package` 同样在正式变异的构建 argv 中展开三包；该诊断只验证工具语义，不作为新覆盖项计数。Ports 56 项已闭合，当前合计 1618/3032 项；剩余 Core 503＋macOS Adapter 911 项待执行。
 
+P1-15 Core 包阶段变异启动登记（2026-09-27 08:01 UTC）：本地 `main` 冻结候选 `c465e7e`，执行负责人主 Agent，macOS arm64、Rust 1.97.1、`cargo-mutants 27.1.0`；`thinws-core` 当前枚举 503 项。为覆盖领域类型的全部产品消费者，本批使用 `--package thinws-core --test-package thinws-core,thinws-ports,thinws-adapter-macos,thinws-adapter-git-cli,thinws-metadata-sqlite,thinws-application,thinws-cli --gitignore true --timeout 90 --jobs 2 --jobserver-tasks 4`，不把独立通过的 ignored 真实平台场景乘入每项变异。结果另存忽略目录 `target/p1-stage-core-mutants-20260927/mutants.out`。同机 Ports 56 项、六包验证实际约 7 分半，Core 503 项和七包验证按比例约 67 分钟，留波动余量后首次主动查看预计约 80 分钟后；提前完成/失败事件可立即处理，正常运行不按短间隔轮询。本登记仅为执行计划，不表示 Core 已通过。
+
 ---
 
 ## 五、依赖摘要

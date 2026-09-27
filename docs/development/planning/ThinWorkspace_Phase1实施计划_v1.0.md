@@ -612,6 +612,10 @@ P1-15 CLI 存活项补测终态（2026-09-27 UTC）：实际 07:23:59–07:24:37
 
 P1-15 CLI 补测候选自测（2026-09-27 UTC）：`cargo fmt --all -- --check`、`git diff --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 及 `THINWS_P1_CROSS_VOLUME_ROOT=/Volumes/data cargo test --workspace --all-targets` 均退出 0；后者未启用 ignored 真实子挂载/跨卷用例，沿用前述独立平台结果，不将本轮普通测试冒称其复跑。变更只在 CLI 名称映射测试和入口时钟最小可测化，未改依赖、fuzz harness、平台 Adapter 或物化/删除逻辑；先前阶段长预算 fuzz 仍需在最终候选按 §18.1 核验可复用性。候选待精确本地提交、独立 GPT-6 Astra / `xhigh` 只读审核和审核后 Release Verification，不据此宣布 Phase 1 放行。
 
+P1-15 Ports 包阶段变异启动登记（2026-09-27 UTC）：本地 `main` 候选 `3f4782d`，执行负责人主 Agent，macOS arm64、Rust 1.97.1、`cargo-mutants 27.1.0`；当前 `thinws-ports` 枚举 56 项。Port 的具体类型与方法被 Application、CLI 及三个产品 Adapter 消费，验证集选这六个产品包：`thinws-ports,thinws-adapter-macos,thinws-adapter-git-cli,thinws-metadata-sqlite,thinws-application,thinws-cli`，不在每个变异上重复 ignored 的真实子挂载/跨卷场景；参数仍为 `--gitignore true --timeout 90 --jobs 2 --jobserver-tasks 4`。结果放入忽略目录 `target/p1-stage-ports-mutants-20260927/mutants.out`，不覆盖既有批次。参考 SQLite/Application 包实际用时约 15/12 分半，本批虽仅 56 项但验证包更广，首次主动查看保守预计启动后约 25 分钟；如提前完成或失败按事件处理，未读结果前不宣称 Ports 通过。
+
+P1-15 CLI 独立审核与审核后 Verification（2026-09-27 UTC）：GPT-6 Astra / `xhigh` 对本地提交 `3f4782dec68004a57973087a28d0a7d2ecb1800f` 只读审核为 Approve，无阻塞代码或变异证据问题；独立重跑 CLI lib 3 项和 binary 1 项、核对两份 outcomes 哈希/日志、当前 62 项名称集合及全 workspace 3032 项枚举。审核提出一项 P3 文档缺口：用户手册 §10.1 原仅展示 `apfs-file-clone`，未冻结 `full-copy` Adapter 和两个 `fallback.reason` 稳定值；这不改变本次现有程序行为，但使公开 JSON 契约依据不完整。主 Agent 已仅在用户手册权威位置补充模式、Adapter、成功 CoW 与 fallback 的取值和 null/预检/运行时语义，未向设计文档复制。审核后 `cargo test --release -p thinws-cli --lib --bin thinws --test contract` 退出 0，CLI lib 3、binary 1、契约 15 项全部通过。文档补充尚待独立复核，不把此定向 Verification 代替剩余 Ports/Core/macOS 变异或 Phase 1 放行。
+
 ---
 
 ## 五、依赖摘要

@@ -299,6 +299,8 @@ thinws doctor
 
 `workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex` 和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target_parent/target_parent_hex`、`target_path_mode=id-derived-under-target-parent`、两端 Volume UUID 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。
 
+`materialization` 中的模式稳定值为 `cow-clone`、`full-copy`；`adapter` 稳定值为 `apfs-file-clone`、`full-copy`。成功回执的 `cow` 为 `confirmed` 或 `not-used`。`fallback.used=false` 时 `reason=null`；为 true 时，`reason=clone-unsupported-at-preflight` 表示预检确认 clone 不支持，`reason=clone-unavailable-at-runtime` 表示实际 clone 不可用且已确认回滚后改用 Full Copy。dry-run 只能报告预检降级，不能预告运行时降级。以上取值也适用于 `workspace list/status` 展示的历史成功物化事实。
+
 `workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`last_error_code` 和 `materialization`，不含 `git`、当前空间或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}` 和 `space={state,logical_bytes,allocated_bytes_estimate}`；space.state 为 `complete` 或 `unknown`，unknown 时两个数值均为 null。每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。空间字段是查询时的估算，不把创建时 Receipt 当成实时用量。
 
 status JSON 示例：

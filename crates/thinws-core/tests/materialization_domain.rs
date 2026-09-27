@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use thinws_core::{
     AbsolutePath, CandidateEvidence, CowEvidence, DirectoryIdentityEvidence, Evidence,
-    FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity,
+    FallbackPolicy, FallbackReason, FileIdentity, FileSystemIdentity, HostCapabilityReport,
     MaterializationAttemptEvidence, MaterializationFailureKind, MaterializationMode,
     MaterializationOutcome, MaterializationPathReport, MaterializationPlan,
     MaterializationPlanError, MaterializationReceipt, MaterializationReceiptError,
@@ -99,6 +99,36 @@ fn combined_candidates(
         CandidateEvidence::new(MaterializerKind::FullCopy, copy_state, Vec::new()),
         ProbeEvidenceDigest::new([10; 32]),
     )
+}
+
+#[test]
+fn platform_report_and_unknown_evidence_preserve_each_observed_fact() {
+    let host = HostCapabilityReport::new(
+        "macos",
+        "15.7.2",
+        "24.6.0",
+        "arm64",
+        "apfs-file-clone",
+        SupportState::Supported,
+    );
+    assert_eq!(host.platform(), "macos");
+    assert_eq!(host.product_version(), "15.7.2");
+    assert_eq!(host.kernel_release(), "24.6.0");
+    assert_eq!(host.architecture(), "arm64");
+    assert_eq!(host.adapter(), "apfs-file-clone");
+    assert_eq!(host.apfs_clone(), SupportState::Supported);
+
+    let known: Evidence<u8> = Evidence::Known(7);
+    assert_eq!(known.unknown_reason(), None);
+    let unknown: Evidence<u8> = Evidence::Unknown {
+        reason: "volume UUID unavailable".to_owned(),
+        errno: Some(5),
+    };
+    assert_eq!(unknown.unknown_reason(), Some("volume UUID unavailable"));
+    assert_eq!(unknown.unknown_errno(), Some(5));
+
+    assert!(MountEvidence::new(0, true).writable());
+    assert!(!MountEvidence::new(1, false).writable());
 }
 
 #[test]
@@ -817,6 +847,52 @@ fn relative_path_preserves_arbitrary_non_utf8_bytes_without_normalizing_them() {
     let path = RelativePath::try_from_bytes(raw.clone()).unwrap();
 
     assert_eq!(path.as_bytes(), raw);
+}
+
+#[test]
+fn relative_path_rejects_each_unsafe_component_independently() {
+    for raw in [
+        b"".as_slice(),
+        b"/absolute",
+        b"safe\0hidden",
+        b"safe//child",
+        b"safe/",
+        b"safe/./child",
+        b"safe/../child",
+    ] {
+        assert!(
+            RelativePath::try_from_bytes(raw.to_vec()).is_err(),
+            "{raw:?}"
+        );
+    }
+    for raw in [b".git".as_slice(), b"..safe", b"safe/child"] {
+        assert_eq!(
+            RelativePath::try_from_bytes(raw.to_vec())
+                .unwrap()
+                .as_bytes(),
+            raw
+        );
+    }
+}
+
+#[test]
+fn attempt_evidence_accessors_preserve_each_nondefault_measurement() {
+    let source = TreeDigest::new([3; 32]);
+    let target = TreeDigest::new([4; 32]);
+    let evidence = MaterializationAttemptEvidence::new(
+        Some(12),
+        Some(8),
+        Some(2),
+        3,
+        Some(source),
+        Some(target),
+    );
+    assert_eq!(evidence.logical_bytes(), Some(12));
+    assert_eq!(evidence.physical_bytes(), Some(8));
+    assert_eq!(evidence.regular_file_count(), Some(2));
+    assert_eq!(evidence.clone_calls_succeeded(), 3);
+    assert_eq!(evidence.source_manifest_digest(), Some(source));
+    assert_eq!(evidence.target_manifest_digest(), Some(target));
 }
 
 #[test]

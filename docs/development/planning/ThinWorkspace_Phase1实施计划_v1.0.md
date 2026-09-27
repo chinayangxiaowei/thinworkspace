@@ -54,13 +54,13 @@ P0.b 收口后直接核对 P0 阶段退出控制点、执行完整阶段门禁�
 
 P0-01 从文档基线 `f7a400f` 开始，工作分支为 `task/p0-01-host-path-probe`。本次使用 FD 与卷属性 FFI，按最高影响将风险从 R3 调整为 R4。验收断言、实际命令、审核结论和未完成项统一记录在 [P0-01 实施记录](../implementation/P0-01_HostPathProbe实验.md)。P0.a 收口不代表整个 P0 放行。
 
-P0.a 已完成任务级与小阶段验收，P0-01 已获规定模型正式 Approve 并合并；精确提交、CI、未执行边界及工作区保留原因只记录在上述实施记录。整个 P0 尚未放行。
+P0.a 已完成任务级与小阶段验收，P0-01 已获规定模型正式 Approve 并合并；精确提交、CI、未执行边界及工作区保留原因只记录在上述实施记录。当时整个 P0 尚未放行；当前正式放行结果以 [Phase 0 阶段状态](../review/ThinWorkspace_Phase0阶段状态_v1.0.md)为准。
 
 P0-02 已获规定模型正式 Approve，审核后真实 Verification 和远端候选 CI 通过，PR 已合并。准备、验收断言、精确提交、验证证据和保留边界只在 [P0-02 实施记录](../implementation/P0-02_APFS物化实验.md) 维护；任务 Done 不代表 P0.b 或整个 P0 放行。
 
 旧 P0-03 的准入、实验和未完成门禁保存在 [P0-03 历史记录](../implementation/P0-03_Git与Base实验.md)。取消不等于验收通过，不删除其中代码、失败日志、scratch 或保留工作区；可复用的小型代码须在新任务中独立审查，不能带回 Git/Base 领域。
 
-当前顺序：P0-06/P0-07/P0-05 已完成 → 核验当前未取消的 P0 控制点与阶段门禁 → 人工确认 P0 放行 → 按依赖进入 P1。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 的审核、Verification、门禁及 PR #7 合并见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 的首轮实测、精确审核、候选 CI 与 PR #8 合并见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)。各任务 Done 不扩大验证范围，也不代表 P0.b 或整个 P0 放行。
+历史顺序：P0-06/P0-07/P0-05 完成 → 核验未取消的 P0 控制点与阶段门禁 → 人工确认 P0 放行 → 按依赖进入 P1。维护者已完成 Phase 0 人工放行，P1 的阶段前置依赖已解除；精确候选和签字见上述阶段状态。P0-06 的基线、保真范围、CI 修复与收口见 [P0-06 实施记录](../implementation/P0-06_原始目录镜像实验.md)。P0-07 的审核、Verification、门禁及 PR #7 合并见 [P0-07 实施记录](../implementation/P0-07_已跟踪检查与清理提示实验.md)的最终收口。P0-05 的首轮实测、精确审核、候选 CI 与 PR #8 合并见 [P0-05 实施记录](../implementation/P0-05_文件副本锁隔离实验.md)。各任务 Done 本身不扩大验证范围，也不曾替代阶段放行。
 
 ### 3.2 P0-05 排期与实施准入
 
@@ -546,7 +546,7 @@ P1-15 十副本控制点切片（2026-09-26，macOS/APFS）：新增注入 boots
 
 P1-15 发布候选门禁盘点（2026-09-26，盘点时提交 `bfd2e2686ceca8baae7629a1b1de5efe3e6875b0`）：GPT-6 Astra / `xhigh` 对十副本证据措辞修正提交只读复核为 Approve，确认其前次 P2 已关闭；这只批准该文档修正，不等于 P1-15 终审。`cargo build --release --workspace` 退出 0，产物 `target/release/thinws` 为 arm64 Mach-O，SHA-256 为 `f27833346fa2a1e3e7e7e5fda403cf5bcb470a9d7f8fa912c3c60a390c6f9dea`；直接运行该二进制的 `--help`、`--version`、`--json gc` 分别为正常帮助、`thinws 0.1.0`、退出 2 的 `E_USAGE`。这三项仅是无产品写入的黑盒入口检查，不覆盖真实创建/删除。主 workspace 与 fuzz workspace 的 `cargo deny check`、离线 `cargo audit` 均退出 0，仅有未命中许可配置警告；固定 nightly 下全部 fuzz target 的构建通过。`thinws_remove_request` 和 `thinws_create_request` 各运行 30 秒，分别约 460 万和 662 万次输入，均退出 0、无 crash/hang；这是两个短预算目标，不是所有目标的长预算阶段门禁。本次自动生成的未跟踪 fuzz 样本已从仓库清走，既有种子保留。
 
-P1-15 当前不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚未形成有效闭合证据；阶段全量变异仅枚举出约 3029 项，未执行；既有工作流虽提供显式 `workspace` 选择，但尚无该批次的有效 CI 结果，调整后的 360 分钟上限是否足够也未经证明。其余 fuzz target 的阶段长预算、发布二进制真实状态变更黑盒 E2E、专用子挂载的线上 CI 重验、外置卷稳定性复核、正式分发所需签名/公证及人工放行均未完成或尚未适用。不得以先前任务级定向变异、上述短预算 fuzz、进程内 CLI 集成测试或二进制帮助检查代替这些门禁；当前状态维持 In Progress，不打 tag、不推送、不宣称 Phase 1 发布。
+P1-15 在上述盘点时不能收口：P1.c、P1.d、P1.e、P1.f 的小阶段完整门禁尚未形成有效闭合证据；阶段全量变异仅枚举出约 3029 项，未执行；既有工作流虽提供显式 `workspace` 选择，但尚无该批次的有效 CI 结果，调整后的 360 分钟上限是否足够也未经证明。当时其余 fuzz target 的阶段长预算、发布二进制真实状态变更黑盒 E2E、专用子挂载的线上 CI 重验、外置卷稳定性复核、正式分发所需签名/公证及人工放行均未完成或尚未适用；后续变化见下方记录。不得以任务级定向变异、短预算 fuzz、进程内 CLI 集成测试或二进制帮助检查代替对应门禁；当前任务状态仍为 In Progress，不打 tag、不推送、不宣称 Phase 1 发布。
 
 P1-15 CI fuzz 清单修正（2026-09-26）：既有 `P0/P1 quality` 工作流只对 10 个已声明 fuzz target 中的 6 个安排短预算 smoke。先增加从 fuzz manifest 对照工作流实际目标及次数的辅助测试并确认因缺 4 项而 RED，再为 init/create/remove 请求和物化路径补 4 个固定 nightly、60 秒预算的步骤并转 GREEN；32 项 CI 辅助测试、工作流 YAML 语法和差异检查通过。新增目标中 create/remove 各有上文 30 秒本机结果，init/路径各有 1 秒启动 smoke，均退出 0；这些不代替工作流的 60 秒在线运行或阶段长预算。GPT-6 Astra / `xhigh` 对精确提交 `cbd97449cefaf0e2afdd1ab8cc9bfba218e4c1aa` 只读审核为 Approve，独立重跑 32 项辅助测试，并验证清单测试能拒绝缺失、重复和未知目标；未运行在线 CI 或 fuzz。本修正只关闭 CI 短预算目标遗漏，不解决 P1-15 的全量变异、长预算和发布黑盒缺口。
 
@@ -557,6 +557,10 @@ P1-15 全工作区变异 CI 时间边界（2026-09-26）：历史 P0 批次曾�
 P1-15 长预算 fuzz 入口（2026-09-26）：本地提交 `74f35630bb72df0177776f8db0cfe7782f561a25` 增加仅可手动触发的 `P1 release fuzz` 工作流，不改变普通 push/PR 的短预算门禁；目标直接从 `fuzz/Cargo.toml` 读取并拒绝空/重复清单，当前 10 个目标各使用 300 秒预算及 5 秒单输入超时，任一失败或进程超时即停止且不得把余下目标标为通过。固定 nightly 与 `cargo-fuzz` 版本沿用 `tools/quality-tools.toml`；失败时保存默认 `fuzz/artifacts/` 崩溃样本 14 天。主 Agent 本机运行 39 项辅助测试、工作流 YAML 解析、fmt、全目标全 feature Clippy、带真实 P1 异卷参数的全 workspace/all-targets 普通测试、依赖方向检查和差异检查，均退出 0。GPT-6 Astra / `xhigh` 对精确提交只读审核为 Approve，独立验证上述 39 项辅助测试及成功/失败调度路径。120 分钟 job 上限含安装、构建和 50 分钟目标预算，不保证执行完成；长预算 fuzz、线上 CI 和 artifact 上传均未实际运行，P1-15、P1.f 与 Phase 1 均未因此放行。
 
 P1-15 真实子挂载补验（2026-09-26，macOS/APFS）：主 Agent 在 `/private/tmp` 建立一次性 128 MB APFS 镜像作为源目录唯一的 `mounted` 子目录，实际父/子设备号为 `16777229`/`16777250`；P0 的 Clone 与 Full Copy 两项真实子挂载拒绝测试通过。产品 `thinws-adapter-macos` 新增 Clone 和 Full Copy 各一项 ignored 集成测试，均从真实 PlatformProbe → Plan → Materializer 路径验证 `UnsupportedSourceEntry`，来源与目标同设备、子挂载异设备，失败回执无 created 项，目标和 staging 为空；Full Copy 只为选择后端合成 clone-unsupported 预检事实，路径证据仍来自真实 Probe。两项在 Debug/Release 配置下均通过。CI 的既有临时 APFS 镜像步骤现在同时提供 `THINWS_P1_SUBMOUNT_SOURCE`，但线上 CI 尚未执行。fmt、全目标全 feature Clippy、带 `/Volumes/data` 异卷参数的全 workspace/all-targets 普通测试和差异检查通过。GPT-6 Astra / `xhigh` 对 Clone 提交 `4619108` 只读审核为 Approve；Full Copy 首版 `7fdf88e` 因未限定来源唯一条目获 Changes requested，修订 `789de08` 补齐夹具断言后获 Approve。两次本机镜像均已先卸载再删除，仅清理本次专用临时文件；本证据关闭本机真实子挂载测试缺口，不代替小阶段全量变异、线上 CI 或 Phase 1 放行。
+
+P1-15 阶段长预算 fuzz 本机结果（2026-09-27 UTC，候选 `0fb87a5`，macOS 15.7.2/arm64）：使用固定 `nightly-2026-08-14` 和 `tools/ci_release_fuzz.py`，于 00:12:28–01:02:47 UTC 顺序运行 manifest 中全部 10 个 target，每个 300 秒、单输入超时 5 秒；进程 exit 0，汇总为 10 passed、0 failed/timeout，日志含 10 组最终执行统计，未产生 crash artifact，工作树无新增 corpus。忽略目录中的 `target/p1-15-release-fuzz.AZm5mL/summary.md` 与 `run.log` SHA-256 分别为 `55833f8c269756fc91edbebec8c4d926e2dec3b86a6a6e85da66523bbcf0b429`、`7fcb275bbb7bbba23e4905e3b1b738e048e0d82d7922beb9fb42ed2e394ac830`；这是本机完整长预算证据，不冒称线上工作流执行。后续 P1-15 CI 测试夹具修正未改变生产代码、fuzz target、种子或工具版本；按《任务流程》§18.1 仍需在最终候选核对该证据的适用性。
+
+P1-15 CI 异卷前置修正（2026-09-27 UTC）：只读终检发现现有工作流只导出 P0 异卷根，P1 Probe/Store 在变量缺失时静默跳过；CLI 用例则假设 checkout 与系统临时目录天然异卷。先加工作流变量联动断言并确认因缺少 P1 导出而 RED，CLI 用例在缺少明确异卷根时也按预期 RED；随后将 P1 根绑定同一专用 APFS 镜像，并使三项 P1 用例在 `--include-ignored` 下必须具备该环境，不再以缺变量返回绿色。CLI 夹具把 data root 放在规范化的系统临时根、source 放在专用卷，先断言设备不同，再核对 `--allow-copy` 仍返回 `E_DATA_ROOT_LAYOUT` 且未创建 Workspace。第一次真实运行因 `/var` 符号链接使 `init` 提前拒绝，规范化临时根后通过；本机 `/Volumes/data` 异卷定向三项在 Debug/Release 均通过。再用一次性 128 MB APFS 镜像复现 CI 布局（系统卷、checkout 卷、镜像卷设备号分别为 `16777229`、`16777240`、`16777250`），全 workspace/all-targets `--include-ignored` Debug/Release 均 exit 0、0 failed/ignored；镜像已确认卸载并清理。41 项 CI 辅助测试、fmt、全目标全 feature Clippy、普通全 workspace/all-targets 测试、YAML 语法与差异检查亦通过；两份完整平台日志保存在忽略目录 `target/p1-15-ci-mount-{debug,release}.log`，SHA-256 分别为 `dc4cfddb4eb6135934530753e84e72532496b626455692b39ef1db64eb8c2655`、`6205e0e410060d3ff31cdb0cc22b90277a8805ceb1d10fd9b86f4c44e2303d3d`。线上 CI/PR/push 仍未执行，这项修正不能代替阶段变异、二进制黑盒执行、最终独立审核或人工放行。
 
 ---
 

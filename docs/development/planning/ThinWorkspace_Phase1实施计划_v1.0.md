@@ -526,11 +526,11 @@ P1-12 任务级审核与 Verification（2026-09-26 UTC，macOS/APFS）：GPT-6 A
 | 任务 | 结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-14 JSON/错误码兼容 | 新手册、help、fixture 和退出码一致，旧参数无兼容入口 | P1-03、P1-06、P1-07、P1-09、P1-10、P1-12、P1-13、P1-16 | R3 | Done |
-| P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | In Progress |
+| P1-15 Phase 1 端到端与失败边界验收 | release 二进制、真实平台、长预算质量门禁和候选发布证据；不含中断恢复 | 全部未取消的前置 P1 任务 | R4 | Done |
 
 小阶段退出：全部公开契约与发布二进制一致，未执行门禁和剩余风险已列出，进入人工阶段放行。
 
-维护者于 2026-09-27 明确：Phase 1 达到可供人工检查的技术候选后即停止推进，交由维护者对结构做人工测试；不得据此提前进入 Phase 2，也不得把技术候选自动写成人工放行。当前继续按 P1-15 收口未完成门禁，且不创建线上 PR 或推送。
+维护者于 2026-09-27 明确：Phase 1 达到可供人工检查的技术候选后即停止推进，交由维护者对结构做人工测试；不得据此提前进入 Phase 2，也不得把技术候选自动写成人工放行。P1-15 收口期间不创建线上 PR 或推送；技术候选收口结果见本节末尾。
 
 候选结构轻量核对（2026-09-27）：`python3 tools/check_crate_dependencies.py` 对 7 个产品 crate 退出 0；产品源码搜索未发现 `thinwsd`、`ExecutionBackend`、`ChangeObserver`、`WorkspaceCheckpoint`、`JobState` 或 `Placement` 的提前实现，Core/Application/CLI/Port 中未见 Rust `unsafe` 块。此静态核对不代替真实运行、完整变异或维护者的人工结构测试。`CHANGELOG.md` 仍标 `Unreleased`，候选分发包尚未生成，不能当作正式发布。
 
@@ -738,9 +738,11 @@ P1-15 最终候选真实平台与二进制验收（2026-09-27 UTC）：`cargo te
 
 P1-15 供应链审计边界（2026-09-27 UTC）：`cargo deny --locked check` 主/fuzz 两工作区均退出 0，未命中 license allow/exception 的提示是非阻断 warning。`cargo audit --deny warnings --file Cargo.lock` 的在线 advisory fetch 持续无响应，核对确切 PID 后仅对该审计进程发 TERM，exit 143；这次在线尝试不算通过。随后 `cargo audit --no-fetch --stale --deny warnings --file Cargo.lock` 与 `fuzz/Cargo.lock` 均退出 0，使用本机 1261 条 advisory 缓存，缓存 HEAD `17af77682cecd2afa72b217ad7c6c30585d5003f`、提交时间 2026-09-22。故仅可声明本地缓存审计通过，在线最新漏洞库未核验；不把缺少在线刷新隐藏成全新安全结论。
 
-本机 Release 候选二进制为 arm64 Mach-O，`target/release/thinws` SHA-256 `a58382fd13456a34edd6c865c4bbbe52097f0523103a0da4eedef6ef67eaa7d2`；直接执行 `--version` 返回 `thinws 0.1.0`，`--json gc` 返回 exit 2 / `E_USAGE`，没有重新引入已取消的 GC 命令。长预算 fuzz（先前固定候选 10 target×300 秒、无 crash/hang）仍按《任务流程》§18.1 复用：本轮新增的 FFI/物化路径不进入现有纯输入 harness，fuzz target 差异仅 rustfmt 排版、没有 oracle/依赖/工具版本语义变化；最终 Reviewer 须核对这个影响边界，不能将复用记为本候选重跑。
+本机 Release 候选二进制为 arm64 Mach-O，`target/release/thinws` SHA-256 `a58382fd13456a34edd6c865c4bbbe52097f0523103a0da4eedef6ef67eaa7d2`；直接执行 `--version` 返回 `thinws 0.1.0`，`--json gc` 返回 exit 2 / `E_USAGE`，没有重新引入已取消的 GC 命令。长预算 fuzz（先前固定候选 10 target×300 秒、无 crash/hang）按《任务流程》§18.1 复用：本轮新增的 FFI/物化路径不进入现有纯输入 harness，fuzz target 差异仅 rustfmt 排版、没有 oracle/依赖/工具版本语义变化；最终 Reviewer 已核对影响边界，但复用不等于本候选重跑。
 
-P1-15 变异证据组合待终审（2026-09-27 UTC）：按当前 `.cargo/mutants.toml` 逐包重新枚举为 P0 Probe 244、P0 Materialize 313、P0 Cleanup 23、Git Adapter 408、SQLite 169、Application 217、CLI 62、Ports 56、Core 503、macOS Adapter 1054，合计 **3049** 项，与全 workspace 列举相等。非 macOS Adapter 的当前 1995 项沿用上文逐包闭合及 Core 精确审核；Adapter 原 1037 项由先前闭合 126 项＋四组 911 项覆盖，生产局部提取后枚举净增 39，当前无配置 1076 项，精确排除 22 项后为 1054 项。原存活项、改动函数及新增 helper 已在 61＋251＋97 项定向批次中复测；`libproc_error`、root 打开 `|→&`、回滚的身份/权限/路径/隔离错误成功分支均有直接测试捕获。剩余工具 `missed` 包括未排除的 9 个物化当前构造/FD 前提和 1 个 Probe 的 `O_SEARCH` 目录前提，必须由最终独立审核逐名复核；15 个互斥 flags、nibble、RootDir、fuzz-only 桥和 2 个内部 buffer 参数已窄排除并保留证明。组合结论尚未记为最终批准；若 Reviewer 发现映射遗漏、假阳性或前提失效，按受影响目标补测，不用单批 exit 2 冒充全绿。
+P1-15 变异证据组合（2026-09-27 UTC）：按当前 `.cargo/mutants.toml` 逐包重新枚举为 P0 Probe 244、P0 Materialize 313、P0 Cleanup 23、Git Adapter 408、SQLite 169、Application 217、CLI 62、Ports 56、Core 503、macOS Adapter 1054，合计 **3049** 项，与全 workspace 列举相等。非 macOS Adapter 的当前 1995 项沿用上文逐包闭合及 Core 精确审核；Adapter 原 1037 项由先前闭合 126 项＋四组 911 项覆盖，生产局部提取后枚举净增 39，当前无配置 1076 项，精确排除 22 项后为 1054 项。原存活项、改动函数及新增 helper 已在 61＋251＋97 项定向批次中复测；`libproc_error`、root 打开 `|→&`、回滚的身份/权限/路径/隔离错误成功分支均有直接测试捕获。剩余工具 `missed` 包括未排除的 9 个物化当前构造/FD 前提和 1 个 Probe 的 `O_SEARCH` 目录前提，已由最终独立审核逐名复核；15 个互斥 flags、nibble、RootDir、fuzz-only 桥和 2 个内部 buffer 参数已窄排除并保留证明。各原始结果仍按其真实 exit/分类保留，不把单批 exit 2 改写为全绿。
+
+P1-15 技术候选收口（2026-09-27 UTC）：最终实现/测试提交为 `4e6ad0a`、`b9870ca`，后者只将 FD 关闭断言移入独立子进程以消除并行测试复用编号的竞态，未改变生产行为。GPT-6 Astra / `xhigh` 只读终审对 `4e6ad0a` 的唯一 P2 已在 `b9870ca` 修复后复核为 Approve，未发现剩余可操作问题。审核按函数内相对位置与实际 diff 核对 Adapter 当前 1054 项零遗漏：884 caught、160 unviable、10 个有当前构造/目录 FD 前提的条件性 missed、0 timeout；精确 `DirectoryStream::drop → ()` 修订复测为 1/1 caught。修订后主 Agent 的全仓 Debug 普通测试、严格 Clippy、fmt、Release 定向测试及差异检查均退出 0；前述同一生产候选的 Release、真实三卷/APFS、二进制黑盒、供应链缓存审计、性能基线和长预算 fuzz 证据继续有效。P1-15 与 P1.f 达到供维护者人工检查的技术候选，Phase 1 **尚未人工放行**；线上 CI、在线最新 advisory 刷新、正式签名/公证、维护者结构测试与最终确认均未执行，不打 tag、不推送、不进入 Phase 2。
 
 ---
 

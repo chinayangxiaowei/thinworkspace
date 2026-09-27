@@ -1400,6 +1400,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn materialization_names_match_the_public_contract_for_every_variant() {
+        assert_eq!(
+            adapter_name(MaterializerKind::ApfsFileClone),
+            "apfs-file-clone"
+        );
+        assert_eq!(adapter_name(MaterializerKind::FullCopy), "full-copy");
+        assert_eq!(
+            fallback_name(FallbackReason::CloneUnsupportedAtPreflight),
+            "clone-unsupported-at-preflight"
+        );
+        assert_eq!(
+            fallback_name(FallbackReason::CloneUnavailableAtRuntime),
+            "clone-unavailable-at-runtime"
+        );
+    }
+
+    #[test]
     fn removal_refusal_displays_an_incomplete_process_scan_warning() {
         let error = ErrorView {
             code: "E_GIT_CHECK_INCOMPLETE".to_owned(),

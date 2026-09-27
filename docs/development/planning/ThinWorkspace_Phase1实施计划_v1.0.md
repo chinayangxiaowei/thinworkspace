@@ -566,6 +566,8 @@ P1-15 本机 release 二进制黑盒补验（2026-09-27 UTC，候选 `9552d9b`�
 
 P1-15 阶段变异启动异常与诊断（2026-09-27 UTC，候选 `9552d9b`）：首次全工作区 3029 项批次在未变异基线构建时由 Apple clang 链接 `serde_derive` 触发段错误，约 66 秒终止、exit 4，`outcomes.json` 记录 0 项实际变异；该次不提供任何变异通过证据。失败结果与基线日志保存在忽略目录 `target/p1-stage-mutation-full-20260927/mutants.out`，对应 SHA-256 为 `c6d172167205108b7fdaa00aa05729b3c52178b2400e4ab6932e50f452f8ac09`、`e6510fcfd718e28e49ab74f8ac7b695d8163d24634bcf620b1ced3db79ed6515`。磁盘余量和当前内存检查未显示耗尽；随后以 `--jobserver-tasks 4 --jobs 1`、相同平台夹具运行 3 项小范围诊断，未变异基线通过，2 caught、1 unviable、0 missed/timeout、exit 0，结果 SHA-256 `fb2ac2ff4780cba1fe304b7ad4909c5540ffc94c22b08f1070d2986ee4acee80`，位于 `target/p1-stage-mutation-smoke-20260927/mutants.out`。这只能证明本次有界构建成功，不能代替阶段全量门禁；重试须另存结果且保持候选冻结。
 
+P1-15 全量变异重试启动记录（2026-09-27 02:28 UTC，待执行）：主 Agent 负责，生产代码候选仍为 `9552d9b`（其后仅有任务证据文档提交）；在 macOS 15.7.2/arm64、同一专用 APFS 镜像的 P0/P1 跨卷及子挂载夹具上，对全 workspace 3029 项使用 `cargo-mutants 27.1.0`、`--test-workspace true`、`--include-ignored`、每次 cargo 命令 60 秒上限、`--jobs 2 --jobserver-tasks 4`。新结果位置为 `target/p1-stage-mutation-full-20260927-retry1/mutants.out`，标准输出和错误写入同级 `run.log`；不覆盖首次失败证据。首次主动查看暂定启动后约 1 小时，再根据该批实际进度与 P0 历史耗时调整；提前完成或失败事件可立即处理，不能把等待时间当执行时长。
+
 ---
 
 ## 五、依赖摘要

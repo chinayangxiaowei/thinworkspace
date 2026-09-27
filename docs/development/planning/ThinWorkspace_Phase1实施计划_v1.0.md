@@ -572,6 +572,8 @@ P1-15 全量变异重试终止结果（2026-09-27 UTC）：03:28 UTC 首次检�
 
 P1-15 已闭合的包级子集（同批结果，2026-09-27 UTC）：`thinws-adapter-git-cli` 当前生产源码枚举 408 个变异，与上述 `outcomes.json` 中该包 408 个变异名称排序后的 SHA-256 均为 `5a7b2c2538e2cd75c1eea234273f32a83addf93aaf24758c390645203d7a51b1`；结果为 351 caught、57 unviable、0 missed/timeout。该包在冻结源码和原整仓测试集下已覆盖全部当前枚举，不因外层批次提前中止而重做这 408 项；变更相关测试、工具或平台条件时须按《任务流程》§18.1 重新核验可复用性。其余 2621 项不能由此推断为通过。
 
+P1-15 超时项定向诊断与回归（2026-09-27 UTC）：重试中 `thinws-adapter-macos/src/document.rs:175:9` 的 `||`→`&&` 原为 timeout；对应日志在执行与该解析器无关的 P0 `same_volume` 测试时达到 60 秒上限，因此不能把该超时当作解析器断言已覆盖。改用 `--test-package thinws-adapter-macos,thinws-application,thinws-cli`、90 秒上限、不带 `--include-ignored` 对同一变异单项诊断，基线通过，结果为 missed（exit 2，`target/p1-stage-timeout-diagnostic-20260927/mutants.out/outcomes.json` SHA-256 `cfadb78c9aeb76e1e1f1f92bb832440869d14722a609dbca0a9fc889e45ac17c`）。原有 ownership 测试没有单独覆盖 container/root 创建秒数为负的情况；在 Adapter 单测中分别加入两项断言后，原实现测试通过，同一变异、同一三包验证范围复测为 1 caught、0 missed/timeout（exit 0，`target/p1-stage-timeout-diagnostic-fixed-20260927/mutants.out/outcomes.json` SHA-256 `bd3aaf0798fd80d7029cdd2ca2c4e0a0a103dab67c52fe17bb581ad414cb9846`）。fmt、全目标全 feature Clippy、全 workspace/all-targets 普通测试和对应 bootstrap document fuzz 30 秒短预算均退出 0、未见 crash；fuzz 默认生成的 2308 个未跟踪临时语料已核对后清理，原有两份受版本控制的种子未改。此证据仅关闭这一个原超时变异，不推断其余 20 个 timeout 或剩余 2621 个变异通过；全量阶段门禁仍未完成。
+
 ---
 
 ## 五、依赖摘要

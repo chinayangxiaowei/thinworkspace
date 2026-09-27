@@ -249,6 +249,27 @@ mod ownership_fuzz_seed_tests {
             Err(DocumentError::InvalidIdentity)
         );
     }
+
+    #[test]
+    fn ownership_rejects_each_negative_birth_seconds_field() {
+        let valid =
+            include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
+        let ownership = decode_workspace_ownership(valid).unwrap();
+
+        let mut invalid_container = ownership;
+        invalid_container.container.birth_seconds = -1;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(invalid_container).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+
+        let mut invalid_root = ownership;
+        invalid_root.root.birth_seconds = -1;
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(invalid_root).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+    }
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, DocumentError> {

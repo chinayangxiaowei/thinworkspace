@@ -622,6 +622,8 @@ P1-15 当前 release 二进制无状态入口检查（2026-09-27 UTC，候选 `6
 
 P1-15 当前 release 二进制本机状态变更黑盒补验（2026-09-27 UTC，同一二进制 SHA-256）：测试前确认 `target/p1-15-release-e2e-local-20260927` 不存在，只在该忽略目录创建一次性 HOME 和 data root；该 HOME 下先执行 `--json doctor`，确认为 E_NOT_INITIALIZED，避免触碰用户已有实例。来源 `docs/project/reference` 与测试根设备号同为 `16777240`，直接运行二进制完成 `--json init`、`--json doctor`、`--json workspace create --source ... --name release-e2e`、普通 `workspace path` 和 `--json workspace remove release-e2e`，均按各自契约成功。创建结果为 `cow-clone/apfs-file-clone/confirmed`、无 fallback；创建前源/副本 `技术栈.md` SHA-256 同为 `6b1004838cb2c761ba6246dfc192757c1433ed9e2fa57c66d1bc55dce36b64a2`，仅对副本追加测试标记后副本变为 `bcb22d36dab1c1015439e12944931f21f50923c4455de81971496de0950158c4`，来源仍为原哈希。普通 remove 返回 `forced=false`、`result=removed`，副本 root 不存在；operations 日志的 started/completed 两条事件均记录 `process_use=scan-incomplete`。`warning=process-scan-incomplete` 是手册 §6.4 允许但必须显示/记日志的尽力探测结果，不冒充无人占用证明。一次性 HOME/data root 目前保留在上述忽略目录供本机复核，未触碰用户配置；此本机闭环不冒称 GitHub-hosted CI、签名/公证或其他平台验收，最终生产代码若变还需按 §18.1 判断是否重验。
 
+P1-15 阶段长预算 fuzz 适用性中途核验（2026-09-27 UTC）：相对 10×300 秒完整运行的候选 `0fb87a5`，当前 `Cargo.lock`、`fuzz/`、固定工具链和 `tools/quality-tools.toml` 未变；产品源文件差异除 CLI 入口时钟表达式原样提成可测 helper 外，均为 `#[cfg(test)]` 或集成测试修改，不改变 fuzz target 可达的生产路径。CLI binary 的入口 helper 不由 fuzz target 调用。因此已有无 crash/hang 的长预算结果在当前候选上仍可按《任务流程》§18.1 复用；Ports/Core/macOS 后续修正若触及生产逻辑、依赖或 fuzz harness，最终候选必须重新核对并补跑受影响目标，本项不是提前宣布阶段门禁通过。
+
 ---
 
 ## 五、依赖摘要

@@ -624,6 +624,8 @@ P1-15 当前 release 二进制本机状态变更黑盒补验（2026-09-27 UTC，
 
 P1-15 阶段长预算 fuzz 适用性中途核验（2026-09-27 UTC）：相对 10×300 秒完整运行的候选 `0fb87a5`，当前 `Cargo.lock`、`fuzz/`、固定工具链和 `tools/quality-tools.toml` 未变；产品源文件差异除 CLI 入口时钟表达式原样提成可测 helper 外，均为 `#[cfg(test)]` 或集成测试修改，不改变 fuzz target 可达的生产路径。CLI binary 的入口 helper 不由 fuzz target 调用。因此已有无 crash/hang 的长预算结果在当前候选上仍可按《任务流程》§18.1 复用；Ports/Core/macOS 后续修正若触及生产逻辑、依赖或 fuzz harness，最终候选必须重新核对并补跑受影响目标，本项不是提前宣布阶段门禁通过。
 
+P1-15 Ports 包首批终态及测试集核对（2026-09-27 UTC）：未变异基线通过，实际 07:30:18–07:37:46 UTC、约 7 分 28 秒结束；预定约 25 分钟后首次读取时进程已退出 0。当前 56 项枚举与结果名称逐项相等，为 23 caught＋33 unviable、0 missed/timeout；`target/p1-stage-ports-mutants-20260927/mutants.out/outcomes.json` SHA-256 `c15b6441a408c78c0d01f60ef66496ec899611fbecc37312c4f6c7e40da5a163`。执行器的未变异 baseline 只运行被变异包，不能用该 argv 判断正式变异的测试集；实际 caught 变异的 `phase_results[].argv` 包含启动登记的 Ports、两个 Adapter、Metadata、Application 和 CLI 六包，`debug.log` 亦列出同一显式集合。独立抽查 Application、SQLite 和 macOS 结果中的实际变异 argv，也确认各批所登记的逗号分隔多包范围有效，无须重跑。另用一个已知 unviable 的 Ports 变异做参数诊断，重复传入 `--test-package` 同样在正式变异的构建 argv 中展开三包；该诊断只验证工具语义，不作为新覆盖项计数。Ports 56 项已闭合，当前合计 1618/3032 项；剩余 Core 503＋macOS Adapter 911 项待执行。
+
 ---
 
 ## 五、依赖摘要

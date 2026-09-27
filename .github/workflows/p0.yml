@@ -39,6 +39,7 @@ jobs:
           printf 'THINWS_P0_SUBMOUNT_SOURCE=%s/thinws-p0-submount-source\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P1_SUBMOUNT_SOURCE=%s/thinws-p0-submount-source\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P0_CROSS_VOLUME_ROOT=%s/thinws-p0-submount-source/mounted\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'THINWS_P1_CROSS_VOLUME_ROOT=%s/thinws-p0-submount-source/mounted\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf 'THINWS_P0_IMAGE=%s/thinws-p0-cross-volume.dmg\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
@@ -53,6 +54,7 @@ jobs:
           tools/test_ci_detach_image.py
           tools/test_ci_fuzz.py
           tools/test_ci_mutation.py
+          tools/test_ci_platform.py
           tools/test_ci_release_binary_e2e.py
           tools/test_ci_release_fuzz.py
       - name: Check crate dependency direction

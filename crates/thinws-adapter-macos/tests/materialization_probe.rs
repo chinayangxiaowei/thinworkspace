@@ -237,11 +237,10 @@ fn every_pair_of_materialization_roles_rejects_overlap() {
 }
 
 #[test]
+#[ignore = "requires THINWS_P1_CROSS_VOLUME_ROOT on an APFS volume distinct from system temp"]
 fn configured_real_cross_volume_report_is_unsupported_not_same_volume() {
-    let Some(cross_root) = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT") else {
-        eprintln!("skipping: THINWS_P1_CROSS_VOLUME_ROOT is not set");
-        return;
-    };
+    let cross_root = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT")
+        .expect("THINWS_P1_CROSS_VOLUME_ROOT must name the prepared APFS mount");
     let source_parent = Builder::new()
         .prefix("p1-06-system-volume-")
         .tempdir_in("/private/tmp")

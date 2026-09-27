@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -135,16 +136,26 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
 }
 
 #[test]
+#[ignore = "requires THINWS_P1_CROSS_VOLUME_ROOT on an APFS volume distinct from system temp"]
 fn real_cli_rejects_cross_volume_even_with_allow_copy() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
+    let cross_root = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT")
+        .expect("THINWS_P1_CROSS_VOLUME_ROOT must name the prepared APFS mount");
     let temp = Builder::new()
         .prefix("cli-cross-volume-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .tempdir()
         .unwrap();
-    let external = tempfile::tempdir().unwrap();
-    let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let external = Builder::new()
+        .prefix("cli-cross-volume-source-")
+        .tempdir_in(cross_root)
+        .unwrap();
+    let system_root = fs::canonicalize(temp.path()).unwrap();
+    let bootstrap = system_root.join("bootstrap");
+    let data_root = system_root.join("data-root");
+    assert_ne!(
+        fs::metadata(temp.path()).unwrap().dev(),
+        fs::metadata(external.path()).unwrap().dev(),
+        "the CLI cross-volume fixture must use distinct mounted volumes"
+    );
     init(&bootstrap, &data_root);
     let (status, error) = execute(
         &bootstrap,

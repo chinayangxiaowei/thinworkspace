@@ -628,6 +628,10 @@ P1-15 Ports 包首批终态及测试集核对（2026-09-27 UTC）：未变异基
 
 P1-15 Core 包阶段变异启动登记（2026-09-27 08:01 UTC）：本地 `main` 冻结候选 `c465e7e`，执行负责人主 Agent，macOS arm64、Rust 1.97.1、`cargo-mutants 27.1.0`；`thinws-core` 当前枚举 503 项。为覆盖领域类型的全部产品消费者，本批使用 `--package thinws-core --test-package thinws-core,thinws-ports,thinws-adapter-macos,thinws-adapter-git-cli,thinws-metadata-sqlite,thinws-application,thinws-cli --gitignore true --timeout 90 --jobs 2 --jobserver-tasks 4`，不把独立通过的 ignored 真实平台场景乘入每项变异。结果另存忽略目录 `target/p1-stage-core-mutants-20260927/mutants.out`。同机 Ports 56 项、六包验证实际约 7 分半，Core 503 项和七包验证按比例约 67 分钟，留波动余量后首次主动查看预计约 80 分钟后；提前完成/失败事件可立即处理，正常运行不按短间隔轮询。本登记仅为执行计划，不表示 Core 已通过。
 
+P1-15 发布前独立预审（2026-09-27，候选 `e0ea79b`）：GPT-6 Astra / `xhigh` 只读抽查长预算 fuzz、真实平台 Debug/Release、Ports/Application/CLI 变异证据的哈希及适用性，未发现新的高危数据安全缺陷；未提前读取正在运行的 Core 批次。预审指出手册 §6.3 将 force 的保护拒绝笼统称为 `refused`，而归属/路径预检失败实际记录 `failed`；主 Agent 已在手册原权威位置区分 Git/占用策略拒绝、预检失败和非 Ready 普通清理，不修改产品代码或第二份日志定义。预审仍将剩余 Core 503＋macOS Adapter 911 项及可重复性能基线列为阶段缺口；十副本隔离测试不等于稳定性能证明。签名、公证和人工放行另为正式发布条件，本预审不构成最终审核或阶段放行。
+
+P1-15 性能基线准备（2026-09-27，尚未运行测量）：新增仅用于本机验收的 `tools/p1_perf_baseline.py`，在指定 APFS 卷的独立临时 HOME/data root 内构造可重复的 264 个普通文件、约 65 MiB 来源，用 release CLI 顺序创建 3 轮、每轮 10 份 CoW 工作区，并记录逐次耗时、分位数、二进制/数据集摘要、卷身份与仅供参考的空间变化；不设置未经实测的性能承诺。两项工具单测先因模块缺失按预期 RED，再 GREEN；`tools` 下 43 项 Python 单测、fmt、全目标全 feature Clippy、带 P1 异卷环境参数的全 workspace/all-targets 普通测试及差异检查均退出 0。普通测试没有启用 ignored 的专用子挂载/跨卷用例，沿用此前独立平台结果；本切片不改 Rust 生产逻辑、依赖或 fuzz 路径，已闭合的变异和长预算 fuzz 不因增加基准工具而失效。Core 变异运行期间只准备工具、不执行基准；须待 CPU/I/O 空闲后运行并核验结果及外置卷波动，再决定可否形成 P1 发布指标。本准备不将 #14 或性能门禁记为完成。
+
 ---
 
 ## 五、依赖摘要

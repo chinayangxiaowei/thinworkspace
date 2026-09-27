@@ -228,7 +228,7 @@ Delivery verification: not performed
 
 ### 6.3 日志与结果边界
 
-检查异常、普通拒绝和显式 force 写入 data root 的 `logs/operations.jsonl`。保护条件拒绝 force 时记录拒绝事件，不宣称删除已开始；允许执行时记录开始和结果。删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
+检查异常、普通拒绝和显式 force 写入 data root 的 `logs/operations.jsonl`。预检流程正常返回检查结果后，Git 或进程占用保护策略拒绝清理（包括 force 仍不能绕过的已确认占用）时记录 `refused`；归属、路径等预检本身失败，以及非 Ready 工作区未使用 force 时记录 `failed`。这些结果都不宣称删除已开始；允许执行时记录 `started` 和结果。删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
 
 没有独立审计服务、提交证明数据库或防篡改承诺。日志字段在开发规范中维护，不在本手册重复。
 

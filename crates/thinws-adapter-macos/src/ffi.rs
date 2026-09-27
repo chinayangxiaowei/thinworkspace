@@ -1322,6 +1322,20 @@ mod tests {
 
     #[test]
     fn directory_stream_drop_closes_its_owned_descriptor() {
+        const CHILD: &str = "THINWS_TEST_DIRECTORY_STREAM_DROP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // FD numbers are process-wide and may be reused by parallel tests after closedir.
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("ffi::tests::directory_stream_drop_closes_its_owned_descriptor")
+                .arg("--test-threads=1")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let directory = fs::File::open(temp.path()).unwrap();
         // SAFETY: dup returns a separate owned descriptor or -1, checked below.

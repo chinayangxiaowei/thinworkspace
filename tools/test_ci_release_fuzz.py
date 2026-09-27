@@ -41,12 +41,40 @@ class ReleaseFuzzTests(unittest.TestCase):
 
     def test_fixed_long_budget_and_bootstrap_input_limit(self) -> None:
         nightly = "nightly-2026-08-14"
-        ordinary = ci_release_fuzz.fuzz_command("thinws_workspace_name", nightly)
-        bootstrap = ci_release_fuzz.fuzz_command("thinws_bootstrap_document", nightly)
+        corpus = Path("/tmp/disposable-corpus")
+        ordinary = ci_release_fuzz.fuzz_command("thinws_workspace_name", nightly, corpus)
+        bootstrap = ci_release_fuzz.fuzz_command("thinws_bootstrap_document", nightly, corpus)
         self.assertIn("-max_total_time=300", ordinary)
         self.assertIn("-max_len=4096", ordinary)
         self.assertIn("-max_len=65537", bootstrap)
+        self.assertIn("-verbosity=0", ordinary)
         self.assertEqual(ordinary[:4], ["cargo", "+" + nightly, "fuzz", "run"])
+        self.assertEqual(ordinary[5], str(corpus))
+
+    def test_existing_seeds_are_copied_to_disposable_corpus(self) -> None:
+        observed: list[Path] = []
+
+        def inspect_run(command: list[str], **_: object) -> CompletedProcess[str]:
+            corpus = Path(command[5])
+            self.assertTrue(corpus.is_dir())
+            self.assertTrue((corpus / "name").is_file())
+            self.assertFalse(corpus.is_relative_to(ci_release_fuzz.REPO_ROOT))
+            observed.append(corpus)
+            return CompletedProcess(command, 0)
+
+        with (
+            patch.dict(environ, {"THINWS_FUZZ_NIGHTLY": "nightly-test"}, clear=True),
+            patch.object(
+                ci_release_fuzz,
+                "target_names",
+                return_value=["thinws_remove_request"],
+            ),
+            patch.object(ci_release_fuzz.subprocess, "run", side_effect=inspect_run),
+            patch.object(ci_release_fuzz, "record_result"),
+        ):
+            self.assertEqual(ci_release_fuzz.main(), 0)
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists())
 
     def test_failure_stops_without_marking_later_targets_passed(self) -> None:
         with (

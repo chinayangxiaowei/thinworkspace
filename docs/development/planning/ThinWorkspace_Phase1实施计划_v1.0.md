@@ -616,6 +616,8 @@ P1-15 Ports 包阶段变异启动登记（2026-09-27 UTC）：本地 `main` 候�
 
 P1-15 CLI 独立审核与审核后 Verification（2026-09-27 UTC）：GPT-6 Astra / `xhigh` 对本地提交 `3f4782dec68004a57973087a28d0a7d2ecb1800f` 只读审核为 Approve，无阻塞代码或变异证据问题；独立重跑 CLI lib 3 项和 binary 1 项、核对两份 outcomes 哈希/日志、当前 62 项名称集合及全 workspace 3032 项枚举。审核提出一项 P3 文档缺口：用户手册 §10.1 原仅展示 `apfs-file-clone`，未冻结 `full-copy` Adapter 和两个 `fallback.reason` 稳定值；这不改变本次现有程序行为，但使公开 JSON 契约依据不完整。主 Agent 已仅在用户手册权威位置补充模式、Adapter、成功 CoW 与 fallback 的取值和 null/预检/运行时语义，未向设计文档复制。审核后 `cargo test --release -p thinws-cli --lib --bin thinws --test contract` 退出 0，CLI lib 3、binary 1、契约 15 项全部通过。文档补充尚待独立复核，不把此定向 Verification 代替剩余 Ports/Core/macOS 变异或 Phase 1 放行。
 
+P1-15 CLI 公开枚举文档复核（2026-09-27 UTC）：上述用户手册与计划补充作为本地提交 `1190869c6b7110e808ecef35bec35cb2b5761fdb` 固定；同一 GPT-6 Astra / `xhigh` 审核者再次以只读方式核对精确文档差异，结论 Approve、无新 finding，前轮 P3 已关闭。审核确认成功回执的 `cow` 没有混入失败回执的 `unknown`，dry-run 只报告预检降级，运行时降级仍须确认回滚；未重复运行 Release 测试或其它长门禁。此文档复核不改变 CLI/Ports 生产源码或测试，也不表示 Phase 1 阶段审核完成。
+
 ---
 
 ## 五、依赖摘要

@@ -618,6 +618,10 @@ P1-15 CLI 独立审核与审核后 Verification（2026-09-27 UTC）：GPT-6 Astr
 
 P1-15 CLI 公开枚举文档复核（2026-09-27 UTC）：上述用户手册与计划补充作为本地提交 `1190869c6b7110e808ecef35bec35cb2b5761fdb` 固定；同一 GPT-6 Astra / `xhigh` 审核者再次以只读方式核对精确文档差异，结论 Approve、无新 finding，前轮 P3 已关闭。审核确认成功回执的 `cow` 没有混入失败回执的 `unknown`，dry-run 只报告预检降级，运行时降级仍须确认回滚；未重复运行 Release 测试或其它长门禁。此文档复核不改变 CLI/Ports 生产源码或测试，也不表示 Phase 1 阶段审核完成。
 
+P1-15 当前 release 二进制无状态入口检查（2026-09-27 UTC，候选 `60cd1429ed7d56d285c7eff1b7944ae8b2739311`）：`cargo build --release -p thinws-cli` 退出 0，`target/release/thinws` 为 arm64 Mach-O，SHA-256 `70a570ba1995a64742d5e37fbbca985bda59c8fa0b1afc09126d6c5a7fec1b6c`。直接运行该文件的 `--version` 返回 `thinws 0.1.0`、`--help` 返回当前命令树，`--json gc` 退出 2 且为 `E_USAGE` envelope；三项均不触发产品数据写入。`codesign -dv` 显示仅 ad hoc linker-signed、无 TeamIdentifier；它不是正式签名/公证的可分发 Release。此入口检查本身不覆盖状态变更；后续同一二进制的本机补验见下段。最终候选若代码改变还需重建、重验和记录新哈希；入口检查不替代 Ports/Core/macOS 变异、签名、公证或人工放行。
+
+P1-15 当前 release 二进制本机状态变更黑盒补验（2026-09-27 UTC，同一二进制 SHA-256）：测试前确认 `target/p1-15-release-e2e-local-20260927` 不存在，只在该忽略目录创建一次性 HOME 和 data root；该 HOME 下先执行 `--json doctor`，确认为 E_NOT_INITIALIZED，避免触碰用户已有实例。来源 `docs/project/reference` 与测试根设备号同为 `16777240`，直接运行二进制完成 `--json init`、`--json doctor`、`--json workspace create --source ... --name release-e2e`、普通 `workspace path` 和 `--json workspace remove release-e2e`，均按各自契约成功。创建结果为 `cow-clone/apfs-file-clone/confirmed`、无 fallback；创建前源/副本 `技术栈.md` SHA-256 同为 `6b1004838cb2c761ba6246dfc192757c1433ed9e2fa57c66d1bc55dce36b64a2`，仅对副本追加测试标记后副本变为 `bcb22d36dab1c1015439e12944931f21f50923c4455de81971496de0950158c4`，来源仍为原哈希。普通 remove 返回 `forced=false`、`result=removed`，副本 root 不存在；operations 日志的 started/completed 两条事件均记录 `process_use=scan-incomplete`。`warning=process-scan-incomplete` 是手册 §6.4 允许但必须显示/记日志的尽力探测结果，不冒充无人占用证明。一次性 HOME/data root 目前保留在上述忽略目录供本机复核，未触碰用户配置；此本机闭环不冒称 GitHub-hosted CI、签名/公证或其他平台验收，最终生产代码若变还需按 §18.1 判断是否重验。
+
 ---
 
 ## 五、依赖摘要

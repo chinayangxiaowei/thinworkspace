@@ -191,6 +191,181 @@ pub(crate) fn path_from_absolute(path: &AbsolutePath) -> PathBuf {
     PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()))
 }
 
+pub(crate) fn open_target_parent(
+    target: &AbsolutePath,
+) -> Result<(ValidatedDirectory, OsString), PortError> {
+    let bytes = target.as_bytes();
+    if bytes == b"/" {
+        return Err(validation_error(
+            "filesystem root cannot be a Workspace target",
+        ));
+    }
+    let last_slash = bytes
+        .iter()
+        .rposition(|byte| *byte == b'/')
+        .expect("validated absolute target has a separator");
+    let parent_path = if last_slash == 0 {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(OsString::from_vec(bytes[..last_slash].to_vec()))
+    };
+    let name = OsString::from_vec(bytes[last_slash + 1..].to_vec());
+    let fd = open_absolute_directory_nofollow(&parent_path, true)?
+        .ok_or_else(|| PortError::new(PortErrorKind::NotFound, "open Workspace target parent"))?;
+    let stat = rustix::fs::fstat(&fd)
+        .map_err(|error| io_error("inspect Workspace target parent", error))?;
+    let parent = ValidatedDirectory {
+        identity: identity(&stat),
+        fd,
+        path: parent_path,
+    };
+    revalidate_target_parent(&parent)?;
+    Ok((parent, name))
+}
+
+pub(crate) fn create_target_child_directory(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<ValidatedDirectory, PortError> {
+    create_target_child_directory_with_hook(parent, name, || {})
+}
+
+fn create_target_child_directory_with_hook(
+    parent: &ValidatedDirectory,
+    name: &OsStr,
+    before_publish: impl FnOnce(),
+) -> Result<ValidatedDirectory, PortError> {
+    revalidate_target_parent(parent)?;
+    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => {
+            return Err(PortError::new(
+                PortErrorKind::NotEmpty,
+                "Workspace target already exists",
+            ));
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(io_error("inspect Workspace target leaf", error)),
+    }
+    // Claim the new directory while it has a private staging name. Publishing
+    // that held identity with NOREPLACE avoids first claiming an object found
+    // under the user-visible target name after mkdirat.
+    for _ in 0..32 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staged_name = OsString::from(format!(
+            ".thinws-target.tmp-{}-{sequence}",
+            std::process::id()
+        ));
+        match rustix::fs::mkdirat(&parent.fd, &staged_name, Mode::from_bits_retain(0o700)) {
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(io_error("stage Workspace target", error)),
+            Ok(()) => {}
+        }
+        sync_directory(&parent.fd)?;
+        let mut staged = open_owned_child_directory(parent, &staged_name)?;
+        let staged_stat = rustix::fs::fstat(&staged.fd)
+            .map_err(|error| io_error("inspect staged Workspace target", error))?;
+        validate_directory_stat(&staged_stat)?;
+        revalidate_target_child(parent, &staged, &staged_name)?;
+        before_publish();
+        if let Err(error) = rustix::fs::renameat_with(
+            &parent.fd,
+            &staged_name,
+            &parent.fd,
+            name,
+            RenameFlags::NOREPLACE,
+        ) {
+            cleanup_empty_target_stage(parent, &staged, &staged_name)?;
+            return Err(if error == rustix::io::Errno::EXIST {
+                PortError::new(PortErrorKind::NotEmpty, "Workspace target already exists")
+            } else {
+                io_error("publish Workspace target", error)
+            });
+        }
+        staged.path = parent.path.join(name);
+        sync_directory(&parent.fd)?;
+        revalidate_target_child(parent, &staged, name)?;
+        return Ok(staged);
+    }
+    Err(PortError::new(
+        PortErrorKind::Io,
+        "allocate staged Workspace target name",
+    ))
+}
+
+fn revalidate_target_parent(parent: &ValidatedDirectory) -> Result<(), PortError> {
+    let current = open_absolute_directory_nofollow(&parent.path, true)?
+        .ok_or_else(|| validation_error("Workspace target parent disappeared"))?;
+    let current = rustix::fs::fstat(&current)
+        .map_err(|error| io_error("revalidate Workspace target parent", error))?;
+    let held = rustix::fs::fstat(&parent.fd)
+        .map_err(|error| io_error("inspect held Workspace target parent", error))?;
+    if !target_parent_stat_matches(&held, &current, parent.identity) {
+        return Err(validation_error("Workspace target parent identity changed"));
+    }
+    Ok(())
+}
+
+fn target_parent_stat_matches(
+    held: &rustix::fs::Stat,
+    current: &rustix::fs::Stat,
+    expected: FileIdentity,
+) -> bool {
+    identity(held) == expected
+        && identity(current) == expected
+        && held.st_birthtime == current.st_birthtime
+        && held.st_birthtime_nsec == current.st_birthtime_nsec
+}
+
+fn revalidate_target_child(
+    parent: &ValidatedDirectory,
+    child: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<(), PortError> {
+    revalidate_target_parent(parent)?;
+    if child.path != parent.path.join(name) {
+        return Err(validation_error("Workspace target child path changed"));
+    }
+    let held = rustix::fs::fstat(&child.fd)
+        .map_err(|error| io_error("inspect held Workspace target child", error))?;
+    let named = rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| io_error("inspect named Workspace target child", error))?;
+    if !target_child_stat_matches(
+        &held,
+        &named,
+        child.identity,
+        rustix::process::geteuid().as_raw(),
+    ) {
+        return Err(validation_error("Workspace target child identity changed"));
+    }
+    Ok(())
+}
+
+fn target_child_stat_matches(
+    held: &rustix::fs::Stat,
+    named: &rustix::fs::Stat,
+    expected: FileIdentity,
+    effective_uid: u32,
+) -> bool {
+    FileType::from_raw_mode(held.st_mode).is_dir()
+        && FileType::from_raw_mode(named.st_mode).is_dir()
+        && held.st_uid == effective_uid
+        && named.st_uid == held.st_uid
+        && identity(held) == expected
+        && identity(named) == expected
+}
+
+fn cleanup_empty_target_stage(
+    parent: &ValidatedDirectory,
+    staged: &ValidatedDirectory,
+    name: &OsStr,
+) -> Result<(), PortError> {
+    revalidate_target_child(parent, staged, name)?;
+    require_empty_directory(staged)?;
+    rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR)
+        .map_err(|error| io_error("remove staged Workspace target", error))?;
+    sync_directory(&parent.fd)
+}
+
 pub(crate) fn open_private_directory(path: &Path) -> Result<ValidatedDirectory, PortError> {
     open_private_directory_optional(path)?
         .ok_or_else(|| PortError::new(PortErrorKind::NotFound, "open private directory"))
@@ -446,7 +621,7 @@ pub(crate) fn require_empty_directory(directory: &ValidatedDirectory) -> Result<
 pub(crate) fn open_private_directory_optional(
     path: &Path,
 ) -> Result<Option<ValidatedDirectory>, PortError> {
-    let Some(fd) = open_absolute_directory_nofollow(path)? else {
+    let Some(fd) = open_absolute_directory_nofollow(path, false)? else {
         return Ok(None);
     };
     let stat =
@@ -459,7 +634,10 @@ pub(crate) fn open_private_directory_optional(
     }))
 }
 
-fn open_absolute_directory_nofollow(path: &Path) -> Result<Option<OwnedFd>, PortError> {
+fn open_absolute_directory_nofollow(
+    path: &Path,
+    allow_root: bool,
+) -> Result<Option<OwnedFd>, PortError> {
     let mut current = rustix::fs::open(Path::new("/"), DIRECTORY_OPEN_FLAGS, Mode::empty())
         .map_err(|error| io_error("open filesystem root", error))?;
     let mut saw_root = false;
@@ -488,7 +666,7 @@ fn open_absolute_directory_nofollow(path: &Path) -> Result<Option<OwnedFd>, Port
             }
         };
     }
-    if !saw_root || !saw_normal {
+    if !saw_root || (!allow_root && !saw_normal) {
         return Err(validation_error("private directory path is not canonical"));
     }
     Ok(Some(current))
@@ -707,7 +885,7 @@ impl Error for FilesystemValidationError {}
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File, FileTimes};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::process::Command;
@@ -859,6 +1037,219 @@ mod tests {
     }
 
     #[test]
+    fn explicit_target_parent_and_leaf_are_nofollow_and_no_replace() {
+        let (temp, _, _) = controlled_directory("target-leaf-");
+        let parent_path = temp.path().join("public-parent");
+        fs::create_dir(&parent_path).unwrap();
+        fs::set_permissions(&parent_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let target_path = parent_path.join("clone");
+        let target = absolute_from_path(&target_path).unwrap();
+        let (parent, name) = open_target_parent(&target).unwrap();
+        assert_eq!(parent.path, parent_path);
+        assert_eq!(name, OsStr::new("clone"));
+        let created = create_target_child_directory(&parent, &name).unwrap();
+        assert_eq!(created.path, target_path);
+        assert_eq!(
+            created.identity,
+            open_owned_child_directory(&parent, &name).unwrap().identity
+        );
+        assert!(create_target_child_directory(&parent, &name).is_err());
+        assert_eq!(fs::read_dir(&parent_path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn explicit_target_rejects_existing_entries_and_preserves_them() {
+        let (temp, _, _) = controlled_directory("target-existing-");
+        let parent_path = temp.path().join("public-parent");
+        fs::create_dir(&parent_path).unwrap();
+        fs::set_permissions(&parent_path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(parent_path.join("file"), b"keep file").unwrap();
+        symlink("file", parent_path.join("link")).unwrap();
+        fs::create_dir(parent_path.join("directory")).unwrap();
+        fs::write(parent_path.join("directory/keep"), b"keep directory").unwrap();
+        fs::set_permissions(&parent_path, fs::Permissions::from_mode(0o555)).unwrap();
+
+        for name in ["file", "link", "directory"] {
+            let target = absolute_from_path(&parent_path.join(name)).unwrap();
+            let (parent, leaf) = open_target_parent(&target).unwrap();
+            assert_eq!(
+                create_target_child_directory(&parent, &leaf)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                PortErrorKind::NotEmpty
+            );
+        }
+        fs::set_permissions(&parent_path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read(parent_path.join("file")).unwrap(), b"keep file");
+        assert_eq!(
+            fs::read_link(parent_path.join("link")).unwrap(),
+            Path::new("file")
+        );
+        assert_eq!(
+            fs::read(parent_path.join("directory/keep")).unwrap(),
+            b"keep directory"
+        );
+        assert_eq!(fs::read_dir(&parent_path).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn explicit_target_publish_never_replaces_a_competing_public_entry() {
+        let (temp, _, _) = controlled_directory("target-publish-race-");
+        let parent_path = temp.path().join("parent");
+        fs::create_dir(&parent_path).unwrap();
+        let target = absolute_from_path(&parent_path.join("clone")).unwrap();
+        let (parent, name) = open_target_parent(&target).unwrap();
+        let error = create_target_child_directory_with_hook(&parent, &name, || {
+            fs::write(parent_path.join("clone"), b"competing content").unwrap();
+        })
+        .err()
+        .expect("a competing public entry must block publication");
+        assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+        assert_eq!(
+            fs::read(parent_path.join("clone")).unwrap(),
+            b"competing content"
+        );
+        assert_eq!(fs::read_dir(&parent_path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn explicit_target_rejects_missing_or_symlinked_parent_and_parent_replacement() {
+        let (temp, _, _) = controlled_directory("target-parent-");
+        let real_parent = temp.path().join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, temp.path().join("alias-parent")).unwrap();
+        assert!(
+            open_target_parent(
+                &absolute_from_path(&temp.path().join("alias-parent/clone")).unwrap()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            open_target_parent(&absolute_from_path(&temp.path().join("missing/clone")).unwrap())
+                .err()
+                .unwrap()
+                .kind(),
+            PortErrorKind::NotFound
+        );
+        assert!(open_target_parent(&AbsolutePath::try_from_bytes(b"/".to_vec()).unwrap()).is_err());
+
+        let target = absolute_from_path(&real_parent.join("clone")).unwrap();
+        let (parent, name) = open_target_parent(&target).unwrap();
+        fs::rename(&real_parent, temp.path().join("displaced-parent")).unwrap();
+        fs::create_dir(&real_parent).unwrap();
+        assert!(create_target_child_directory(&parent, &name).is_err());
+        assert!(!real_parent.join("clone").exists());
+        assert!(!temp.path().join("displaced-parent/clone").exists());
+    }
+
+    #[test]
+    fn target_parent_stat_requires_each_identity_and_birthtime_field() {
+        let (_temp, _, directory) = controlled_directory("target-parent-stat-");
+        let held = rustix::fs::fstat(&directory.fd).unwrap();
+        let current = rustix::fs::fstat(&directory.fd).unwrap();
+        assert!(target_parent_stat_matches(
+            &held,
+            &current,
+            directory.identity
+        ));
+
+        let mut changed = rustix::fs::fstat(&directory.fd).unwrap();
+        changed.st_ino += 1;
+        assert!(!target_parent_stat_matches(
+            &changed,
+            &current,
+            directory.identity
+        ));
+        assert!(!target_parent_stat_matches(
+            &held,
+            &changed,
+            directory.identity
+        ));
+        let mut changed = rustix::fs::fstat(&directory.fd).unwrap();
+        changed.st_birthtime += 1;
+        assert!(!target_parent_stat_matches(
+            &held,
+            &changed,
+            directory.identity
+        ));
+        let mut changed = rustix::fs::fstat(&directory.fd).unwrap();
+        changed.st_birthtime_nsec += 1;
+        assert!(!target_parent_stat_matches(
+            &held,
+            &changed,
+            directory.identity
+        ));
+    }
+
+    #[test]
+    fn target_child_revalidation_rejects_replacement_and_each_metadata_mismatch() {
+        let (temp, _, _) = controlled_directory("target-child-stat-");
+        let parent_path = temp.path().join("parent");
+        fs::create_dir(&parent_path).unwrap();
+        let target = absolute_from_path(&parent_path.join("clone")).unwrap();
+        let (parent, name) = open_target_parent(&target).unwrap();
+        let child = create_target_child_directory(&parent, &name).unwrap();
+        revalidate_target_child(&parent, &child, &name).unwrap();
+
+        let held = rustix::fs::fstat(&child.fd).unwrap();
+        let named = rustix::fs::fstat(&child.fd).unwrap();
+        let euid = rustix::process::geteuid().as_raw();
+        assert!(target_child_stat_matches(
+            &held,
+            &named,
+            child.identity,
+            euid
+        ));
+        let mut changed = rustix::fs::fstat(&child.fd).unwrap();
+        changed.st_mode = libc::S_IFREG;
+        assert!(!target_child_stat_matches(
+            &changed,
+            &named,
+            child.identity,
+            euid
+        ));
+        assert!(!target_child_stat_matches(
+            &held,
+            &changed,
+            child.identity,
+            euid
+        ));
+        let mut changed = rustix::fs::fstat(&child.fd).unwrap();
+        changed.st_uid ^= 1;
+        assert!(!target_child_stat_matches(
+            &changed,
+            &named,
+            child.identity,
+            euid
+        ));
+        assert!(!target_child_stat_matches(
+            &held,
+            &changed,
+            child.identity,
+            euid
+        ));
+        let mut changed = rustix::fs::fstat(&child.fd).unwrap();
+        changed.st_ino += 1;
+        assert!(!target_child_stat_matches(
+            &changed,
+            &named,
+            child.identity,
+            euid
+        ));
+        assert!(!target_child_stat_matches(
+            &held,
+            &changed,
+            child.identity,
+            euid
+        ));
+
+        fs::rename(parent_path.join("clone"), parent_path.join("displaced")).unwrap();
+        fs::create_dir(parent_path.join("clone")).unwrap();
+        assert!(revalidate_target_child(&parent, &child, &name).is_err());
+    }
+
+    #[test]
     fn security_sensitive_open_flag_sets_are_exact() {
         assert_eq!(
             PRIVATE_TEMP_OPEN_FLAGS,
@@ -888,8 +1279,13 @@ mod tests {
 
     #[test]
     fn path_walker_rejects_relative_and_root_only_inputs() {
-        assert!(open_absolute_directory_nofollow(Path::new("relative")).is_err());
-        assert!(open_absolute_directory_nofollow(Path::new("/")).is_err());
+        assert!(open_absolute_directory_nofollow(Path::new("relative"), false).is_err());
+        assert!(open_absolute_directory_nofollow(Path::new("/"), false).is_err());
+        assert!(
+            open_absolute_directory_nofollow(Path::new("/"), true)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

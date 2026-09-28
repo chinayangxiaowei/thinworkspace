@@ -20,12 +20,12 @@ use crate::document::{
 };
 use crate::filesystem::{
     FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, create_private_child_directory,
-    create_private_file, duplicate_validated_directory, entry_identity,
-    historical_directory_identity, io_error, open_owned_child_directory,
+    create_private_file, create_target_child_directory, duplicate_validated_directory,
+    entry_identity, historical_directory_identity, io_error, open_owned_child_directory,
     open_private_child_directory, open_private_directory, open_private_directory_optional,
-    open_private_file, path_from_absolute, prepare_private_directory, read_private_file,
-    require_empty_directory, revalidate_attached_directory, revalidate_directory, sync_directory,
-    unlink_entry, validate_file_entry,
+    open_private_file, open_target_parent, path_from_absolute, prepare_private_directory,
+    read_private_file, require_empty_directory, revalidate_attached_directory,
+    revalidate_directory, sync_directory, unlink_entry, validate_file_entry,
 };
 use crate::space::measure_root;
 use crate::volume::decode_volume_id;
@@ -430,7 +430,19 @@ impl BootstrapStore for MacOsHostAdapter {
         let state = create_private_child_directory(&container, OsStr::new(".state"))?;
         let (incomplete_file, incomplete_identity) =
             create_private_file(&state, OsStr::new("incomplete"))?;
-        let root = create_private_child_directory(&container, OsStr::new("root"))?;
+        let target_path = crate::filesystem::absolute_from_path(&container.path.join("root"))
+            .map_err(|error| {
+                PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
+                    .with_source(error)
+            })?;
+        let (target_parent, target_name) = open_target_parent(&target_path)?;
+        if target_parent.identity != container.identity {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace target parent differs from prepared container",
+            ));
+        }
+        let root = create_target_child_directory(&target_parent, &target_name)?;
         require_empty_directory(&root)?;
         let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
             PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")

@@ -166,12 +166,12 @@ where
             })?;
         self.bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let lock = self
             .bootstrap
             .acquire_data_root(identity.data_root(), self.lock_timeout)
             .map_err(|error| match self.bootstrap.validate_layout(&identity) {
-                Err(layout_error) => map_port(Stage::Layout, layout_error),
+                Err(layout_error) => map_port(Stage::Control, layout_error),
                 Ok(_) => map_port(Stage::Lock, error),
             })?;
         lock.revalidate()
@@ -179,7 +179,7 @@ where
         let layout = self
             .bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
         let mut metadata = self
             .metadata
@@ -303,7 +303,7 @@ where
             (|| -> Result<(Option<GitInspection>, Option<ProcessUse>), UseCaseError> {
                 let _container = self
                     .bootstrap
-                    .inspect_removal_container(&lock, &layout, id)
+                    .inspect_removal_container(&lock, &layout, active.reservation())
                     .map_err(|error| map_target_port(id, error))?
                     .ok_or_else(|| missing_target(id))?;
                 let inspection = if state == WorkspaceState::Ready
@@ -311,18 +311,18 @@ where
                 {
                     let path = self
                         .bootstrap
-                        .validate_ready_workspace(&layout, id)
+                        .validate_ready_workspace(&layout, active.reservation())
                         .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
                     if path != *active.reservation().target_path() {
                         return Err(semantic_error(
-                            ErrorCode::DataRootLayout,
+                            ErrorCode::TargetLayout,
                             "Ready Workspace path does not match metadata",
                         )
                         .with_workspace_id(id));
                     }
                     let result = git.inspect(&path);
                     self.bootstrap
-                        .validate_ready_workspace(&layout, id)
+                        .validate_ready_workspace(&layout, active.reservation())
                         .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
                     Some(result)
                 } else {
@@ -330,7 +330,7 @@ where
                 };
                 let container = self
                     .bootstrap
-                    .inspect_removal_container(&lock, &layout, id)
+                    .inspect_removal_container(&lock, &layout, active.reservation())
                     .map_err(|error| map_target_port(id, error))?
                     .ok_or_else(|| missing_target(id))?;
                 let process_use = process
@@ -453,17 +453,17 @@ where
         }
         let removal = self
             .bootstrap
-            .remove_workspace(&lock, &layout, id)
+            .remove_workspace(&lock, &layout, active.reservation())
             .map_err(|error| map_target_port(id, error))
             .and_then(|outcome| {
                 match self
                     .bootstrap
-                    .inspect_removal_container(&lock, &layout, id)
+                    .inspect_removal_container(&lock, &layout, active.reservation())
                     .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?
                 {
                     None => Ok(outcome),
                     Some(_) => Err(semantic_error(
-                        ErrorCode::DataRootLayout,
+                        ErrorCode::TargetLayout,
                         "Workspace container reappeared before deletion completion",
                     )
                     .with_workspace_id(id)),

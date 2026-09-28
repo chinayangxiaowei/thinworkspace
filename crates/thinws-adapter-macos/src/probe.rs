@@ -130,6 +130,18 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
                 missing_components.extend(components[index..].iter().cloned());
                 break;
             }
+            Err(error)
+                if index + 1 == components.len()
+                    && matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+                    && node_metadata_at(&current, &name).is_ok() =>
+            {
+                // A non-directory final leaf is still an occupied target.
+                // Intermediate non-directories remain invalid path layout.
+                return Err(PortError::new(
+                    PortErrorKind::NotEmpty,
+                    "path final component already exists",
+                ));
+            }
             Err(error) => return Err(open_component_error(error)),
         }
     }
@@ -276,7 +288,10 @@ fn common_materialization_support(
     }
     for (name, report) in [("staging", staging), ("trash", trash)] {
         if report.resolution() != PathResolution::ExistingDirectory {
-            support.unsupported(format!("{name}_missing"));
+            // A read-only preview can only probe the writable parent of its
+            // future same-volume private directory. Execution revalidates
+            // concrete staging/trash roots before the first write.
+            support.unknown(format!("{name}_not_yet_created"));
         }
     }
     for (left_name, left, right_name, right) in [

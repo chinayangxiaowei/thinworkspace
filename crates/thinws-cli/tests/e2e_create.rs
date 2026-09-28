@@ -34,7 +34,7 @@ fn init(bootstrap: &Path, data_root: &Path) {
     assert_eq!(status, 0, "{json}");
 }
 
-fn create_args(source: &Path, name: &str, more: &[&str]) -> Vec<OsString> {
+fn create_args(source: &Path, target: &Path, name: &str, more: &[&str]) -> Vec<OsString> {
     let mut arguments = vec![
         "thinws".into(),
         "--json".into(),
@@ -42,6 +42,8 @@ fn create_args(source: &Path, name: &str, more: &[&str]) -> Vec<OsString> {
         "create".into(),
         "--source".into(),
         source.as_os_str().to_owned(),
+        "--target".into(),
+        target.as_os_str().to_owned(),
         "--name".into(),
         name.into(),
     ];
@@ -60,6 +62,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
     let bootstrap = temp.path().join("bootstrap");
     let data_root = bootstrap.clone();
     let source = temp.path().join("source");
+    let target = temp.path().join("plain-target");
     fs::create_dir(&source).unwrap();
     fs::create_dir(source.join(".git")).unwrap();
     fs::write(source.join(".git/HEAD"), b"ordinary metadata\n").unwrap();
@@ -68,7 +71,10 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
     symlink("untracked.txt", source.join("link.txt")).unwrap();
     init(&bootstrap, &data_root);
 
-    let (status, preview) = execute(&bootstrap, create_args(&source, "plain", &["--dry-run"]));
+    let (status, preview) = execute(
+        &bootstrap,
+        create_args(&source, &target, "plain", &["--dry-run"]),
+    );
     assert_eq!(status, 0, "{preview}");
     assert_eq!(preview["data"]["workspace_id"], Value::Null);
     assert_eq!(preview["data"]["same_volume"], true);
@@ -76,13 +82,11 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
         preview["data"]["materialization"]["effective_planned_mode"],
         "cow-clone"
     );
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        0
-    );
+    assert!(!target.exists());
+    assert!(!data_root.join("workspaces").exists());
     assert!(data_root.join("lifecycle.lock").exists());
 
-    let (status, created) = execute(&bootstrap, create_args(&source, "plain", &[]));
+    let (status, created) = execute(&bootstrap, create_args(&source, &target, "plain", &[]));
     assert_eq!(status, 0, "{created}");
     assert_eq!(created["data"]["result"], "created");
     assert_eq!(
@@ -91,6 +95,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
     );
     assert_eq!(created["data"]["materialization"]["cow"], "confirmed");
     let path = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    assert_eq!(path, target);
     assert_eq!(
         fs::read(path.join(".git/HEAD")).unwrap(),
         b"ordinary metadata\n"
@@ -114,7 +119,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
     );
 
     fs::rename(&source, temp.path().join("source-moved")).unwrap();
-    let (status, repeated) = execute(&bootstrap, create_args(&source, "plain", &[]));
+    let (status, repeated) = execute(&bootstrap, create_args(&source, &target, "plain", &[]));
     assert_eq!(status, 0, "{repeated}");
     assert_eq!(repeated["data"]["result"], "already-ready");
     assert_eq!(
@@ -124,7 +129,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
 
     let (status, conflict) = execute(
         &bootstrap,
-        create_args(&temp.path().join("source-moved"), "plain", &[]),
+        create_args(&temp.path().join("source-moved"), &target, "plain", &[]),
     );
     assert_eq!(status, 15);
     assert_eq!(conflict["error"]["code"], "E_NAME_CONFLICT");
@@ -152,16 +157,60 @@ fn real_cli_rejects_cross_volume_even_with_allow_copy() {
         "the CLI cross-volume fixture must use distinct mounted volumes"
     );
     init(&bootstrap, &data_root);
+    let target = system_root.join("cross-volume-target");
     let (status, error) = execute(
         &bootstrap,
-        create_args(external.path(), "cross-volume", &["--allow-copy"]),
+        create_args(external.path(), &target, "cross-volume", &["--allow-copy"]),
     );
     assert_eq!(status, 33, "{error}");
-    assert_eq!(error["error"]["code"], "E_DATA_ROOT_LAYOUT");
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        0
+    assert_eq!(error["error"]["code"], "E_TARGET_LAYOUT");
+    assert!(!target.exists());
+}
+
+#[test]
+#[ignore = "requires THINWS_P1_CROSS_VOLUME_ROOT on an APFS volume distinct from system temp"]
+fn real_cli_uses_same_volume_targets_independently_of_the_control_volume() {
+    let external_root = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT")
+        .expect("THINWS_P1_CROSS_VOLUME_ROOT must name the prepared APFS mount");
+    let system = Builder::new()
+        .prefix("cli-system-volume-")
+        .tempdir()
+        .unwrap();
+    let external = Builder::new()
+        .prefix("cli-external-volume-")
+        .tempdir_in(external_root)
+        .unwrap();
+    let system_root = fs::canonicalize(system.path()).unwrap();
+    let external_root = fs::canonicalize(external.path()).unwrap();
+    assert_ne!(
+        fs::metadata(&system_root).unwrap().dev(),
+        fs::metadata(&external_root).unwrap().dev(),
+        "fixture must use two mounted APFS volumes"
     );
+
+    for (control_parent, workspace_parent, name) in [
+        (&system_root, &external_root, "external-copy"),
+        (&external_root, &system_root, "system-copy"),
+    ] {
+        let control = control_parent.join(format!("control-{name}"));
+        let source = workspace_parent.join(format!("source-{name}"));
+        let target = workspace_parent.join(format!("target-{name}"));
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("content.txt"), b"source").unwrap();
+        init(&control, &control);
+
+        let (status, created) = execute(&control, create_args(&source, &target, name, &[]));
+        assert_eq!(status, 0, "{created}");
+        assert_eq!(created["data"]["path"], target.to_str().unwrap());
+        assert_eq!(
+            created["data"]["materialization"]["actual_mode"],
+            "cow-clone"
+        );
+        assert_eq!(created["data"]["materialization"]["cow"], "confirmed");
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"source");
+        assert!(!control.join("workspaces").exists());
+        assert!(!target.join(".thinws-control.toml").exists());
+    }
 }
 
 #[test]
@@ -175,17 +224,156 @@ fn real_cli_distinguishes_missing_source_from_absent_control_root() {
     let bootstrap = temp.path().join("bootstrap");
     let data_root = bootstrap.clone();
     let source = temp.path().join("source");
+    let target = temp.path().join("missing-target");
     init(&bootstrap, &data_root);
     for extra in [&[][..], &["--allow-copy"][..], &["--dry-run"][..]] {
-        let (status, error) = execute(&bootstrap, create_args(&source, "missing", extra));
+        let (status, error) = execute(&bootstrap, create_args(&source, &target, "missing", extra));
         assert_eq!(status, 31, "{error}");
         assert_eq!(error["error"]["code"], "E_FILESYSTEM");
     }
     fs::create_dir(&source).unwrap();
     fs::rename(&data_root, temp.path().join("control-root-moved")).unwrap();
-    let (status, error) = execute(&bootstrap, create_args(&source, "missing-root", &[]));
+    let (status, error) = execute(
+        &bootstrap,
+        create_args(&source, &target, "missing-root", &[]),
+    );
     assert_eq!(status, 10, "{error}");
     assert_eq!(error["error"]["code"], "E_NOT_INITIALIZED");
+}
+
+#[test]
+fn real_cli_refuses_existing_unregistered_and_already_registered_targets() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-target-conflicts-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let control = temp.path().join(".thinws");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), b"source").unwrap();
+    init(&control, &control);
+
+    let existing = temp.path().join("existing-empty-directory");
+    fs::create_dir(&existing).unwrap();
+    for option in [&["--dry-run"][..], &[][..]] {
+        let (status, error) = execute(
+            &control,
+            create_args(&source, &existing, "existing", option),
+        );
+        assert_eq!(status, 43, "{error}");
+        assert_eq!(error["error"]["code"], "E_TARGET_EXISTS");
+        assert_eq!(fs::read_dir(&existing).unwrap().count(), 0);
+    }
+
+    let existing_file = temp.path().join("existing-file");
+    fs::write(&existing_file, b"keep this file").unwrap();
+    let existing_link = temp.path().join("existing-link");
+    symlink("source", &existing_link).unwrap();
+    for (target, name) in [
+        (&existing_file, "existing-file"),
+        (&existing_link, "existing-link"),
+    ] {
+        for option in [&["--dry-run"][..], &[][..]] {
+            let (status, error) = execute(&control, create_args(&source, target, name, option));
+            assert_eq!(status, 43, "{error}");
+            assert_eq!(error["error"]["code"], "E_TARGET_EXISTS");
+        }
+    }
+    assert_eq!(fs::read(&existing_file).unwrap(), b"keep this file");
+    assert_eq!(
+        fs::read_link(&existing_link).unwrap(),
+        PathBuf::from("source")
+    );
+
+    let target = temp.path().join("registered-target");
+    let (status, created) = execute(&control, create_args(&source, &target, "first", &[]));
+    assert_eq!(status, 0, "{created}");
+    let (status, conflict) = execute(&control, create_args(&source, &target, "second", &[]));
+    assert_eq!(status, 42, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "E_TARGET_CONFLICT");
+    assert_eq!(fs::read(target.join("file")).unwrap(), b"source");
+
+    let missing_parent = temp.path().join("absent-parent/child");
+    let (status, error) = execute(
+        &control,
+        create_args(&source, &missing_parent, "missing-parent", &[]),
+    );
+    assert_eq!(status, 33, "{error}");
+    assert_eq!(error["error"]["code"], "E_TARGET_LAYOUT");
+    assert!(!missing_parent.exists());
+}
+
+#[test]
+fn real_cli_does_not_treat_a_user_source_as_a_preview_temporary_root() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-preview-name-collision-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let control = temp.path().join(".thinws");
+    init(&control, &control);
+
+    for (source_name, name) in [
+        (".thinws-preview-staging", "preview-staging"),
+        (".thinws-preview-trash", "preview-trash"),
+    ] {
+        let source = temp.path().join(source_name);
+        let target = temp.path().join(format!("copy-{name}"));
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("payload"), b"source").unwrap();
+
+        let (status, preview) = execute(
+            &control,
+            create_args(&source, &target, name, &["--dry-run"]),
+        );
+        assert_eq!(status, 0, "{preview}");
+        assert_eq!(preview["data"]["target"], target.to_str().unwrap());
+        assert!(!target.exists());
+
+        let (status, created) = execute(&control, create_args(&source, &target, name, &[]));
+        assert_eq!(status, 0, "{created}");
+        assert_eq!(fs::read(target.join("payload")).unwrap(), b"source");
+    }
+}
+
+#[test]
+fn real_cli_rejects_a_case_alias_target_inside_the_control_root() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-control-target-alias-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let control = temp.path().join(".thinws");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    init(&control, &control);
+
+    let alias = temp.path().join(".THINWS");
+    let Ok(alias_metadata) = fs::metadata(&alias) else {
+        eprintln!("skipping APFS case alias on a case-sensitive volume");
+        return;
+    };
+    let control_metadata = fs::metadata(&control).unwrap();
+    assert_eq!(alias_metadata.dev(), control_metadata.dev());
+    assert_eq!(alias_metadata.ino(), control_metadata.ino());
+
+    let target = alias.join("copy");
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let (status, error) = execute(&control, create_args(&source, &target, "alias", extra));
+        assert_eq!(status, 33, "{error}");
+        assert_eq!(error["error"]["code"], "E_TARGET_LAYOUT");
+        assert!(!target.exists());
+    }
+    let (status, doctor) = execute(
+        &control,
+        vec!["thinws".into(), "--json".into(), "doctor".into()],
+    );
+    assert_eq!(status, 0, "{doctor}");
+    assert_eq!(doctor["data"]["incomplete_workspaces"], 0);
 }
 
 #[test]
@@ -206,7 +394,8 @@ fn ten_cow_workspaces_keep_ordinary_file_writes_independent() {
     let mut copies = Vec::new();
     for index in 0..10 {
         let name = format!("copy-{index}");
-        let (status, created) = execute(&bootstrap, create_args(&source, &name, &[]));
+        let target = temp.path().join(format!("target-{index}"));
+        let (status, created) = execute(&bootstrap, create_args(&source, &target, &name, &[]));
         assert_eq!(status, 0, "{created}");
         assert_eq!(
             created["data"]["materialization"]["actual_mode"],
@@ -214,13 +403,11 @@ fn ten_cow_workspaces_keep_ordinary_file_writes_independent() {
         );
         assert_eq!(created["data"]["materialization"]["cow"], "confirmed");
         let path = PathBuf::from(created["data"]["path"].as_str().unwrap());
+        assert_eq!(path, target);
         assert_eq!(fs::read(path.join("note.txt")).unwrap(), b"source content");
         copies.push(path);
     }
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        10
-    );
+    assert!(!data_root.join("workspaces").exists());
 
     for (index, copy) in copies.iter().enumerate() {
         fs::write(copy.join("note.txt"), format!("copy {index}")).unwrap();

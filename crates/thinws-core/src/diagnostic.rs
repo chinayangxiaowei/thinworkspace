@@ -46,10 +46,12 @@ pub enum ErrorCode {
     ControlLayout,
     /// An unowned fixed control directory contains user content.
     ControlNotEmpty,
-    /// The registered data root or volume is unavailable.
-    DataRootUnavailable,
     /// Source, target, volume, or controlled path layout is invalid.
-    DataRootLayout,
+    TargetLayout,
+    /// Another active Workspace has registered this exact target path.
+    TargetConflict,
+    /// The target leaf already exists and cannot be adopted or overwritten.
+    TargetExists,
     /// SQLite, schema, or metadata persistence failed.
     Metadata,
     /// The registered Workspace target is absent at every proven location.
@@ -64,7 +66,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every currently assigned public error code in documented order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Usage,
         Self::NotInitialized,
         Self::CapabilityUnavailable,
@@ -80,8 +82,9 @@ impl ErrorCode {
         Self::ControlUnavailable,
         Self::ControlLayout,
         Self::ControlNotEmpty,
-        Self::DataRootUnavailable,
-        Self::DataRootLayout,
+        Self::TargetLayout,
+        Self::TargetConflict,
+        Self::TargetExists,
         Self::Metadata,
         Self::TargetMissing,
         Self::TargetIdentity,
@@ -108,8 +111,9 @@ impl ErrorCode {
             Self::ControlUnavailable => "E_CONTROL_UNAVAILABLE",
             Self::ControlLayout => "E_CONTROL_LAYOUT",
             Self::ControlNotEmpty => "E_CONTROL_NOT_EMPTY",
-            Self::DataRootUnavailable => "E_DATA_ROOT_UNAVAILABLE",
-            Self::DataRootLayout => "E_DATA_ROOT_LAYOUT",
+            Self::TargetLayout => "E_TARGET_LAYOUT",
+            Self::TargetConflict => "E_TARGET_CONFLICT",
+            Self::TargetExists => "E_TARGET_EXISTS",
             Self::Metadata => "E_METADATA",
             Self::TargetMissing => "E_TARGET_MISSING",
             Self::TargetIdentity => "E_TARGET_IDENTITY",

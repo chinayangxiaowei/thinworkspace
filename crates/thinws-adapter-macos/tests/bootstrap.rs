@@ -1,9 +1,9 @@
-use std::fs::{self, File, FileTimes};
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::Duration;
 
 use tempfile::{Builder, TempDir};
 use thinws_adapter_macos::{
@@ -16,8 +16,8 @@ use thinws_core::{
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, LifecycleLock, PortConflict, PortErrorKind,
-    PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult, RemovalLogEvent,
-    RemovalLogRecord, RepositoryInspection, WorkspaceRemoval,
+    PreparedDataRootEvidence, PublishResult, RemovalLogEvent, RemovalLogRecord,
+    RepositoryInspection, WorkspaceRemoval,
 };
 
 const INSTANCE_ID: &str = "01890a5d-ac96-774b-bd5b-55c7b8d09f33";
@@ -118,18 +118,14 @@ fn fixed_control_root_rejects_unknown_content_before_and_after_preparation() {
 #[test]
 fn initializing_never_writes_a_marker_for_a_different_same_volume_path() {
     let temp = controlled_tempdir();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let control_root = temp.path().join("bootstrap");
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
     adapter.prepare_bootstrap().unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
         .unwrap();
-    let prepared_path = temp.path().join("prepared");
     let claimed_path = temp.path().join("claimed");
-    let prepared = adapter
-        .prepare_data_root(
-            &AbsolutePath::try_from_bytes(prepared_path.as_os_str().as_bytes().to_vec()).unwrap(),
-        )
-        .unwrap();
+    let (prepared, _) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
     let claimed = identity(&claimed_path, INSTANCE_ID, prepared.volume_id());
 
     let error = adapter
@@ -138,8 +134,8 @@ fn initializing_never_writes_a_marker_for_a_different_same_volume_path() {
         .expect("a different path on the same volume must not receive a marker");
 
     assert_eq!(error.kind(), PortErrorKind::Conflict);
-    assert_eq!(error.operation(), "validate prepared data root");
-    assert!(!prepared_path.join(".thinws-control.toml").exists());
+    assert_eq!(error.operation(), "validate prepared control root");
+    assert!(!control_root.join(".thinws-control.toml").exists());
     assert!(!claimed_path.join(".thinws-control.toml").exists());
 }
 
@@ -166,7 +162,7 @@ fn write_private(path: &Path, bytes: &[u8]) {
 fn p1_03_prepares_private_directories_and_descriptor_bound_layout() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("missing").join("bootstrap");
-    let data_root = temp.path().join("data-parent").join("data");
+    let data_root = bootstrap.clone();
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
 
     adapter.prepare_bootstrap().unwrap();
@@ -184,7 +180,7 @@ fn p1_03_prepares_private_directories_and_descriptor_bound_layout() {
         layout.database_path().as_bytes(),
         data_root.join("metadata/state.db").as_os_str().as_bytes()
     );
-    for directory in ["metadata", "logs", "workspaces", "staging", "trash"] {
+    for directory in ["metadata", "logs"] {
         assert_eq!(
             fs::metadata(data_root.join(directory))
                 .unwrap()
@@ -193,6 +189,9 @@ fn p1_03_prepares_private_directories_and_descriptor_bound_layout() {
                 & 0o7777,
             0o700
         );
+    }
+    for obsolete in ["workspaces", "staging", "trash"] {
+        assert!(!data_root.join(obsolete).exists());
     }
     assert_eq!(
         fs::metadata(data_root.join("metadata/state.db"))
@@ -210,232 +209,6 @@ fn p1_03_prepares_private_directories_and_descriptor_bound_layout() {
         .unwrap();
 }
 
-#[test]
-fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
-    let temp = controlled_tempdir();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
-    let data_root = temp.path().join("data");
-    adapter.prepare_bootstrap().unwrap();
-    let bootstrap_lock = adapter
-        .acquire_bootstrap(Duration::from_millis(500))
-        .unwrap();
-    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
-    let proof = adapter
-        .create_initializing(&bootstrap_lock, prepared, &identity)
-        .unwrap();
-    let layout = adapter.initialize_layout(&bootstrap_lock, &proof).unwrap();
-    adapter.publish_ready(&bootstrap_lock, proof).unwrap();
-    adapter.publish_config(&bootstrap_lock, &identity).unwrap();
-    drop(bootstrap_lock);
-    let lock = adapter
-        .acquire_data_root(identity.data_root(), Duration::from_millis(500))
-        .unwrap();
-    let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40").unwrap();
-    let workspace = adapter.prepare_workspace(&lock, &layout, id).unwrap();
-    let container = data_root.join("workspaces").join(id.to_string());
-    assert_eq!(
-        workspace.target_root().as_bytes(),
-        container.join("root").as_os_str().as_bytes()
-    );
-    workspace.revalidate().unwrap();
-    for relative in ["", ".state", "root"] {
-        assert_eq!(
-            fs::metadata(container.join(relative))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o7777,
-            0o700
-        );
-    }
-    assert_eq!(
-        fs::metadata(container.join(".state/incomplete"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777,
-        0o600
-    );
-    assert_eq!(
-        fs::metadata(
-            data_root
-                .join("metadata")
-                .join(format!("ownership-{id}.toml"))
-        )
-        .unwrap()
-        .permissions()
-        .mode()
-            & 0o7777,
-        0o600
-    );
-    let ownership_text = String::from_utf8(
-        fs::read(
-            data_root
-                .join("metadata")
-                .join(format!("ownership-{id}.toml")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let expected_target_hex = container
-        .join("root")
-        .as_os_str()
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    assert!(ownership_text.contains(&format!("target_path_hex = \"{expected_target_hex}\"")));
-    assert!(ownership_text.contains("target_parent_inode = "));
-    assert!(ownership_text.contains("target_inode = "));
-    assert!(!ownership_text.contains("container_inode = "));
-    assert_eq!(fs::read_dir(container.join("root")).unwrap().count(), 0);
-    assert!(adapter.prepare_workspace(&lock, &layout, id).is_err());
-    fs::set_permissions(container.join("root"), fs::Permissions::from_mode(0o750)).unwrap();
-    workspace.revalidate().unwrap();
-    adapter
-        .clear_workspace_incomplete(&lock, &layout, workspace)
-        .unwrap();
-    assert!(!container.join(".state/incomplete").exists());
-    assert!(container.join("root").is_dir());
-    assert_eq!(
-        fs::metadata(container.join("root"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777,
-        0o750
-    );
-    assert_eq!(
-        adapter
-            .validate_ready_workspace(&layout, id)
-            .unwrap()
-            .as_bytes(),
-        container.join("root").as_os_str().as_bytes()
-    );
-    let stale_marker = container.join(".state/incomplete");
-    fs::write(&stale_marker, b"incomplete").unwrap();
-    fs::set_permissions(&stale_marker, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-    fs::remove_file(&stale_marker).unwrap();
-    let ready_victim = temp.path().join("ready-victim");
-    private_dir(&ready_victim);
-    fs::remove_dir(container.join("root")).unwrap();
-    symlink(&ready_victim, container.join("root")).unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-
-    let second = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41").unwrap();
-    let wrong_scope = adapter
-        .acquire_bootstrap(Duration::from_millis(500))
-        .unwrap();
-    assert!(
-        adapter
-            .prepare_workspace(&wrong_scope, &layout, second)
-            .is_err()
-    );
-    assert!(
-        !data_root
-            .join("workspaces")
-            .join(second.to_string())
-            .exists()
-    );
-    drop(wrong_scope);
-
-    let prepared = adapter.prepare_workspace(&lock, &layout, second).unwrap();
-    let marker = data_root
-        .join("workspaces")
-        .join(second.to_string())
-        .join(".state/incomplete");
-    fs::remove_file(&marker).unwrap();
-    fs::write(&marker, b"foreign marker").unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(prepared.revalidate().is_err());
-    assert!(
-        adapter
-            .clear_workspace_incomplete(&lock, &layout, prepared)
-            .is_err()
-    );
-    assert_eq!(fs::read(&marker).unwrap(), b"foreign marker");
-
-    let third = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42").unwrap();
-    let prepared = adapter.prepare_workspace(&lock, &layout, third).unwrap();
-    let target = data_root
-        .join("workspaces")
-        .join(third.to_string())
-        .join("root");
-    let victim = temp.path().join("outside-root");
-    private_dir(&victim);
-    fs::write(victim.join("untouched"), b"keep").unwrap();
-    fs::remove_dir(&target).unwrap();
-    symlink(&victim, &target).unwrap();
-    assert!(prepared.revalidate().is_err());
-    assert!(
-        adapter
-            .clear_workspace_incomplete(&lock, &layout, prepared)
-            .is_err()
-    );
-    assert_eq!(fs::read(victim.join("untouched")).unwrap(), b"keep");
-    assert!(
-        data_root
-            .join("workspaces")
-            .join(third.to_string())
-            .join(".state/incomplete")
-            .exists()
-    );
-}
-
-#[test]
-fn p1_12_removes_only_a_proven_container_and_preserves_external_symlink_target() {
-    let temp = controlled_tempdir();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
-    let data_root = temp.path().join("data");
-    adapter.prepare_bootstrap().unwrap();
-    let bootstrap_lock = adapter
-        .acquire_bootstrap(Duration::from_millis(500))
-        .unwrap();
-    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
-    let proof = adapter
-        .create_initializing(&bootstrap_lock, prepared, &identity)
-        .unwrap();
-    let layout = adapter.initialize_layout(&bootstrap_lock, &proof).unwrap();
-    adapter.publish_ready(&bootstrap_lock, proof).unwrap();
-    adapter.publish_config(&bootstrap_lock, &identity).unwrap();
-    drop(bootstrap_lock);
-    let lock = adapter
-        .acquire_data_root(identity.data_root(), Duration::from_millis(500))
-        .unwrap();
-    let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41").unwrap();
-    let workspace = adapter.prepare_workspace(&lock, &layout, id).unwrap();
-    let container = data_root.join("workspaces").join(id.to_string());
-    let root = container.join("root");
-    let external = temp.path().join("external");
-    private_dir(&external);
-    fs::write(external.join("keep"), b"outside").unwrap();
-    fs::create_dir(root.join("nested")).unwrap();
-    fs::write(root.join("nested/file"), b"inside").unwrap();
-    symlink(&external, root.join("escape")).unwrap();
-    drop(workspace);
-
-    assert_eq!(
-        adapter.remove_workspace(&lock, &layout, id).unwrap(),
-        WorkspaceRemoval::Removed { root_entries: 3 }
-    );
-    assert!(!container.exists());
-    assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside");
-    assert!(
-        data_root
-            .join("metadata")
-            .join(format!("ownership-{id}.toml"))
-            .exists()
-    );
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::NotFound
-    );
-}
-
 fn removal_fixture() -> (
     TempDir,
     MacOsHostAdapter,
@@ -445,13 +218,13 @@ fn removal_fixture() -> (
     PathBuf,
 ) {
     let temp = controlled_tempdir();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
-    let data_root = temp.path().join("data");
+    let control_root = temp.path().join("data");
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
     adapter.prepare_bootstrap().unwrap();
     let bootstrap_lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
         .unwrap();
-    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
+    let (prepared, identity) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
     let proof = adapter
         .create_initializing(&bootstrap_lock, prepared, &identity)
         .unwrap();
@@ -463,208 +236,11 @@ fn removal_fixture() -> (
         .acquire_data_root(identity.data_root(), Duration::from_millis(500))
         .unwrap();
     let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42").unwrap();
-    let workspace = adapter.prepare_workspace(&lock, &layout, id).unwrap();
-    drop(workspace);
-    let container = data_root.join("workspaces").join(id.to_string());
-    (temp, adapter, layout, lock, id, container)
-}
-
-#[test]
-fn p1_12_rejects_replaced_root_and_container_without_touching_foreign_entries() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    let old_root = temp.path().join("original-root");
-    fs::rename(container.join("root"), &old_root).unwrap();
-    private_dir(&container.join("root"));
-    fs::write(container.join("root/foreign"), b"keep").unwrap();
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(container.join("root/foreign")).unwrap(), b"keep");
-    assert!(old_root.exists());
-
-    fs::remove_dir_all(container.join("root")).unwrap();
-    fs::rename(&old_root, container.join("root")).unwrap();
-    let old_container = temp.path().join("original-container");
-    fs::rename(&container, &old_container).unwrap();
-    private_dir(&container);
-    fs::write(container.join("foreign"), b"keep").unwrap();
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
-    assert!(old_container.join("root").exists());
-}
-
-#[test]
-fn p1_12_rejects_missing_proof_or_unrecognized_container_entry() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    fs::write(container.join("foreign"), b"keep").unwrap();
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
-    fs::remove_file(container.join("foreign")).unwrap();
-    fs::remove_file(
-        temp.path()
-            .join("data/metadata")
-            .join(format!("ownership-{id}.toml")),
-    )
-    .unwrap();
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert!(container.join("root").exists());
-}
-
-#[test]
-fn missing_registered_root_does_not_release_its_owned_container() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    fs::remove_dir(container.join("root")).unwrap();
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::NotFound
-    );
-    assert!(container.exists());
-    assert!(
-        temp.path()
-            .join("data/metadata")
-            .join(format!("ownership-{id}.toml"))
-            .exists()
-    );
-}
-
-#[test]
-fn p1_12_explicit_retry_cleans_proven_isolation_after_a_partial_delete() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    let nested = container.join("root/nested");
-    private_dir(&nested);
-    fs::write(nested.join("keep"), b"copy").unwrap();
-    fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
-
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::Io
-    );
-    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
-    assert!(!container.exists());
-    assert_eq!(
-        fs::read(isolated.join("root/nested/keep")).unwrap(),
-        b"copy"
-    );
-
-    fs::set_permissions(
-        isolated.join("root/nested"),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    assert_eq!(
-        adapter.remove_workspace(&lock, &layout, id).unwrap(),
-        WorkspaceRemoval::Removed { root_entries: 2 }
-    );
-    assert!(!isolated.exists());
-}
-
-#[test]
-fn p1_12_refuses_conflicting_active_and_isolated_containers() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
-    fs::rename(&container, &isolated).unwrap();
-    private_dir(&container);
-    fs::write(container.join("foreign"), b"keep").unwrap();
-
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
-    assert!(isolated.join("root").exists());
-}
-
-#[test]
-fn p1_12_refuses_a_replacement_in_the_isolated_location() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
-    let original = temp.path().join("original-container");
-    fs::rename(&container, &original).unwrap();
-    private_dir(&isolated);
-    fs::write(isolated.join("foreign"), b"keep").unwrap();
-
-    assert_eq!(
-        adapter
-            .remove_workspace(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(isolated.join("foreign")).unwrap(), b"keep");
-    assert!(original.join("root").exists());
-}
-
-#[test]
-fn p1_12_inspection_follows_the_single_proven_container_location() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    let active = adapter
-        .inspect_removal_container(&lock, &layout, id)
-        .unwrap()
+    let target = temp.path().join("clone");
+    adapter
+        .prepare_workspace(&lock, &layout, id, &absolute(&target))
         .unwrap();
-    assert_eq!(active.as_bytes(), container.as_os_str().as_bytes());
-
-    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
-    fs::rename(&container, &isolated).unwrap();
-    let staged = adapter
-        .inspect_removal_container(&lock, &layout, id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(staged.as_bytes(), isolated.as_os_str().as_bytes());
-
-    private_dir(&container);
-    fs::write(container.join("foreign"), b"keep").unwrap();
-    assert_eq!(
-        adapter
-            .inspect_removal_container(&lock, &layout, id)
-            .unwrap_err()
-            .kind(),
-        PortErrorKind::InvalidLayout
-    );
-    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
-    fs::remove_file(container.join("foreign")).unwrap();
-    fs::remove_dir(&container).unwrap();
-    fs::rename(&isolated, &container).unwrap();
-    assert_eq!(
-        adapter.remove_workspace(&lock, &layout, id).unwrap(),
-        WorkspaceRemoval::Removed { root_entries: 0 }
-    );
-    assert!(
-        adapter
-            .inspect_removal_container(&lock, &layout, id)
-            .unwrap()
-            .is_none()
-    );
+    (temp, adapter, layout, lock, id, target)
 }
 
 #[test]
@@ -700,8 +276,8 @@ fn p1_12_force_start_log_is_durable_and_outside_the_workspace_copy() {
     assert_eq!(value["event"], "started");
     assert_eq!(value["force"], true);
     assert_eq!(value["git_check_complete"], false);
-    assert!(container.join("root").exists());
-    assert!(!container.join("root/operations.jsonl").exists());
+    assert!(container.exists());
+    assert!(!container.join("operations.jsonl").exists());
 
     let repository = RepositoryInspection::new(
         PathBuf::from("lib\nstrange"),
@@ -962,108 +538,17 @@ fn p1_12_new_start_event_is_a_separate_jsonl_line_after_an_interrupted_tail() {
 }
 
 #[test]
-fn p1_12_does_not_report_removed_if_active_name_reappears_during_isolated_cleanup() {
-    let (temp, adapter, layout, lock, id, container) = removal_fixture();
-    for index in 0..2_000 {
-        fs::write(container.join("root").join(format!("{index:04}")), b"copy").unwrap();
-    }
-    let isolated = temp.path().join("data/trash").join(format!("remove-{id}"));
-    let concurrent_container = container.clone();
-    let writer = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !isolated.exists() {
-            assert!(Instant::now() < deadline, "Workspace was never isolated");
-            std::thread::yield_now();
-        }
-        private_dir(&concurrent_container);
-        fs::write(concurrent_container.join("foreign"), b"keep").unwrap();
-    });
-
-    let result = adapter.remove_workspace(&lock, &layout, id);
-    writer.join().unwrap();
-    assert_eq!(result.unwrap_err().kind(), PortErrorKind::InvalidLayout);
-    assert_eq!(fs::read(container.join("foreign")).unwrap(), b"keep");
-}
-
-#[test]
-fn p1_12_ready_validation_rejects_an_ordinary_replacement_root() {
-    let temp = controlled_tempdir();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
-    let data_root = temp.path().join("data");
-    adapter.prepare_bootstrap().unwrap();
-    let bootstrap_lock = adapter
-        .acquire_bootstrap(Duration::from_millis(500))
-        .unwrap();
-    let (prepared, identity) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
-    let proof = adapter
-        .create_initializing(&bootstrap_lock, prepared, &identity)
-        .unwrap();
-    let layout = adapter.initialize_layout(&bootstrap_lock, &proof).unwrap();
-    adapter.publish_ready(&bootstrap_lock, proof).unwrap();
-    adapter.publish_config(&bootstrap_lock, &identity).unwrap();
-    drop(bootstrap_lock);
-
-    let lock = adapter
-        .acquire_data_root(identity.data_root(), Duration::from_millis(500))
-        .unwrap();
-    let id = WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f45").unwrap();
-    let prepared = adapter.prepare_workspace(&lock, &layout, id).unwrap();
-    adapter
-        .clear_workspace_incomplete(&lock, &layout, prepared)
-        .unwrap();
-    let container = data_root.join("workspaces").join(id.to_string());
-    let root = container.join("root");
-    let ownership = data_root
-        .join("metadata")
-        .join(format!("ownership-{id}.toml"));
-    let ownership_bytes = fs::read(&ownership).unwrap();
-    fs::write(&ownership, b"not a valid ownership proof").unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-    fs::write(&ownership, &ownership_bytes).unwrap();
-    let displaced_ownership = data_root.join("metadata/displaced-ownership");
-    fs::rename(&ownership, &displaced_ownership).unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-    fs::rename(&displaced_ownership, &ownership).unwrap();
-    File::open(&root)
-        .unwrap()
-        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(946_684_800)))
-        .unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_ok());
-    fs::rename(&root, container.join("original-root")).unwrap();
-    private_dir(&root);
-    fs::write(root.join("foreign-content"), b"must survive").unwrap();
-
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-    assert_eq!(
-        fs::read(root.join("foreign-content")).unwrap(),
-        b"must survive"
-    );
-
-    fs::rename(&container, data_root.join("workspaces/original-container")).unwrap();
-    private_dir(&container);
-    private_dir(&container.join(".state"));
-    private_dir(&container.join("root"));
-    fs::write(container.join("root/another-foreign-content"), b"keep").unwrap();
-    assert!(adapter.validate_ready_workspace(&layout, id).is_err());
-    assert_eq!(
-        fs::read(container.join("root/another-foreign-content")).unwrap(),
-        b"keep"
-    );
-}
-
-#[test]
 fn p1_03_rejects_nonempty_or_replaced_prepared_roots_without_writing_a_marker() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
     let nonempty = temp.path().join("nonempty");
     private_dir(&nonempty);
     fs::write(nonempty.join("owned-by-user"), b"preserve").unwrap();
-    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
-    adapter.prepare_bootstrap().unwrap();
+    let nonempty_adapter = MacOsHostAdapter::new(&nonempty).unwrap();
     let nonempty_path =
         AbsolutePath::try_from_bytes(nonempty.as_os_str().as_bytes().to_vec()).unwrap();
     assert_eq!(
-        adapter
+        nonempty_adapter
             .prepare_data_root(&nonempty_path)
             .err()
             .unwrap()
@@ -1075,8 +560,9 @@ fn p1_03_rejects_nonempty_or_replaced_prepared_roots_without_writing_a_marker() 
         b"preserve"
     );
 
-    let data_root = temp.path().join("data");
-    private_dir(&data_root);
+    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    adapter.prepare_bootstrap().unwrap();
+    let data_root = bootstrap.clone();
     let (prepared, expected) = prepared_identity(&adapter, &data_root, INSTANCE_ID);
     let displaced = temp.path().join("displaced");
     fs::rename(&data_root, &displaced).unwrap();
@@ -1097,7 +583,7 @@ fn p1_03_rejects_nonempty_or_replaced_prepared_roots_without_writing_a_marker() 
 fn p1_03_rechecks_prepared_root_emptiness_before_publishing_the_marker() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     adapter.prepare_bootstrap().unwrap();
     let lock = adapter
@@ -1123,9 +609,8 @@ fn p1_03_rechecks_prepared_root_emptiness_before_publishing_the_marker() {
 fn p1_03_layout_evidence_detects_data_root_replacement() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     private_dir(&bootstrap);
-    private_dir(&data_root);
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
@@ -1150,7 +635,7 @@ fn p1_03_layout_evidence_detects_data_root_replacement() {
 fn p1_03_layout_evidence_detects_database_entry_rename() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     adapter.prepare_bootstrap().unwrap();
     let lock = adapter
@@ -1178,9 +663,8 @@ fn p1_03_layout_evidence_detects_database_entry_rename() {
 fn bootstrap_documents_publish_in_one_direction_with_exact_idempotence() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     private_dir(&bootstrap);
-    private_dir(&data_root);
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
@@ -1254,26 +738,21 @@ fn bootstrap_documents_publish_in_one_direction_with_exact_idempotence() {
 #[test]
 fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
     let temp = controlled_tempdir();
-    let bootstrap = temp.path().join("bootstrap");
-    let first_root = temp.path().join("first");
-    let second_root = temp.path().join("second");
-    private_dir(&bootstrap);
-    private_dir(&first_root);
-    private_dir(&second_root);
-    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let control_root = temp.path().join("bootstrap");
+    private_dir(&control_root);
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
         .unwrap();
-
-    let (first_prepared, first) = prepared_identity(&adapter, &first_root, INSTANCE_ID);
+    let (prepared, identity) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
     let proof = adapter
-        .create_initializing(&lock, first_prepared, &first)
+        .create_initializing(&lock, prepared, &identity)
         .unwrap();
-    let marker_path = first_root.join(".thinws-control.toml");
-    let displaced = first_root.join("displaced-marker");
+    let marker_path = control_root.join(".thinws-control.toml");
+    let displaced = control_root.join("displaced-marker");
     fs::rename(&marker_path, &displaced).unwrap();
     let replacement = encoded_marker(
-        &identity(&first_root, OTHER_INSTANCE_ID, first.volume_id()),
+        &self::identity(&control_root, OTHER_INSTANCE_ID, identity.volume_id()),
         "ready",
     );
     write_private(&marker_path, &replacement);
@@ -1284,27 +763,34 @@ fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
     ));
     assert_eq!(fs::read(&marker_path).unwrap(), replacement);
 
-    let (second_prepared, second) = prepared_identity(&adapter, &second_root, INSTANCE_ID);
-    let existing = encoded_marker(&second, "initializing");
+    let second = controlled_tempdir();
+    let second_root = second.path().join("bootstrap");
+    private_dir(&second_root);
+    let other = MacOsHostAdapter::new(&second_root).unwrap();
+    let existing = encoded_marker(
+        &self::identity(&second_root, INSTANCE_ID, identity.volume_id()),
+        "initializing",
+    );
     write_private(&second_root.join(".thinws-control.toml"), &existing);
-    let error = adapter
-        .create_initializing(&lock, second_prepared, &second)
-        .err()
-        .unwrap();
-    assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+    assert_eq!(
+        other
+            .prepare_data_root(&absolute(&second_root))
+            .err()
+            .unwrap()
+            .kind(),
+        PortErrorKind::NotEmpty,
+    );
     assert_eq!(
         fs::read(second_root.join(".thinws-control.toml")).unwrap(),
         existing
     );
 }
-
 #[test]
 fn an_in_place_modified_initializing_marker_cannot_be_promoted() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     private_dir(&bootstrap);
-    private_dir(&data_root);
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
@@ -1329,10 +815,9 @@ fn an_in_place_modified_initializing_marker_cannot_be_promoted() {
 fn an_initializing_marker_moved_into_a_replacement_data_root_cannot_be_promoted() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
+    let data_root = bootstrap.clone();
     let displaced_root = temp.path().join("displaced-data");
     private_dir(&bootstrap);
-    private_dir(&data_root);
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
@@ -1360,50 +845,39 @@ fn an_initializing_marker_moved_into_a_replacement_data_root_cannot_be_promoted(
 }
 
 #[test]
-fn an_existing_config_conflicts_even_when_the_requested_root_marker_is_ready() {
+fn an_existing_config_rejects_a_different_instance_on_the_same_control_root() {
     let temp = controlled_tempdir();
-    let bootstrap = temp.path().join("bootstrap");
-    let first_root = temp.path().join("first");
-    let second_root = temp.path().join("second");
-    private_dir(&bootstrap);
-    private_dir(&first_root);
-    private_dir(&second_root);
-    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let control_root = temp.path().join("bootstrap");
+    private_dir(&control_root);
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
     let lock = adapter
         .acquire_bootstrap(Duration::from_millis(500))
         .unwrap();
-
-    let (first_prepared, first) = prepared_identity(&adapter, &first_root, INSTANCE_ID);
-    let first_proof = adapter
-        .create_initializing(&lock, first_prepared, &first)
+    let (prepared, first) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
+    let proof = adapter
+        .create_initializing(&lock, prepared, &first)
         .unwrap();
-    adapter.publish_ready(&lock, first_proof).unwrap();
+    adapter.publish_ready(&lock, proof).unwrap();
     adapter.publish_config(&lock, &first).unwrap();
 
-    let (second_prepared, second) = prepared_identity(&adapter, &second_root, OTHER_INSTANCE_ID);
-    let second_proof = adapter
-        .create_initializing(&lock, second_prepared, &second)
-        .unwrap();
-    adapter.publish_ready(&lock, second_proof).unwrap();
-    let first_config = fs::read(bootstrap.join("config.toml")).unwrap();
+    let second = identity(&control_root, OTHER_INSTANCE_ID, first.volume_id());
+    let first_config = fs::read(control_root.join("config.toml")).unwrap();
     let error = adapter.publish_config(&lock, &second).unwrap_err();
     assert_eq!(
         error.conflict_kind(),
         Some(PortConflict::InstallationIdentity)
     );
     assert_eq!(
-        fs::read(bootstrap.join("config.toml")).unwrap(),
+        fs::read(control_root.join("config.toml")).unwrap(),
         first_config
     );
 }
-
 #[test]
 fn leaf_symlinks_and_a_guard_from_another_adapter_fail_without_touching_targets() {
     let temp = controlled_tempdir();
     let bootstrap = temp.path().join("bootstrap");
-    let root = temp.path().join("data");
+    let root = bootstrap.clone();
     private_dir(&bootstrap);
-    private_dir(&root);
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     let other = MacOsHostAdapter::new(&bootstrap).unwrap();
     let lock = adapter

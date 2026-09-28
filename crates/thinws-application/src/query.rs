@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 use thinws_core::{
-    AbsolutePath, ErrorCode, WorkspaceId, WorkspaceName, WorkspaceRecord, WorkspaceState,
+    AbsolutePath, ErrorCode, WorkspaceName, WorkspaceRecord, WorkspaceReservation, WorkspaceState,
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, FinalMaterializationSummary, GitInspection,
@@ -126,11 +126,11 @@ where
         // equal records therefore imply equal validated paths.
         if current != workspace {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "Ready Workspace changed during Git inspection",
             ));
         }
-        let space = self.measure_workspace_space(current.record().reservation().workspace_id())?;
+        let space = self.measure_workspace_space(current.record().reservation())?;
         // The read-only space scan can also outlive a concurrent lifecycle
         // mutation; recheck before returning a usable Ready path.
         let (after_space, after_space_path) = self.inspect_workspace(&name)?;
@@ -143,7 +143,7 @@ where
         };
         if after_space != current {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "Ready Workspace changed during space scan",
             ));
         }
@@ -156,7 +156,7 @@ where
 
     fn measure_workspace_space(
         &self,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<WorkspaceSpace, UseCaseError> {
         let identity = self
             .bootstrap
@@ -171,10 +171,10 @@ where
         let layout = self
             .bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
         self.bootstrap
-            .measure_ready_workspace_space(&layout, workspace_id)
+            .measure_ready_workspace_space(&layout, reservation)
             .map_err(|error| map_port(Stage::Layout, error))
     }
 
@@ -200,15 +200,15 @@ where
         let layout = self
             .bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
         let path = self
             .bootstrap
-            .validate_ready_workspace(&layout, workspace.record().reservation().workspace_id())
+            .validate_ready_workspace(&layout, workspace.record().reservation())
             .map_err(|error| map_port(Stage::Layout, error))?;
         if &path != workspace.record().reservation().target_path() {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "Ready Workspace path does not match metadata",
             ));
         }
@@ -221,7 +221,7 @@ where
         }
         if current != workspace {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "Ready Workspace changed during path verification",
             ));
         }

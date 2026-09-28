@@ -153,7 +153,7 @@ Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCode
 
 文件克隆、reflink、OverlayFS 和 Full Copy 不是同一能力的不同名称。它们对同卷、挂载、可移植性、回收和证据的语义不同，因此必须通过统一 Port 暴露事实，不能把所有平台压成一个 `supported` 布尔值。
 
-跨卷支持由“本次 source/target 组合＋具体 Adapter＋当前产品政策”共同决定。CoW/reflink 类后端通常要求同卷或同文件系统；Full Copy 底层可能跨卷，但产品可以施加更严格的数据根边界。
+跨卷支持由“本次 source/target 组合＋具体 Adapter＋当前产品政策”共同决定。CoW/reflink 类后端通常要求同卷或同文件系统；Full Copy 底层可能跨卷，但产品可以施加更严格的布局边界。
 
 ### 5.2 Phase 1 决策
 

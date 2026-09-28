@@ -1037,13 +1037,13 @@ fn open(path: &std::path::Path) -> SqliteMetadataStore {
 }
 
 #[test]
-fn empty_database_is_migrated_atomically_and_reopens_with_required_settings() {
+fn empty_database_is_initialized_atomically_and_reopens_with_required_settings() {
     let temp = controlled_tempdir();
     let path = temp.path().join("state.db");
     let expected = installation();
 
     let store = SqliteMetadataStore::open(&path, &expected, Duration::from_millis(1_234))
-        .expect("an empty path initializes schema v1");
+        .expect("an empty path initializes schema v2");
     let settings = store.connection_settings().expect("settings are queryable");
     assert_eq!(settings.journal_mode, "wal");
     assert_eq!(settings.synchronous, 2);
@@ -1069,7 +1069,7 @@ fn empty_database_is_migrated_atomically_and_reopens_with_required_settings() {
         UnixMillis::new(expected.created_at().get() + 99).unwrap(),
     );
     let reopened = SqliteMetadataStore::open(&path, &later_request, Duration::from_millis(500))
-        .expect("the same identity reopens schema v1");
+        .expect("the same identity reopens schema v2");
     assert_eq!(reopened.installation(), &expected);
 }
 

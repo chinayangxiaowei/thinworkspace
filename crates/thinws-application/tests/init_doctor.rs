@@ -66,6 +66,14 @@ impl PreparedWorkspaceEvidence for FakePreparedWorkspace {
         unreachable!("init/doctor never prepares a Workspace")
     }
 
+    fn staging_root(&self) -> &AbsolutePath {
+        unreachable!("init/doctor never prepares a Workspace")
+    }
+
+    fn trash_root(&self) -> &AbsolutePath {
+        unreachable!("init/doctor never prepares a Workspace")
+    }
+
     fn target_identity(&self) -> thinws_core::FileIdentity {
         unreachable!("init/doctor never inspects a prepared Workspace")
     }
@@ -245,6 +253,7 @@ impl BootstrapStore for FakeBootstrap {
         _lock: &Self::LockGuard,
         _layout: &Self::DataRootLayout,
         _workspace_id: WorkspaceId,
+        _target: &AbsolutePath,
     ) -> Result<Self::PreparedWorkspace, PortError> {
         unreachable!("init/doctor never prepares a Workspace")
     }
@@ -261,7 +270,7 @@ impl BootstrapStore for FakeBootstrap {
     fn validate_ready_workspace(
         &self,
         _layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<AbsolutePath, PortError> {
         self.state.borrow_mut().events.push("workspace.validate");
         let record = self
@@ -269,7 +278,7 @@ impl BootstrapStore for FakeBootstrap {
             .borrow()
             .workspaces
             .iter()
-            .find(|record| record.reservation().workspace_id() == workspace_id)
+            .find(|record| record.reservation().workspace_id() == reservation.workspace_id())
             .cloned()
             .expect("controlled Ready fixture");
         if self.state.borrow().change_ready_during_validation {
@@ -281,7 +290,7 @@ impl BootstrapStore for FakeBootstrap {
     fn measure_ready_workspace_space(
         &self,
         _layout: &Self::DataRootLayout,
-        _workspace_id: WorkspaceId,
+        _reservation: &WorkspaceReservation,
     ) -> Result<thinws_ports::WorkspaceSpace, PortError> {
         self.state
             .borrow_mut()
@@ -300,7 +309,7 @@ impl BootstrapStore for FakeBootstrap {
         &self,
         _lock: &Self::LockGuard,
         _layout: &Self::DataRootLayout,
-        _workspace_id: WorkspaceId,
+        _reservation: &WorkspaceReservation,
     ) -> Result<Option<AbsolutePath>, PortError> {
         unreachable!("init/doctor never inspects a removal container")
     }
@@ -318,7 +327,7 @@ impl BootstrapStore for FakeBootstrap {
         &self,
         _lock: &Self::LockGuard,
         _layout: &Self::DataRootLayout,
-        _workspace_id: WorkspaceId,
+        _reservation: &WorkspaceReservation,
     ) -> Result<thinws_ports::WorkspaceRemoval, PortError> {
         unreachable!("init/doctor never removes a Workspace")
     }

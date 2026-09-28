@@ -27,8 +27,8 @@ use thinws_core::{
 };
 use thinws_ports::{
     BootstrapStore, DataRootLayoutEvidence, GitInspection, LifecycleLock, LifecycleLockGuard,
-    MaterializationPathRole, MetadataSnapshot, MetadataStoreFactory, PortError, PortErrorKind,
-    PreparedDataRootEvidence,
+    MaterializationPathRole, MetadataSnapshot, MetadataStoreFactory, PortConflict, PortError,
+    PortErrorKind, PreparedDataRootEvidence,
 };
 
 /// Public initialization request after CLI path validation.
@@ -44,7 +44,7 @@ impl InitRequest {
         let data_root = AbsolutePath::try_from_bytes(data_root).map_err(|_| {
             semantic_error(
                 ErrorCode::Usage,
-                "data root must be a canonical absolute path",
+                "control root must be a canonical absolute path",
             )
         })?;
         let now = UnixMillis::new(now_ms).map_err(|_| {
@@ -59,7 +59,7 @@ impl InitRequest {
         Self { data_root, now }
     }
 
-    /// Returns the requested canonical data-root path.
+    /// Returns the requested canonical control-root path.
     #[must_use]
     pub const fn data_root(&self) -> &AbsolutePath {
         &self.data_root
@@ -440,7 +440,7 @@ where
             }
             _ => Err(semantic_error(
                 ErrorCode::ControlLayout,
-                "data-root marker is missing, incomplete, or inconsistent",
+                "control-root marker is missing, incomplete, or inconsistent",
             )),
         }
     }
@@ -477,20 +477,22 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
     let code = match error.kind() {
         PortErrorKind::Timeout => ErrorCode::LockTimeout,
         PortErrorKind::CapabilityUnavailable => ErrorCode::CapabilityUnavailable,
+        PortErrorKind::Conflict if error.conflict_kind() == Some(PortConflict::TargetPath) => {
+            ErrorCode::TargetConflict
+        }
         PortErrorKind::NotEmpty if matches!(stage, Stage::Control) => ErrorCode::ControlNotEmpty,
+        PortErrorKind::NotEmpty if matches!(stage, Stage::Layout) => ErrorCode::TargetExists,
         PortErrorKind::Unavailable
             if matches!(stage, Stage::Source)
                 || error.materialization_path_role() == Some(MaterializationPathRole::Source) =>
         {
             ErrorCode::Filesystem
         }
-        PortErrorKind::Unavailable if matches!(stage, Stage::Control) => {
-            ErrorCode::ControlUnavailable
-        }
-        PortErrorKind::Unavailable => ErrorCode::DataRootUnavailable,
+        PortErrorKind::Unavailable if matches!(stage, Stage::Layout) => ErrorCode::TargetLayout,
+        PortErrorKind::Unavailable => ErrorCode::ControlUnavailable,
         PortErrorKind::InvalidLayout if matches!(stage, Stage::Control) => ErrorCode::ControlLayout,
         PortErrorKind::InvalidLayout if matches!(stage, Stage::Metadata) => ErrorCode::Metadata,
-        PortErrorKind::InvalidLayout => ErrorCode::DataRootLayout,
+        PortErrorKind::InvalidLayout => ErrorCode::TargetLayout,
         PortErrorKind::Io => ErrorCode::Filesystem,
         _ if matches!(stage, Stage::Metadata) => ErrorCode::Metadata,
         PortErrorKind::Conflict
@@ -507,7 +509,7 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         | PortErrorKind::NotFound
             if matches!(stage, Stage::Layout) =>
         {
-            ErrorCode::DataRootLayout
+            ErrorCode::TargetLayout
         }
         _ => ErrorCode::Filesystem,
     };
@@ -517,8 +519,9 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         ErrorCode::ControlNotEmpty => "control directory is not empty",
         ErrorCode::ControlUnavailable => "fixed control directory is unavailable",
         ErrorCode::ControlLayout => "control directory identity or layout is invalid",
-        ErrorCode::DataRootUnavailable => "registered data root is unavailable",
-        ErrorCode::DataRootLayout => "data-root identity or layout is invalid",
+        ErrorCode::TargetLayout => "target path, volume, or ownership layout is invalid",
+        ErrorCode::TargetConflict => "target path belongs to another active Workspace",
+        ErrorCode::TargetExists => "target path already exists",
         ErrorCode::Metadata => "metadata database validation failed",
         _ => "filesystem operation failed",
     };
@@ -541,12 +544,12 @@ fn semantic_error(code: ErrorCode, message: &'static str) -> UseCaseError {
 
 #[cfg(test)]
 mod probe_error_tests {
-    use thinws_ports::{MaterializationPathRole, PortError, PortErrorKind};
+    use thinws_ports::{MaterializationPathRole, PortConflict, PortError, PortErrorKind};
 
     use super::{ErrorCode, Stage, map_port};
 
     #[test]
-    fn combined_source_failure_is_not_labeled_as_data_root_failure() {
+    fn combined_source_failure_is_not_labeled_as_target_failure() {
         let source = PortError::new(PortErrorKind::Unavailable, "open source path")
             .with_materialization_path_role(MaterializationPathRole::Source);
         assert_eq!(
@@ -557,7 +560,7 @@ mod probe_error_tests {
             .with_materialization_path_role(MaterializationPathRole::TargetRoot);
         assert_eq!(
             map_port(Stage::Layout, target).diagnostic().code(),
-            ErrorCode::DataRootUnavailable
+            ErrorCode::TargetLayout
         );
     }
 
@@ -592,7 +595,17 @@ mod probe_error_tests {
             (
                 Stage::Layout,
                 PortErrorKind::NotEmpty,
+                ErrorCode::TargetExists,
+            ),
+            (
+                Stage::Source,
+                PortErrorKind::NotEmpty,
                 ErrorCode::Filesystem,
+            ),
+            (
+                Stage::Lock,
+                PortErrorKind::Unavailable,
+                ErrorCode::ControlUnavailable,
             ),
         ]
         .into_iter()
@@ -639,14 +652,20 @@ mod probe_error_tests {
             (
                 Stage::Layout,
                 PortErrorKind::Unavailable,
-                ErrorCode::DataRootUnavailable,
-                "registered data root is unavailable",
+                ErrorCode::TargetLayout,
+                "target path, volume, or ownership layout is invalid",
             ),
             (
                 Stage::Layout,
                 PortErrorKind::InvalidLayout,
-                ErrorCode::DataRootLayout,
-                "data-root identity or layout is invalid",
+                ErrorCode::TargetLayout,
+                "target path, volume, or ownership layout is invalid",
+            ),
+            (
+                Stage::Layout,
+                PortErrorKind::NotEmpty,
+                ErrorCode::TargetExists,
+                "target path already exists",
             ),
             (
                 Stage::Metadata,
@@ -660,5 +679,18 @@ mod probe_error_tests {
             assert_eq!(error.diagnostic().message(), message);
             assert_eq!(error.to_string(), error.diagnostic().to_string());
         }
+    }
+
+    #[test]
+    fn target_path_conflict_keeps_its_code_and_message() {
+        let error = map_port(
+            Stage::Metadata,
+            PortError::conflict("target uniqueness constraint", PortConflict::TargetPath),
+        );
+        assert_eq!(error.diagnostic().code(), ErrorCode::TargetConflict);
+        assert_eq!(
+            error.diagnostic().message(),
+            "target path belongs to another active Workspace"
+        );
     }
 }

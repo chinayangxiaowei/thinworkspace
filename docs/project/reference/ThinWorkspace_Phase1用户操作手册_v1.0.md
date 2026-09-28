@@ -38,7 +38,7 @@ thinws doctor
 
 init 只建立固定的用户控制目录 `~/.thinws`；已完整初始化且身份一致时重复执行幂等。中断初始化留下的非空未归属控制目录不自动接管，需用户核对后在平台之外显式处理。没有 `--data-root`、reset 或 migrate。
 
-配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在 `~/.thinws`，不通过环境变量切换。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。控制目录所在卷不决定工作区目标卷。
+配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在本次运行识别的 home 目录下的 `~/.thinws`；首版要求该控制目录所在卷也是 APFS，但可以与 source/target 使用不同的 APFS 卷。没有 `--data-root` 或 ThinWorkspace 专用环境变量来另选控制目录。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。控制目录所在卷不决定工作区目标卷。
 
 doctor 对 ThinWorkspace 产品状态只读，报告主机、控制目录、未完成工作区与 Git 检查是否可用。它不修改配置、控制目录归属标记、主数据库、schema 或 Workspace 记录；SQLite 读取 WAL 数据库时可能管理同目录的 `state.db-wal`/`state.db-shm` 协调文件，因此该承诺不是文件系统字节零变化。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 
@@ -77,7 +77,7 @@ Incomplete workspaces: 0
 Git check:           available
 ```
 
-doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`host.platform`、`host.architecture`、`instance_id`、`control_root`、`control_root_hex`、`incomplete_workspaces`，以及 `git_check={"available":true,"reason":null}`。`available` 表示公开状态命令已接入 Git 检查，不保证当前系统 Git 或某个仓库可安全查询；实际查询失败由 status 的 `git.state=unknown` 和原因表达。`incomplete_workspaces` 统计已登记但非 Ready 的活动 Workspace；大于零是诊断事实，不使本次只读 doctor 失败。未初始化返回 E_NOT_INITIALIZED；非空未归属控制目录返回 E_CONTROL_NOT_EMPTY；控制目录缺失或不可访问返回 E_CONTROL_UNAVAILABLE；实例身份、权限、受控布局或控制目录标记仍处于 initializing 返回 E_CONTROL_LAYOUT；SQLite/schema 失败返回 E_METADATA；锁等待仍为 E_LOCK_TIMEOUT。
+doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`host.platform`、`host.architecture`、`instance_id`、`control_root`、`control_root_hex`、`incomplete_workspaces`，以及 `git_check={"available":true,"reason":null}`。`available` 表示公开状态命令已接入 Git 检查，不保证当前系统 Git 或某个仓库可安全查询；实际查询失败由 status 的 `git.state=unknown` 和原因表达。`incomplete_workspaces` 统计已登记但非 Ready 的活动 Workspace；大于零是诊断事实，不使本次只读 doctor 失败。未发现配置时，doctor 返回 E_NOT_INITIALIZED；init 遇到非空未归属控制目录时返回 E_CONTROL_NOT_EMPTY。已登记控制目录在校验期间消失或其路径不可访问时返回 E_CONTROL_UNAVAILABLE；实例身份、权限、受控布局或控制目录标记仍处于 initializing 返回 E_CONTROL_LAYOUT；SQLite/schema 失败返回 E_METADATA；锁等待仍为 E_LOCK_TIMEOUT。
 
 ## 四、原始目录镜像
 

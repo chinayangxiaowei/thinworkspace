@@ -80,8 +80,8 @@ pub struct CreatePreviewView {
     pub name: String,
     /// Lossless canonical source path.
     pub source: Vec<u8>,
-    /// Existing controlled parent for a future ID-derived target.
-    pub target_parent: Vec<u8>,
+    /// Lossless user-specified final target path.
+    pub target: Vec<u8>,
     /// Source APFS Volume UUID.
     pub source_volume_id: String,
     /// Target APFS Volume UUID.
@@ -231,6 +231,7 @@ pub trait Commands {
     fn create(
         &self,
         source: Vec<u8>,
+        target: Vec<u8>,
         name: String,
         allow_copy: bool,
         dry_run: bool,
@@ -337,12 +338,13 @@ impl Commands for LocalCommands {
     fn create(
         &self,
         source: Vec<u8>,
+        target: Vec<u8>,
         name: String,
         allow_copy: bool,
         dry_run: bool,
         now_ms: i64,
     ) -> Result<CreateView, ErrorView> {
-        let request = CreateRequest::try_from_raw(source, &name, allow_copy, now_ms)
+        let request = CreateRequest::try_from_raw(source, target, &name, allow_copy, now_ms)
             .map_err(use_case_error_view)?;
         let adapter = self.adapter()?;
         let service = ThinWorkspaceService::new(
@@ -358,7 +360,7 @@ impl Commands for LocalCommands {
             Ok(CreateView::Preview(CreatePreviewView {
                 name: request.name().to_string(),
                 source: request.source().as_bytes().to_vec(),
-                target_parent: preview.target_parent().as_bytes().to_vec(),
+                target: request.target().as_bytes().to_vec(),
                 source_volume_id: preview.source_volume_id().to_string(),
                 target_volume_id: preview.target_volume_id().to_string(),
                 effective_mode: mode_name(preview.effective_mode()).to_owned(),
@@ -646,6 +648,7 @@ where
             command:
                 WorkspaceCommand::Create {
                     source,
+                    target,
                     name,
                     allow_copy,
                     dry_run,
@@ -653,6 +656,7 @@ where
         } => commands
             .create(
                 source.as_os_str().as_bytes().to_vec(),
+                target.as_os_str().as_bytes().to_vec(),
                 name,
                 allow_copy,
                 dry_run,
@@ -715,9 +719,12 @@ enum Command {
 enum WorkspaceCommand {
     /// Mirrors one source directory into a new ordinary Workspace path.
     Create {
-        /// Canonical absolute source directory on the data-root APFS volume.
+        /// Canonical absolute source directory on an APFS volume.
         #[arg(long)]
         source: PathBuf,
+        /// Canonical absolute final target directory; its last component must not exist.
+        #[arg(long)]
+        target: PathBuf,
         /// Unique Workspace name.
         #[arg(long)]
         name: String,
@@ -845,10 +852,9 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
             writeln!(output, "Name:            {}", view.name)?;
             output.write_all(b"Source:          ")?;
             output.write_all(&view.source)?;
-            output.write_all(b"\nTarget parent:   ")?;
-            output.write_all(&view.target_parent)?;
+            output.write_all(b"\nTarget:          ")?;
+            output.write_all(&view.target)?;
             output.write_all(b"\n")?;
-            writeln!(output, "Target mode:     ID-derived under target parent")?;
             writeln!(output, "Source volume:   {}", view.source_volume_id)?;
             writeln!(output, "Target volume:   {}", view.target_volume_id)?;
             writeln!(output, "Planned mode:    {}", view.effective_mode)?;
@@ -1015,9 +1021,8 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
             "name": view.name,
             "source": String::from_utf8_lossy(&view.source),
             "source_hex": hex(&view.source),
-            "target_parent": String::from_utf8_lossy(&view.target_parent),
-            "target_parent_hex": hex(&view.target_parent),
-            "target_path_mode": "id-derived-under-target-parent",
+            "target": String::from_utf8_lossy(&view.target),
+            "target_hex": hex(&view.target),
             "source_volume_id": view.source_volume_id,
             "target_volume_id": view.target_volume_id,
             "same_volume": view.source_volume_id == view.target_volume_id,
@@ -1273,8 +1278,9 @@ fn exit_status(code: &str) -> i32 {
         ("E_CONTROL_UNAVAILABLE", 32),
         ("E_CONTROL_LAYOUT", 39),
         ("E_CONTROL_NOT_EMPTY", 36),
-        ("E_DATA_ROOT_UNAVAILABLE", 32),
-        ("E_DATA_ROOT_LAYOUT", 33),
+        ("E_TARGET_LAYOUT", 33),
+        ("E_TARGET_CONFLICT", 42),
+        ("E_TARGET_EXISTS", 43),
         ("E_METADATA", 35),
         ("E_TARGET_MISSING", 37),
         ("E_TARGET_IDENTITY", 38),

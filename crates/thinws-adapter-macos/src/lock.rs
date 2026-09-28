@@ -71,6 +71,12 @@ impl LifecycleLock for MacOsHostAdapter {
         data_root: &AbsolutePath,
         timeout: Duration,
     ) -> Result<Self::Guard, PortError> {
+        if path_from_absolute(data_root) != self.bootstrap_dir {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "lock fixed control root",
+            ));
+        }
         acquire(
             self,
             path_from_absolute(data_root),

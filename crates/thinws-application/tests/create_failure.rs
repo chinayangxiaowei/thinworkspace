@@ -24,6 +24,32 @@ fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
 }
 
+fn make_request(
+    source: AbsolutePath,
+    name: WorkspaceName,
+    allow_copy: bool,
+    now: UnixMillis,
+) -> CreateRequest {
+    let bytes = source.as_bytes();
+    let parent_end = bytes.iter().rposition(|byte| *byte == b'/').unwrap();
+    let mut target = if parent_end == 0 {
+        b"/".to_vec()
+    } else {
+        bytes[..parent_end].to_vec()
+    };
+    if target != b"/" {
+        target.push(b'/');
+    }
+    target.extend_from_slice(format!("thinws-test-{}", name.as_str()).as_bytes());
+    CreateRequest::new(
+        source,
+        AbsolutePath::try_from_bytes(target).unwrap(),
+        name,
+        allow_copy,
+        now,
+    )
+}
+
 struct FailMetadataFactory {
     fail_final_commit: bool,
     fail_record_failure: bool,
@@ -174,7 +200,7 @@ fn final_metadata_commit_failure_never_publishes_ready_even_after_clone() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file.txt"), b"cloned but not ready").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         FailMetadataFactory {
@@ -192,7 +218,7 @@ fn final_metadata_commit_failure_never_publishes_ready_even_after_clone() {
         .unwrap();
     let clone = ApfsCloneMaterializer::new(adapter.clone());
     let copy = FullCopyMaterializer::new(adapter);
-    let request = CreateRequest::new(
+    let request = make_request(
         absolute(&source),
         WorkspaceName::from_str("commit-failure").unwrap(),
         false,
@@ -201,10 +227,8 @@ fn final_metadata_commit_failure_never_publishes_ready_even_after_clone() {
     let error = service.create(request.clone(), &clone, &copy).unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::Metadata);
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 1);
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        1
-    );
+    assert!(temp.path().join("thinws-test-commit-failure").is_dir());
+    assert!(!data_root.join("workspaces").exists());
     let repeated = service.create(request, &clone, &copy).unwrap_err();
     assert_eq!(repeated.diagnostic().code(), ErrorCode::WorkspaceIncomplete);
 }
@@ -254,7 +278,7 @@ fn failure_state_commit_error_retains_partial_receipt_diagnostics() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file.txt"), b"source").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         FailMetadataFactory {
@@ -272,7 +296,7 @@ fn failure_state_commit_error_retains_partial_receipt_diagnostics() {
         .unwrap();
     let error = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("double-failure").unwrap(),
                 false,

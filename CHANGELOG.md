@@ -21,10 +21,10 @@
 - 增加商业授权申请说明和公开联系渠道。
 - 增加只读 Host/Path Probe 技术实验及固定 Rust/质量工具链，验证 APFS 卷身份、路径重验和候选后端预检；仅为 Phase 0 实验，不是已发布的 `thinws` 产品能力。
 - 增加 APFS 物化技术实验、真实双卷与失败回滚测试，以及布局策略 fuzz：验证同卷 clone、跨卷拒绝、独立 Full Copy 和显式降级的证据边界；仍为 Phase 0 实验，不提供 Phase 1 CLI。
-- 增加首批 Phase 1 单机 CLI：`thinws init` 在 APFS 上建立或幂等验证私有 data root，`thinws doctor` 以只读产品状态检查实例、受控布局、SQLite 元数据和未完成工作区数量，并提供稳定的人类/JSON 输出及退出码。
+- 增加首批 Phase 1 单机 CLI：`thinws init` 建立或幂等验证固定的私有用户控制目录 `~/.thinws`，`thinws doctor` 以只读产品状态检查实例、受控布局、SQLite 元数据和未完成工作区数量，并提供稳定的人类/JSON 输出及退出码。
 - 增加 Phase 1 APFS 工作区物化后端：通过路径能力探测、执行前重验、逐文件 APFS clone、清单/保真校验和身份约束回滚生成可验证 Receipt；现已由公开 `workspace create` 使用，尚未发布。
 - 增加 Phase 1 Full Copy 后端与受限降级计划：独立报告字节复制候选能力，仅在同一已知 APFS 卷、用户允许且 clone 明确不可用并完成必要回滚时选择 Full Copy；回执保留降级原因、失败尝试和真实复制证据，现已接入公开创建命令。
-- 增加开发中的 `workspace create/list/path/status/remove`：直接交付普通路径，按需报告已跟踪 Git 变化和当前空间估算，显式清理受控副本并在 data root 保留日志；仍须通过 Phase 1 阶段验收和人工放行。
+- 增加开发中的 `workspace create/list/path/status/remove`：由用户指定最终 target 并直接交付普通路径，按需报告已跟踪 Git 变化和当前空间估算；显式清理归属可证的副本，在 `~/.thinws` 保留日志。仍须通过 Phase 1 阶段验收和人工放行。
 
 ### Changed
 

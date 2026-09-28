@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use rusqlite::Connection;
 use serde_json::Value;
 use tempfile::Builder;
 use thinws_cli::{LocalCommands, run};
@@ -29,6 +30,7 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
     let bootstrap = temp.path().join("bootstrap");
     let data_root = bootstrap.clone();
     let source = temp.path().join("source");
+    let target = temp.path().join("ordinary-target");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source stays").unwrap();
     let (code, init) = execute(
@@ -45,16 +47,21 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
             "create".into(),
             "--source".into(),
             source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
             "--name".into(),
             "ordinary".into(),
         ],
     );
     assert_eq!(code, 0, "{created}");
     let copy = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    assert_eq!(copy, target);
     assert_eq!(fs::read(copy.join("note.txt")).unwrap(), b"source stays");
     assert!(!copy.join("metadata/lifecycle.lock").exists());
-    fs::write(data_root.join("staging/unknown-item"), b"unowned staging").unwrap();
-    fs::write(data_root.join("trash/unknown-item"), b"unowned trash").unwrap();
+    let unowned_staging = temp.path().join("unowned-staging");
+    let unowned_trash = temp.path().join("unowned-trash");
+    fs::write(&unowned_staging, b"unowned staging").unwrap();
+    fs::write(&unowned_trash, b"unowned trash").unwrap();
 
     let (code, removed) = execute(
         &bootstrap,
@@ -71,14 +78,8 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
     assert_eq!(removed["data"]["forced"], false);
     assert!(!copy.exists());
     assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"source stays");
-    assert_eq!(
-        fs::read(data_root.join("staging/unknown-item")).unwrap(),
-        b"unowned staging"
-    );
-    assert_eq!(
-        fs::read(data_root.join("trash/unknown-item")).unwrap(),
-        b"unowned trash"
-    );
+    assert_eq!(fs::read(unowned_staging).unwrap(), b"unowned staging");
+    assert_eq!(fs::read(unowned_trash).unwrap(), b"unowned trash");
     let log = data_root.join("logs/operations.jsonl");
     assert!(log.is_file());
     assert_eq!(removed["data"]["log"], log.to_str().unwrap());
@@ -135,6 +136,7 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
     );
     assert_eq!(code, 0, "{init}");
     let create = |name: &str| {
+        let target = temp.path().join(format!("target-{name}"));
         execute(
             &bootstrap,
             vec![
@@ -144,6 +146,8 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
                 "create".into(),
                 "--source".into(),
                 source.as_os_str().to_owned(),
+                "--target".into(),
+                target.as_os_str().to_owned(),
                 "--name".into(),
                 name.into(),
             ],
@@ -238,6 +242,7 @@ fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
     let source = temp.path().join("source");
+    let target = temp.path().join("busy-target");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source").unwrap();
     let (code, init) = execute(
@@ -254,6 +259,8 @@ fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
             "create".into(),
             "--source".into(),
             source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
             "--name".into(),
             "busy".into(),
         ],
@@ -302,6 +309,7 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
     let source = temp.path().join("source");
+    let target = temp.path().join("unknown-git-target");
     let external_git = temp.path().join("external-git");
     fs::create_dir(&source).unwrap();
     fs::create_dir(&external_git).unwrap();
@@ -320,6 +328,8 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
             "create".into(),
             "--source".into(),
             source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
             "--name".into(),
             "unknown-git".into(),
         ],
@@ -368,4 +378,184 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
             .unwrap()
             .contains("Repo issue: external-repository-metadata\n")
     );
+}
+
+#[test]
+fn real_cli_force_never_releases_a_missing_or_replaced_target() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-remove-target-identity-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let control = temp.path().join(".thinws");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"original").unwrap();
+    assert_eq!(
+        execute(
+            &control,
+            vec!["thinws".into(), "--json".into(), "init".into()]
+        )
+        .0,
+        0
+    );
+
+    for (name, replace) in [("missing", false), ("replaced", true)] {
+        let target = temp.path().join(format!("target-{name}"));
+        let (code, created) = execute(
+            &control,
+            vec![
+                "thinws".into(),
+                "--json".into(),
+                "workspace".into(),
+                "create".into(),
+                "--source".into(),
+                source.as_os_str().to_owned(),
+                "--target".into(),
+                target.as_os_str().to_owned(),
+                "--name".into(),
+                name.into(),
+            ],
+        );
+        assert_eq!(code, 0, "{created}");
+        let id = created["data"]["workspace_id"].as_str().unwrap();
+        let displaced = temp.path().join(format!("displaced-{name}"));
+        fs::rename(&target, &displaced).unwrap();
+        if replace {
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("foreign.txt"), b"keep foreign").unwrap();
+        }
+
+        for force in [false, true] {
+            let mut args: Vec<OsString> = vec![
+                "thinws".into(),
+                "--json".into(),
+                "workspace".into(),
+                "remove".into(),
+                name.into(),
+            ];
+            if force {
+                args.push("--force".into());
+            }
+            let (code, refused) = execute(&control, args);
+            assert_eq!(code, if replace { 38 } else { 37 }, "{refused}");
+            assert_eq!(
+                refused["error"]["code"],
+                if replace {
+                    "E_TARGET_IDENTITY"
+                } else {
+                    "E_TARGET_MISSING"
+                }
+            );
+            assert_eq!(fs::read(displaced.join("note.txt")).unwrap(), b"original");
+            if replace {
+                assert_eq!(
+                    fs::read(target.join("foreign.txt")).unwrap(),
+                    b"keep foreign"
+                );
+            } else {
+                assert!(!target.exists());
+            }
+            let database = Connection::open(control.join("metadata/state.db")).unwrap();
+            let active: i64 = database
+                .query_row(
+                    "SELECT count(*) FROM workspaces WHERE workspace_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let tombstones: i64 = database
+                .query_row(
+                    "SELECT count(*) FROM deletion_tombstones WHERE workspace_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!((active, tombstones), (1, 0));
+            assert!(control.join("logs/operations.jsonl").is_file());
+        }
+    }
+}
+
+#[test]
+fn real_cli_keeps_registration_while_the_target_parent_is_unavailable() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-target-parent-unavailable-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let control = temp.path().join(".thinws");
+    let source = temp.path().join("source");
+    let parent = temp.path().join("removable-parent");
+    let displaced = temp.path().join("parent-offline");
+    let target = parent.join("copy");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"preserve while unavailable").unwrap();
+    fs::create_dir(&parent).unwrap();
+    assert_eq!(
+        execute(
+            &control,
+            vec!["thinws".into(), "--json".into(), "init".into()]
+        )
+        .0,
+        0
+    );
+    let (code, created) = execute(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
+            "--name".into(),
+            "offline".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{created}");
+    let id = created["data"]["workspace_id"].as_str().unwrap();
+
+    fs::rename(&parent, &displaced).unwrap();
+    let remove_args = vec![
+        "thinws".into(),
+        "--json".into(),
+        "workspace".into(),
+        "remove".into(),
+        "offline".into(),
+        "--force".into(),
+    ];
+    let (code, refused) = execute(&control, remove_args.clone());
+    assert_eq!(code, 37, "{refused}");
+    assert_eq!(refused["error"]["code"], "E_TARGET_MISSING");
+    assert_eq!(
+        fs::read(displaced.join("copy/note.txt")).unwrap(),
+        b"preserve while unavailable"
+    );
+    let database = Connection::open(control.join("metadata/state.db")).unwrap();
+    let active: i64 = database
+        .query_row(
+            "SELECT count(*) FROM workspaces WHERE workspace_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tombstones: i64 = database
+        .query_row(
+            "SELECT count(*) FROM deletion_tombstones WHERE workspace_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((active, tombstones), (1, 0));
+
+    fs::rename(&displaced, &parent).unwrap();
+    let (code, removed) = execute(&control, remove_args);
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(removed["data"]["result"], "removed");
+    assert!(!target.exists());
 }

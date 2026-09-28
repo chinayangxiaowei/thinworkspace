@@ -292,7 +292,7 @@ fn create_target_child_directory_with_hook(
     ))
 }
 
-fn revalidate_target_parent(parent: &ValidatedDirectory) -> Result<(), PortError> {
+pub(crate) fn revalidate_target_parent(parent: &ValidatedDirectory) -> Result<(), PortError> {
     let current = open_absolute_directory_nofollow(&parent.path, true)?
         .ok_or_else(|| validation_error("Workspace target parent disappeared"))?;
     let current = rustix::fs::fstat(&current)
@@ -316,7 +316,7 @@ fn target_parent_stat_matches(
         && held.st_birthtime_nsec == current.st_birthtime_nsec
 }
 
-fn revalidate_target_child(
+pub(crate) fn revalidate_target_child(
     parent: &ValidatedDirectory,
     child: &ValidatedDirectory,
     name: &OsStr,
@@ -757,9 +757,24 @@ pub(crate) fn revalidate_directory(directory: &ValidatedDirectory) -> Result<(),
 pub(crate) fn historical_directory_identity(
     directory: &ValidatedDirectory,
 ) -> Result<HistoricalDirectoryIdentity, PortError> {
+    historical_directory_identity_with_owner(directory, true)
+}
+
+/// A target parent may be a writable system-owned directory (for example a
+/// volume root); its owner is not a proof of ownership of the target child.
+pub(crate) fn historical_target_parent_identity(
+    directory: &ValidatedDirectory,
+) -> Result<HistoricalDirectoryIdentity, PortError> {
+    historical_directory_identity_with_owner(directory, false)
+}
+
+fn historical_directory_identity_with_owner(
+    directory: &ValidatedDirectory,
+    require_owner: bool,
+) -> Result<HistoricalDirectoryIdentity, PortError> {
     let stat = rustix::fs::fstat(&directory.fd)
         .map_err(|error| io_error("inspect historical directory identity", error))?;
-    if !historical_stat_is_safe(&stat, rustix::process::geteuid().as_raw()) {
+    if !historical_stat_is_safe(&stat, rustix::process::geteuid().as_raw(), require_owner) {
         return Err(validation_error("historical directory identity is unsafe"));
     }
     Ok(HistoricalDirectoryIdentity {
@@ -770,9 +785,15 @@ pub(crate) fn historical_directory_identity(
     })
 }
 
-fn historical_stat_is_safe(stat: &rustix::fs::Stat, effective_uid: u32) -> bool {
+fn historical_stat_is_safe(
+    stat: &rustix::fs::Stat,
+    effective_uid: u32,
+    require_owner: bool,
+) -> bool {
     FileType::from_raw_mode(stat.st_mode).is_dir()
-        && stat.st_uid == effective_uid
+        && (!require_owner || stat.st_uid == effective_uid)
+        && stat.st_ino != 0
+        && stat.st_birthtime >= 0
         && (0..1_000_000_000).contains(&stat.st_birthtime_nsec)
 }
 
@@ -942,18 +963,37 @@ mod tests {
     }
 
     #[test]
-    fn historical_stat_rejects_single_owner_or_time_range_mismatch() {
+    fn historical_stat_rejects_each_unsafe_field_independently() {
         let (_temp, _, directory) = controlled_directory("historical-stat-");
         let stat = rustix::fs::fstat(&directory.fd).unwrap();
         let uid = rustix::process::geteuid().as_raw();
-        assert!(historical_stat_is_safe(&stat, uid));
+        assert!(historical_stat_is_safe(&stat, uid, true));
+
+        let mut wrong_type = rustix::fs::fstat(&directory.fd).unwrap();
+        wrong_type.st_mode = libc::S_IFREG as _;
+        assert!(!historical_stat_is_safe(&wrong_type, uid, true));
 
         let mut wrong_owner = rustix::fs::fstat(&directory.fd).unwrap();
         wrong_owner.st_uid ^= 1;
-        assert!(!historical_stat_is_safe(&wrong_owner, uid));
+        assert!(!historical_stat_is_safe(&wrong_owner, uid, true));
+        assert!(historical_stat_is_safe(&wrong_owner, uid, false));
+
+        let mut wrong_inode = rustix::fs::fstat(&directory.fd).unwrap();
+        wrong_inode.st_ino = 0;
+        assert!(!historical_stat_is_safe(&wrong_inode, uid, true));
+
+        let mut negative_birthtime = rustix::fs::fstat(&directory.fd).unwrap();
+        negative_birthtime.st_birthtime = -1;
+        assert!(!historical_stat_is_safe(&negative_birthtime, uid, true));
+        let mut zero_birthtime = rustix::fs::fstat(&directory.fd).unwrap();
+        zero_birthtime.st_birthtime = 0;
+        assert!(historical_stat_is_safe(&zero_birthtime, uid, true));
+
         let mut wrong_birthtime = rustix::fs::fstat(&directory.fd).unwrap();
         wrong_birthtime.st_birthtime_nsec = 1_000_000_000;
-        assert!(!historical_stat_is_safe(&wrong_birthtime, uid));
+        assert!(!historical_stat_is_safe(&wrong_birthtime, uid, true));
+        wrong_birthtime.st_birthtime_nsec = -1;
+        assert!(!historical_stat_is_safe(&wrong_birthtime, uid, true));
     }
 
     #[test]

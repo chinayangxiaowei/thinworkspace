@@ -174,7 +174,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 | Btrfs/XFS reflink | 不支持跨文件系统 reflink | 需文件系统本身启用对应能力 |
 | OverlayFS | 不是通用跨文件系统克隆 | lower/upper/work/mount 需满足内核和文件系统组合要求 |
 | ReFS Block Clone | 不支持跨 ReFS Volume block clone | 卷格式和操作系统版本必须支持 |
-| Full Copy | 通常可以跨卷/跨文件系统 | 仍受权限、空间、路径安全和产品数据根政策限制 |
+| Full Copy | 通常可以跨卷/跨文件系统 | 仍受权限、空间、路径安全和产品布局政策限制 |
 
 因此，统一接口不能简化为“所有平台都不支持跨卷”。正确表达是：
 

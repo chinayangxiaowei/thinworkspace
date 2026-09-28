@@ -16,8 +16,7 @@ fn fixture_workspace_view() -> WorkspaceView {
         name: "one".to_owned(),
         state: "ready".to_owned(),
         source: b"/Volumes/data/source".to_vec(),
-        path: b"/Volumes/data/thinws-data/workspaces/ws_019a0000-0000-7000-8000-000000000001/root"
-            .to_vec(),
+        path: b"/Volumes/data/clone".to_vec(),
         last_error_code: None,
         materialization: Some(MaterializationView {
             requested_mode: "cow-clone".to_owned(),
@@ -51,6 +50,7 @@ impl Commands for FakeCommands {
     fn create(
         &self,
         source: Vec<u8>,
+        target: Vec<u8>,
         name: String,
         _allow_copy: bool,
         dry_run: bool,
@@ -60,7 +60,7 @@ impl Commands for FakeCommands {
             Ok(CreateView::Preview(CreatePreviewView {
                 name,
                 source,
-                target_parent: b"/Volumes/data/thinws-data/workspaces".to_vec(),
+                target,
                 source_volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
                 target_volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
                 effective_mode: "cow-clone".to_owned(),
@@ -72,7 +72,7 @@ impl Commands for FakeCommands {
                 workspace_id: "ws_019a0000-0000-7000-8000-000000000001".to_owned(),
                 name,
                 source,
-                path: b"/Volumes/data/thinws-data/workspaces/ws_019a0000-0000-7000-8000-000000000001/root".to_vec(),
+                path: target,
                 created: true,
                 requested_mode: "cow-clone".to_owned(),
                 effective_mode: "cow-clone".to_owned(),
@@ -144,6 +144,46 @@ fn execute_with(commands: &impl Commands, args: &[&str]) -> (i32, Vec<u8>, Vec<u
     (status, stdout, stderr)
 }
 
+#[test]
+fn workspace_create_requires_an_explicit_final_target() {
+    let (missing_status, missing_stdout, _) = execute(&[
+        "thinws",
+        "--json",
+        "workspace",
+        "create",
+        "--source",
+        "/Volumes/data/source",
+        "--name",
+        "one",
+    ]);
+    assert_eq!(missing_status, 2);
+    let missing: Value = serde_json::from_slice(&missing_stdout).unwrap();
+    assert_eq!(missing["error"]["code"], "E_USAGE");
+
+    let (status, stdout, stderr) = execute(&[
+        "thinws",
+        "--json",
+        "workspace",
+        "create",
+        "--source",
+        "/Volumes/data/source",
+        "--target",
+        "/Volumes/data/clone",
+        "--name",
+        "one",
+        "--dry-run",
+    ]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    let preview: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(preview["data"]["target"], "/Volumes/data/clone");
+    assert_eq!(
+        preview["data"]["target_hex"],
+        "2f566f6c756d65732f646174612f636c6f6e65"
+    );
+    assert!(preview["data"].get("target_path_mode").is_none());
+}
+
 fn assert_object_keys(value: &Value, expected: &[&str]) {
     let actual: BTreeSet<&str> = value
         .as_object()
@@ -185,6 +225,7 @@ impl Commands for FailingCommands {
     fn create(
         &self,
         _source: Vec<u8>,
+        _target: Vec<u8>,
         _name: String,
         _allow_copy: bool,
         _dry_run: bool,
@@ -365,8 +406,8 @@ fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
         ("E_CONTROL_UNAVAILABLE", 32),
         ("E_CONTROL_LAYOUT", 39),
         ("E_CONTROL_NOT_EMPTY", 36),
-        ("E_DATA_ROOT_UNAVAILABLE", 32),
-        ("E_DATA_ROOT_LAYOUT", 33),
+        ("E_CONTROL_UNAVAILABLE", 32),
+        ("E_TARGET_LAYOUT", 33),
         ("E_METADATA", 35),
         ("E_TARGET_MISSING", 37),
         ("E_TARGET_IDENTITY", 38),
@@ -429,6 +470,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 "create",
                 "--source",
                 "/Volumes/data/source",
+                "--target",
+                "/Volumes/data/clone",
                 "--name",
                 "one",
             ],
@@ -454,6 +497,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 "create",
                 "--source",
                 "/Volumes/data/source",
+                "--target",
+                "/Volumes/data/clone",
                 "--name",
                 "one",
                 "--dry-run",
@@ -465,9 +510,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 "name",
                 "source",
                 "source_hex",
-                "target_parent",
-                "target_parent_hex",
-                "target_path_mode",
+                "target",
+                "target_hex",
                 "source_volume_id",
                 "target_volume_id",
                 "same_volume",
@@ -642,6 +686,8 @@ fn removed_commands_and_flags_have_no_compatibility_entry_points() {
             "create",
             "--source",
             "/Volumes/data/source",
+            "--target",
+            "/Volumes/data/clone",
             "--name",
             "one",
             "--repo",
@@ -652,6 +698,8 @@ fn removed_commands_and_flags_have_no_compatibility_entry_points() {
             "create",
             "--source",
             "/Volumes/data/source",
+            "--target",
+            "/Volumes/data/clone",
             "--name",
             "one",
             "--base",
@@ -680,7 +728,14 @@ fn application_command_adapter_rejects_noncanonical_path_before_the_use_case() {
     let error = commands.init(1).unwrap_err();
     assert_eq!(error.code, "E_USAGE");
     let error = commands
-        .create(b"relative/path".to_vec(), "one".to_owned(), false, false, 1)
+        .create(
+            b"relative/path".to_vec(),
+            b"/Volumes/data/clone".to_vec(),
+            "one".to_owned(),
+            false,
+            false,
+            1,
+        )
         .unwrap_err();
     assert_eq!(error.code, "E_USAGE");
 }
@@ -693,6 +748,8 @@ fn workspace_create_and_preview_render_distinct_execution_facts() {
         "create",
         "--source",
         "/Volumes/data/source",
+        "--target",
+        "/Volumes/data/clone",
         "--name",
         "one",
     ]);
@@ -711,6 +768,8 @@ fn workspace_create_and_preview_render_distinct_execution_facts() {
         "create",
         "--source",
         "/Volumes/data/source",
+        "--target",
+        "/Volumes/data/clone",
         "--name",
         "one",
         "--dry-run",

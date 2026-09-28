@@ -91,7 +91,7 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
     assert_eq!(doctor["data"]["incomplete_workspaces"], 0);
     assert_eq!(doctor["data"]["git_check"]["available"], true);
 
-    for directory in ["metadata", "logs", "workspaces", "staging", "trash"] {
+    for directory in ["metadata", "logs"] {
         assert_eq!(
             fs::metadata(data_root.join(directory))
                 .unwrap()
@@ -100,6 +100,9 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
                 & 0o7777,
             0o700
         );
+    }
+    for old_directory in ["workspaces", "staging", "trash"] {
+        assert!(!data_root.join(old_directory).exists());
     }
     for file in [
         bootstrap.join("config.toml"),
@@ -226,4 +229,36 @@ fn compiled_binary_help_does_not_initialize_user_state() {
     assert!(stdout.contains("Usage: thinws"));
     assert!(stdout.contains("init"));
     assert!(stdout.contains("doctor"));
+}
+
+#[test]
+fn compiled_binary_uses_isolated_home_and_ignores_legacy_configuration() {
+    let temp = apfs_tempdir("thinws-layout-v2-home-");
+    let home = temp.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let legacy = home.join("Library/Application Support/ThinWorkspace/config.toml");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, b"legacy configuration must remain unchanged").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_thinws"))
+        .args(["--json", "init"])
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["result"], "initialized");
+    assert_eq!(
+        result["data"]["control_root"],
+        home.join(".thinws").to_str().unwrap()
+    );
+    assert!(home.join(".thinws/metadata/state.db").is_file());
+    assert_eq!(
+        fs::read(&legacy).unwrap(),
+        b"legacy configuration must remain unchanged"
+    );
 }

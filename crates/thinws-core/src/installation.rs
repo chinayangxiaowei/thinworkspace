@@ -29,7 +29,7 @@ impl InstallationIdentity {
         self.instance_id
     }
 
-    /// Returns the canonical raw data-root path.
+    /// Returns the canonical raw control-root path.
     #[must_use]
     pub const fn data_root(&self) -> &AbsolutePath {
         &self.data_root
@@ -72,7 +72,7 @@ impl InstallationRecord {
     }
 }
 
-/// Durable lifecycle state of the data-root ownership marker.
+/// Durable lifecycle state of the control-root ownership marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootMarkerState {
     /// Initialization has started but has not published a usable installation.
@@ -81,7 +81,7 @@ pub enum RootMarkerState {
     Ready,
 }
 
-/// Parsed data-root marker content.
+/// Parsed control-root marker content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RootMarker {
     identity: InstallationIdentity,

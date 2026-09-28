@@ -21,6 +21,7 @@ use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateRequest {
     source: AbsolutePath,
+    target: AbsolutePath,
     name: WorkspaceName,
     allow_full_copy: bool,
     now: UnixMillis,
@@ -30,6 +31,7 @@ impl CreateRequest {
     /// Parses CLI path/name bytes and a caller-supplied Unix-millisecond clock.
     pub fn try_from_raw(
         source: Vec<u8>,
+        target: Vec<u8>,
         name: &str,
         allow_full_copy: bool,
         now_ms: i64,
@@ -37,24 +39,29 @@ impl CreateRequest {
         let source = AbsolutePath::try_from_bytes(source).map_err(|_| {
             semantic_error(ErrorCode::Usage, "source must be a canonical absolute path")
         })?;
+        let target = AbsolutePath::try_from_bytes(target).map_err(|_| {
+            semantic_error(ErrorCode::Usage, "target must be a canonical absolute path")
+        })?;
         let name = WorkspaceName::from_str(name)
             .map_err(|_| semantic_error(ErrorCode::Usage, "invalid Workspace name"))?;
         let now = UnixMillis::new(now_ms).map_err(|_| {
             semantic_error(ErrorCode::Usage, "system clock predates the Unix epoch")
         })?;
-        Ok(Self::new(source, name, allow_full_copy, now))
+        Ok(Self::new(source, target, name, allow_full_copy, now))
     }
 
     /// Creates intent from already validated domain values.
     #[must_use]
     pub const fn new(
         source: AbsolutePath,
+        target: AbsolutePath,
         name: WorkspaceName,
         allow_full_copy: bool,
         now: UnixMillis,
     ) -> Self {
         Self {
             source,
+            target,
             name,
             allow_full_copy,
             now,
@@ -65,6 +72,12 @@ impl CreateRequest {
     #[must_use]
     pub const fn source(&self) -> &AbsolutePath {
         &self.source
+    }
+
+    /// Returns the exact requested final target path.
+    #[must_use]
+    pub const fn target(&self) -> &AbsolutePath {
+        &self.target
     }
 
     /// Returns the globally unique requested Workspace name.
@@ -131,7 +144,7 @@ impl CreateOutcome {
 /// Read-only, non-executable creation facts without a Workspace identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatePreview {
-    target_parent: AbsolutePath,
+    target: AbsolutePath,
     source_volume_id: VolumeId,
     target_volume_id: VolumeId,
     effective_mode: MaterializationMode,
@@ -140,10 +153,10 @@ pub struct CreatePreview {
 }
 
 impl CreatePreview {
-    /// Returns the private parent under which an ID-derived target would be placed.
+    /// Returns the exact final target requested by the caller.
     #[must_use]
-    pub const fn target_parent(&self) -> &AbsolutePath {
-        &self.target_parent
+    pub const fn target(&self) -> &AbsolutePath {
+        &self.target
     }
 
     /// Returns the source volume observed by the current probe.
@@ -194,16 +207,16 @@ where
                     "ThinWorkspace is not initialized",
                 )
             })?;
-        if paths_overlap(request.source(), identity.data_root()) {
+        if requested_paths_overlap(request.source(), request.target(), identity.data_root()) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root must not overlap",
+                ErrorCode::TargetLayout,
+                "source, target, and control root must not overlap",
             ));
         }
         let layout = self
             .bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
         self.metadata
             .inspect(
@@ -217,41 +230,42 @@ where
             .inspect_path(request.source())
             .map_err(|error| map_port(Stage::Source, error))?;
         require_existing_source(&source)?;
-        let target_parent = derived_path(identity.data_root(), &[b"workspaces"])?;
-        let paths = MaterializationPathProbeRequest::new(
-            request.source().clone(),
-            target_parent.clone(),
-            derived_path(identity.data_root(), &[b"staging"])?,
-            derived_path(identity.data_root(), &[b"trash"])?,
-        );
+        let target_parent = target_parent(request.target())?;
+        // This nonce only probes possible private siblings. Dry-run neither
+        // reserves nor returns a Workspace ID.
+        let paths = provisional_materialization_paths(
+            request.source(),
+            request.target(),
+            &target_parent,
+            WorkspaceId::new(),
+        )?;
         let report = self
             .bootstrap
             .inspect_materialization_paths(&paths)
             .map_err(|error| map_port(Stage::Layout, error))?;
         require_existing_source(report.source())?;
+        require_missing_target(report.target_root(), &target_parent)?;
         let data_root_report = self
             .bootstrap
             .inspect_path(identity.data_root())
             .map_err(|error| map_port(Stage::Layout, error))?;
-        if paths_overlap_with_identity(report.source(), &data_root_report) {
+        if materialization_overlaps_control(
+            report.source(),
+            report.target_root(),
+            &data_root_report,
+        ) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root must not overlap",
+                ErrorCode::TargetLayout,
+                "source or target overlaps the control root",
             ));
         }
         let plan = select_plan(&report, request.allow_full_copy())?;
-        if plan.target_volume_id() != identity.volume_id() {
-            return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "preview target volume differs from registered data root",
-            ));
-        }
         layout
             .revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
         self.require_ready_marker(&identity)?;
         Ok(CreatePreview {
-            target_parent,
+            target: request.target().clone(),
             source_volume_id: plan.source_volume_id(),
             target_volume_id: plan.target_volume_id(),
             effective_mode: plan.effective_mode(),
@@ -289,17 +303,17 @@ where
                     "ThinWorkspace is not initialized",
                 )
             })?;
-        if paths_overlap(request.source(), identity.data_root()) {
+        if requested_paths_overlap(request.source(), request.target(), identity.data_root()) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root must not overlap",
+                ErrorCode::TargetLayout,
+                "source, target, and control root must not overlap",
             ));
         }
         // Classify an already missing or invalid registered root before the
         // lock's metadata parent can turn that condition into a generic error.
         self.bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let lock = self
             .bootstrap
             .acquire_data_root(identity.data_root(), self.lock_timeout)
@@ -307,7 +321,7 @@ where
                 // A registered root may disappear between the preflight and
                 // the lock attempt; reclassify from a fresh layout fact.
                 match self.bootstrap.validate_layout(&identity) {
-                    Err(layout_error) => map_port(Stage::Layout, layout_error),
+                    Err(layout_error) => map_port(Stage::Control, layout_error),
                     Ok(_) => map_port(Stage::Lock, error),
                 }
             })?;
@@ -316,7 +330,7 @@ where
         let layout = self
             .bootstrap
             .validate_layout(&identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
         let mut metadata = self
             .metadata
@@ -326,13 +340,16 @@ where
                 self.sqlite_timeout,
             )
             .map_err(|error| map_port(Stage::Metadata, error))?;
-        if let Some(existing) = metadata
+        let active = metadata
             .workspaces()
-            .map_err(|error| map_port(Stage::Metadata, error))?
-            .into_iter()
+            .map_err(|error| map_port(Stage::Metadata, error))?;
+        if let Some(existing) = active
+            .iter()
             .find(|record| record.reservation().name() == request.name())
+            .cloned()
         {
             if existing.reservation().source_path() != request.source()
+                || existing.reservation().target_path() != request.target()
                 || existing.reservation().allow_full_copy() != request.allow_full_copy()
             {
                 return Err(semantic_error(
@@ -350,11 +367,11 @@ where
                 .map_err(|error| map_port(Stage::Layout, error))?;
             let verified_path = self
                 .bootstrap
-                .validate_ready_workspace(&layout, existing.reservation().workspace_id())
+                .validate_ready_workspace(&layout, existing.reservation())
                 .map_err(|error| map_port(Stage::Layout, error))?;
             if &verified_path != existing.reservation().target_path() {
                 return Err(semantic_error(
-                    ErrorCode::DataRootLayout,
+                    ErrorCode::TargetLayout,
                     "Ready Workspace path does not match metadata",
                 ));
             }
@@ -365,6 +382,15 @@ where
                     semantic_error(ErrorCode::Metadata, "Ready Workspace has no final receipt")
                 })?;
             return Ok(CreateOutcome::new(existing, summary, false));
+        }
+        if active
+            .iter()
+            .any(|record| record.reservation().target_path() == request.target())
+        {
+            return Err(semantic_error(
+                ErrorCode::TargetConflict,
+                "Workspace target belongs to another active Workspace",
+            ));
         }
 
         // Only this preliminary source observation precedes Creating: its actual
@@ -380,48 +406,39 @@ where
             .map_err(|error| map_port(Stage::Layout, error))?;
         if paths_overlap_with_identity(&source, &data_root_report) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root must not overlap",
+                ErrorCode::TargetLayout,
+                "source and control root must not overlap",
             ));
         }
-        if source.filesystem().type_name() != "apfs" {
-            return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source must be on the registered APFS volume",
-            ));
-        }
-        let source_volume = source
-            .filesystem()
-            .volume_id()
-            .known()
-            .copied()
-            .ok_or_else(|| {
-                semantic_error(
-                    ErrorCode::CapabilityUnavailable,
-                    "source volume identity is unknown",
-                )
-            })?;
-        if source_volume != identity.volume_id() {
-            return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root are on different APFS volumes",
-            ));
-        }
+        let target_parent = target_parent(request.target())?;
         let workspace_id = WorkspaceId::new();
-        let target = derived_path(
-            identity.data_root(),
-            &[b"workspaces", workspace_id.to_string().as_bytes(), b"root"],
-        )?;
-        let staging = derived_path(identity.data_root(), &[b"staging"])?;
-        let trash = derived_path(identity.data_root(), &[b"trash"])?;
+        let preliminary = self
+            .bootstrap
+            .inspect_materialization_paths(&provisional_materialization_paths(
+                request.source(),
+                request.target(),
+                &target_parent,
+                workspace_id,
+            )?)
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        require_existing_source(preliminary.source())?;
+        require_missing_target(preliminary.target_root(), &target_parent)?;
+        if target_enters_control_root(preliminary.target_root(), &data_root_report) {
+            return Err(semantic_error(
+                ErrorCode::TargetLayout,
+                "target overlaps the control root",
+            ));
+        }
+        let preliminary_plan = select_plan(&preliminary, request.allow_full_copy())?;
+        let target = request.target().clone();
         let reservation = WorkspaceReservation::new(
             workspace_id,
             identity.instance_id(),
             request.name().clone(),
             request.source().clone(),
             target.clone(),
-            source_volume,
-            identity.volume_id(),
+            preliminary_plan.source_volume_id(),
+            preliminary_plan.target_volume_id(),
             request.allow_full_copy(),
             request.now(),
         );
@@ -436,8 +453,6 @@ where
                 identity.data_root(),
                 metadata.as_mut(),
                 &reservation,
-                staging,
-                trash,
                 clone_materializer,
                 copy_materializer,
             )
@@ -469,8 +484,6 @@ where
         data_root: &AbsolutePath,
         metadata: &mut dyn MetadataStore,
         reservation: &WorkspaceReservation,
-        staging: AbsolutePath,
-        trash: AbsolutePath,
         clone_materializer: &C,
         copy_materializer: &F,
     ) -> Result<CreateOutcome, UseCaseError>
@@ -480,19 +493,24 @@ where
     {
         let prepared = self
             .bootstrap
-            .prepare_workspace(lock, layout, reservation.workspace_id())
+            .prepare_workspace(
+                lock,
+                layout,
+                reservation.workspace_id(),
+                reservation.target_path(),
+            )
             .map_err(|error| map_port(Stage::Layout, error))?;
         if prepared.target_root() != reservation.target_path() {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "prepared target differs from reserved target",
             ));
         }
         let materialize = MaterializeRequest::new(
             request.source().clone(),
             reservation.target_path().clone(),
-            staging,
-            trash,
+            prepared.staging_root().clone(),
+            prepared.trash_root().clone(),
         );
         let probe = MaterializationPathProbeRequest::from(&materialize);
         let report = self
@@ -505,10 +523,14 @@ where
             .bootstrap
             .inspect_path(data_root)
             .map_err(|error| map_port(Stage::Layout, error))?;
-        if paths_overlap_with_identity(report.source(), &data_root_report) {
+        if materialization_overlaps_control(
+            report.source(),
+            report.target_root(),
+            &data_root_report,
+        ) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
-                "source and data root must not overlap",
+                ErrorCode::TargetLayout,
+                "source or target overlaps the control root",
             ));
         }
         let mut plan = select_plan(&report, request.allow_full_copy())?;
@@ -518,7 +540,7 @@ where
             reservation,
         ) {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "materialization volume differs from reservation",
             ));
         }
@@ -615,7 +637,7 @@ fn require_prepared_target(
         });
     if !matches {
         return Err(semantic_error(
-            ErrorCode::DataRootLayout,
+            ErrorCode::TargetLayout,
             "materialization target differs from prepared Workspace root",
         ));
     }
@@ -645,6 +667,16 @@ fn paths_overlap(left: &AbsolutePath, right: &AbsolutePath) -> bool {
             || (child.starts_with(parent) && child.get(parent.len()) == Some(&b'/'))
     }
     contains(left.as_bytes(), right.as_bytes()) || contains(right.as_bytes(), left.as_bytes())
+}
+
+fn requested_paths_overlap(
+    source: &AbsolutePath,
+    target: &AbsolutePath,
+    control: &AbsolutePath,
+) -> bool {
+    paths_overlap(source, control)
+        || paths_overlap(target, control)
+        || paths_overlap(source, target)
 }
 
 fn require_existing_source(source: &PathCapabilityReport) -> Result<(), UseCaseError> {
@@ -697,12 +729,96 @@ fn paths_overlap_with_identity(
             .any(|entry| entry.identity() == controlled_leaf)
 }
 
+fn materialization_overlaps_control(
+    source: &PathCapabilityReport,
+    target: &PathCapabilityReport,
+    control: &PathCapabilityReport,
+) -> bool {
+    paths_overlap_with_identity(source, control) || target_enters_control_root(target, control)
+}
+
+fn target_enters_control_root(
+    target: &PathCapabilityReport,
+    control: &PathCapabilityReport,
+) -> bool {
+    // The target can be missing while its parent is an APFS case/Unicode alias
+    // of the control root. Comparing only path spelling misses that boundary.
+    let control_identity = control
+        .ancestry()
+        .last()
+        .expect("a path report has a nonempty ancestry")
+        .identity();
+    target
+        .ancestry()
+        .iter()
+        .any(|entry| entry.identity() == control_identity)
+}
+
 fn matches_reserved_volumes(
     source: VolumeId,
     target: VolumeId,
     reservation: &WorkspaceReservation,
 ) -> bool {
     source == reservation.source_volume_id() && target == reservation.target_volume_id()
+}
+
+fn target_parent(target: &AbsolutePath) -> Result<AbsolutePath, UseCaseError> {
+    let bytes = target.as_bytes();
+    if bytes == b"/" {
+        return Err(semantic_error(
+            ErrorCode::TargetLayout,
+            "filesystem root cannot be a Workspace target",
+        ));
+    }
+    let last_slash = bytes
+        .iter()
+        .rposition(|byte| *byte == b'/')
+        .expect("validated absolute path has a separator");
+    let parent = if last_slash == 0 {
+        b"/".as_slice()
+    } else {
+        &bytes[..last_slash]
+    };
+    AbsolutePath::try_from_bytes(parent.to_vec())
+        .map_err(|_| semantic_error(ErrorCode::TargetLayout, "invalid Workspace target parent"))
+}
+
+fn require_missing_target(
+    target: &PathCapabilityReport,
+    expected_parent: &AbsolutePath,
+) -> Result<(), UseCaseError> {
+    if target.resolution() == PathResolution::ExistingDirectory {
+        return Err(semantic_error(
+            ErrorCode::TargetExists,
+            "Workspace target already exists",
+        ));
+    }
+    if target.resolution() != PathResolution::MissingTarget
+        || target.nearest_existing_ancestor() != expected_parent
+        || target.missing_components().len() != 1
+    {
+        return Err(semantic_error(
+            ErrorCode::TargetLayout,
+            "Workspace target parent must exist",
+        ));
+    }
+    Ok(())
+}
+
+fn provisional_materialization_paths(
+    source: &AbsolutePath,
+    target: &AbsolutePath,
+    parent: &AbsolutePath,
+    workspace_id: WorkspaceId,
+) -> Result<MaterializationPathProbeRequest, UseCaseError> {
+    let staging_name = format!(".thinws-staging-{workspace_id}");
+    let trash_name = format!(".thinws-trash-{workspace_id}");
+    Ok(MaterializationPathProbeRequest::new(
+        source.clone(),
+        target.clone(),
+        derived_path(parent, &[staging_name.as_bytes()])?,
+        derived_path(parent, &[trash_name.as_bytes()])?,
+    ))
 }
 
 fn derived_path(root: &AbsolutePath, components: &[&[u8]]) -> Result<AbsolutePath, UseCaseError> {
@@ -714,7 +830,7 @@ fn derived_path(root: &AbsolutePath, components: &[&[u8]]) -> Result<AbsolutePat
         bytes.extend_from_slice(component);
     }
     AbsolutePath::try_from_bytes(bytes)
-        .map_err(|_| semantic_error(ErrorCode::DataRootLayout, "invalid derived Workspace path"))
+        .map_err(|_| semantic_error(ErrorCode::TargetLayout, "invalid derived Workspace path"))
 }
 
 fn map_plan_error(error: MaterializationPlanError) -> UseCaseError {
@@ -729,7 +845,7 @@ fn map_plan_error(error: MaterializationPlanError) -> UseCaseError {
         ),
         MaterializationPlanError::NotApfs | MaterializationPlanError::DifferentVolume => {
             semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::TargetLayout,
                 "materialization paths are not on one APFS volume",
             )
         }
@@ -758,14 +874,87 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
     use std::str::FromStr;
 
-    use thinws_core::{InstanceId, VolumeId};
+    use tempfile::Builder;
+    use thinws_adapter_macos::MacOsHostAdapter;
+    use thinws_core::{
+        DirectoryIdentityEvidence, Evidence, FileIdentity, FileSystemIdentity, InstanceId,
+        MountEvidence, VolumeId,
+    };
+    use thinws_ports::PlatformProbe;
 
     use super::*;
 
     fn path(value: &str) -> AbsolutePath {
         AbsolutePath::try_from_bytes(value.as_bytes()).unwrap()
+    }
+
+    fn missing_target_report(
+        requested: &str,
+        nearest_existing_ancestor: &str,
+        missing_components: &[&str],
+    ) -> PathCapabilityReport {
+        let ancestor = path(nearest_existing_ancestor);
+        PathCapabilityReport::new(
+            path(requested),
+            PathResolution::MissingTarget,
+            ancestor.clone(),
+            missing_components
+                .iter()
+                .map(|component| component.as_bytes().to_vec())
+                .collect(),
+            vec![DirectoryIdentityEvidence::new(
+                ancestor,
+                FileIdentity::new(1, 2),
+            )],
+            FileSystemIdentity::new(
+                "apfs",
+                [1, 2],
+                Evidence::Known(
+                    VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+                ),
+            ),
+            MountEvidence::new(0, true),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_target_guard_rejects_each_inconsistent_port_fact() {
+        let expected_parent = path("/data/workspaces");
+        let valid = missing_target_report("/data/workspaces/clone", "/data/workspaces", &["clone"]);
+        assert!(require_missing_target(&valid, &expected_parent).is_ok());
+
+        // PathCapabilityReport permits a Port to supply these inconsistent
+        // combinations; creation must not authorize either one as a target.
+        let wrong_ancestor =
+            missing_target_report("/data/workspaces/clone", "/data/other", &["clone"]);
+        assert_eq!(
+            require_missing_target(&wrong_ancestor, &expected_parent)
+                .unwrap_err()
+                .diagnostic()
+                .code(),
+            ErrorCode::TargetLayout
+        );
+        let wrong_suffix = missing_target_report(
+            "/data/workspaces/clone",
+            "/data/workspaces",
+            &["extra", "clone"],
+        );
+        assert_eq!(
+            require_missing_target(&wrong_suffix, &expected_parent)
+                .unwrap_err()
+                .diagnostic()
+                .code(),
+            ErrorCode::TargetLayout
+        );
     }
 
     #[test]
@@ -776,6 +965,75 @@ mod tests {
         assert!(paths_overlap(&path("/"), &path("/a")));
         assert!(!paths_overlap(&path("/a/b"), &path("/a/bc")));
         assert!(!paths_overlap(&path("/a/b"), &path("/a/c")));
+    }
+
+    #[test]
+    fn requested_path_overlap_rejects_each_independent_pair() {
+        let control = path("/control");
+        assert!(requested_paths_overlap(
+            &path("/control/source"),
+            &path("/target"),
+            &control
+        ));
+        assert!(requested_paths_overlap(
+            &path("/source"),
+            &path("/control/target"),
+            &control
+        ));
+        assert!(requested_paths_overlap(
+            &path("/source"),
+            &path("/source/target"),
+            &control
+        ));
+        assert!(!requested_paths_overlap(
+            &path("/source"),
+            &path("/target"),
+            &control
+        ));
+    }
+
+    #[test]
+    fn materialization_overlap_checks_source_and_target_identity_independently() {
+        fn absolute(path: &Path) -> AbsolutePath {
+            AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+        }
+
+        let temp = Builder::new().prefix("create-overlap-").tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let control = root.join(".thinws");
+        let source = root.join("source");
+        let source_inside_control = control.join("source");
+        fs::create_dir(&control).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&source_inside_control).unwrap();
+        let adapter = MacOsHostAdapter::new(&control).unwrap();
+        let control = adapter.inspect_path(&absolute(&control)).unwrap();
+        let source = adapter.inspect_path(&absolute(&source)).unwrap();
+        let source_inside_control = adapter
+            .inspect_path(&absolute(&source_inside_control))
+            .unwrap();
+        let ordinary_target = adapter
+            .inspect_path(&absolute(&root.join("target")))
+            .unwrap();
+        let control_target = adapter
+            .inspect_path(&absolute(&root.join(".thinws/target")))
+            .unwrap();
+
+        assert!(!materialization_overlaps_control(
+            &source,
+            &ordinary_target,
+            &control
+        ));
+        assert!(materialization_overlaps_control(
+            &source_inside_control,
+            &ordinary_target,
+            &control
+        ));
+        assert!(materialization_overlaps_control(
+            &source,
+            &control_target,
+            &control
+        ));
     }
 
     #[test]
@@ -806,7 +1064,7 @@ mod tests {
     fn preview_exposes_the_selected_preflight_fallback_reason() {
         let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let preview = CreatePreview {
-            target_parent: path("/data/workspaces"),
+            target: path("/data/workspaces/clone"),
             source_volume_id: volume,
             target_volume_id: volume,
             effective_mode: MaterializationMode::FullCopy,
@@ -840,7 +1098,7 @@ mod tests {
         ] {
             assert_eq!(
                 map_plan_error(cause).diagnostic().code(),
-                ErrorCode::DataRootLayout
+                ErrorCode::TargetLayout
             );
         }
     }

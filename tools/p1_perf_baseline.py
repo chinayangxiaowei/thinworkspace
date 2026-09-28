@@ -152,10 +152,13 @@ def main() -> int:
         home.mkdir()
         source = scratch / "source"
         fixture = make_source(source)
-        data_root = scratch / "data-root"
-        initialized = run_json(binary, home, "init", "--data-root", str(data_root))
+        target_root = scratch / "targets"
+        target_root.mkdir()
+        initialized = run_json(binary, home, "init")
         if initialized.get("result") != "initialized":
             raise RuntimeError("isolated benchmark instance was not initialized")
+        if initialized.get("control_root") != str(home / ".thinws"):
+            raise RuntimeError("isolated benchmark control root is not the requested HOME")
         before_copies = volume_info(volume_root)
         if before_copies["volume_uuid"] != initial["volume_uuid"]:
             raise RuntimeError("APFS volume identity changed during fixture setup")
@@ -163,9 +166,11 @@ def main() -> int:
         for round_index in range(ROUNDS):
             for copy_index in range(COPIES_PER_ROUND):
                 name = f"bench-r{round_index:02d}-c{copy_index:02d}"
+                target = target_root / name
                 started = time.perf_counter_ns()
                 created = run_json(
-                    binary, home, "workspace", "create", "--source", str(source), "--name", name
+                    binary, home, "workspace", "create", "--source", str(source),
+                    "--target", str(target), "--name", name
                 )
                 elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
                 materialization = created.get("materialization")
@@ -177,8 +182,8 @@ def main() -> int:
                 ):
                     raise RuntimeError(f"copy {name} did not confirm CoW: {created!r}")
                 workspace = Path(created["path"]).resolve(strict=True)
-                if not workspace.is_relative_to(data_root.resolve(strict=True)):
-                    raise RuntimeError(f"copy {name} escaped benchmark data root")
+                if workspace != target.resolve(strict=True):
+                    raise RuntimeError(f"copy {name} did not use its explicit target")
                 observations.append(
                     {"round": round_index + 1, "copy": copy_index + 1, "elapsed_ms": round(elapsed_ms, 3)}
                 )

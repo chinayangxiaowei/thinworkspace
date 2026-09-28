@@ -28,6 +28,32 @@ fn absolute(path: &std::path::Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
 }
 
+fn make_request(
+    source: AbsolutePath,
+    name: WorkspaceName,
+    allow_copy: bool,
+    now: UnixMillis,
+) -> CreateRequest {
+    let bytes = source.as_bytes();
+    let parent_end = bytes.iter().rposition(|byte| *byte == b'/').unwrap();
+    let mut target = if parent_end == 0 {
+        b"/".to_vec()
+    } else {
+        bytes[..parent_end].to_vec()
+    };
+    if target != b"/" {
+        target.push(b'/');
+    }
+    target.extend_from_slice(format!("thinws-test-{}", name.as_str()).as_bytes());
+    CreateRequest::new(
+        source,
+        AbsolutePath::try_from_bytes(target).unwrap(),
+        name,
+        allow_copy,
+        now,
+    )
+}
+
 struct WrongCloneKind;
 
 impl WorkspaceMaterializer for WrongCloneKind {
@@ -160,7 +186,7 @@ fn p1_09_create_mirrors_a_plain_source_and_reuses_ready_workspace() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"plain source without Git").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -175,7 +201,7 @@ fn p1_09_create_mirrors_a_plain_source_and_reuses_ready_workspace() {
         .unwrap();
     let clone = ApfsCloneMaterializer::new(adapter.clone());
     let copy = FullCopyMaterializer::new(adapter);
-    let request = CreateRequest::new(
+    let request = make_request(
         absolute(&source),
         WorkspaceName::from_str("plain-workspace").unwrap(),
         false,
@@ -204,7 +230,7 @@ fn p1_09_create_mirrors_a_plain_source_and_reuses_ready_workspace() {
 
     let authorized = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("copy-authorized").unwrap(),
                 true,
@@ -233,7 +259,7 @@ fn p1_09_create_mirrors_a_plain_source_and_reuses_ready_workspace() {
         b"plain source without Git"
     );
 
-    let different_source = CreateRequest::new(
+    let different_source = make_request(
         absolute(&temp.path().join("source-moved-away")),
         WorkspaceName::from_str("plain-workspace").unwrap(),
         false,
@@ -253,7 +279,7 @@ fn p1_09_rejects_wrong_backend_kind_before_any_installation_write() {
         Duration::from_secs(1),
         Duration::from_secs(1),
     );
-    let request = CreateRequest::new(
+    let request = make_request(
         AbsolutePath::try_from_bytes(b"/Volumes/data/source".to_vec()).unwrap(),
         WorkspaceName::from_str("wrong-backend").unwrap(),
         false,
@@ -281,7 +307,7 @@ fn p1_09_non_cow_failure_does_not_become_a_copy_fallback() {
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file.txt"), b"source").unwrap();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -296,7 +322,7 @@ fn p1_09_non_cow_failure_does_not_become_a_copy_fallback() {
         .unwrap();
     let error = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("non-cow-failure").unwrap(),
                 true,
@@ -347,7 +373,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
         .unwrap();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
-    let bootstrap = temp.path().join("bootstrap");
+    let bootstrap = temp.path().join("data-root");
     let adapter = MacOsHostAdapter::new(bootstrap).unwrap();
     let probe_target = temp.path().join("probe-target");
     let probe_staging = temp.path().join("probe-staging");
@@ -387,7 +413,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
     let copy = FullCopyMaterializer::new(adapter);
     let denied = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("copy-denied").unwrap(),
                 false,
@@ -402,7 +428,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
 
     let allowed = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("copy-allowed").unwrap(),
                 true,
@@ -426,7 +452,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
 
     let failed_copy = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("copy-failed").unwrap(),
                 true,
@@ -469,7 +495,7 @@ fn p1_09_preview_is_read_only_and_has_no_workspace_identity() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"preview source").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter,
         SqliteMetadataStoreFactory,
@@ -483,7 +509,7 @@ fn p1_09_preview_is_read_only_and_has_no_workspace_identity() {
         ))
         .unwrap();
     let preview = service
-        .preview_create(&CreateRequest::new(
+        .preview_create(&make_request(
             absolute(&source),
             WorkspaceName::from_str("preview-only").unwrap(),
             false,
@@ -493,10 +519,8 @@ fn p1_09_preview_is_read_only_and_has_no_workspace_identity() {
     assert_eq!(preview.effective_mode(), MaterializationMode::CowClone);
     assert_eq!(preview.selected_adapter(), MaterializerKind::ApfsFileClone);
     assert_eq!(preview.source_volume_id(), preview.target_volume_id());
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        0
-    );
+    assert!(!data_root.join("workspaces").exists());
+    assert!(!temp.path().join("thinws-test-preview-only").exists());
     assert!(!data_root.join("metadata/lifecycle.lock").exists());
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
 }
@@ -513,7 +537,7 @@ fn p1_09_concurrent_same_name_has_one_creation_and_one_idempotent_result() {
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file.txt"), b"race-free content").unwrap();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let data_root = temp.path().join("data-root");
     let setup = ThinWorkspaceService::new(
         adapter.clone(),
@@ -545,7 +569,7 @@ fn p1_09_concurrent_same_name_has_one_creation_and_one_idempotent_result() {
             barrier.wait();
             service
                 .create(
-                    CreateRequest::new(
+                    make_request(
                         source,
                         WorkspaceName::from_str("one-name").unwrap(),
                         false,
@@ -571,10 +595,8 @@ fn p1_09_concurrent_same_name_has_one_creation_and_one_idempotent_result() {
         first.record().reservation().workspace_id(),
         second.record().reservation().workspace_id()
     );
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        1
-    );
+    assert!(!data_root.join("workspaces").exists());
+    assert!(temp.path().join("thinws-test-one-name").is_dir());
 }
 
 #[test]
@@ -588,7 +610,7 @@ fn p1_09_data_root_lock_timeout_precedes_name_reservation() {
         .unwrap();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let data_root = temp.path().join("data-root");
     let service = ThinWorkspaceService::new(
         adapter.clone(),
@@ -607,7 +629,7 @@ fn p1_09_data_root_lock_timeout_precedes_name_reservation() {
         .unwrap();
     let error = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("lock-timeout").unwrap(),
                 false,
@@ -620,10 +642,8 @@ fn p1_09_data_root_lock_timeout_precedes_name_reservation() {
     assert_eq!(error.diagnostic().code(), ErrorCode::LockTimeout);
     drop(held);
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
-    assert_eq!(
-        fs::read_dir(data_root.join("workspaces")).unwrap().count(),
-        0
-    );
+    assert!(!data_root.join("workspaces").exists());
+    assert!(!temp.path().join("thinws-test-lock-timeout").exists());
 }
 
 #[test]
@@ -645,7 +665,7 @@ fn p1_09_unsupported_source_remains_incomplete_and_is_not_retried() {
             .unwrap()
             .success()
     );
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -660,14 +680,14 @@ fn p1_09_unsupported_source_remains_incomplete_and_is_not_retried() {
         .unwrap();
     let clone = ApfsCloneMaterializer::new(adapter.clone());
     let copy = FullCopyMaterializer::new(adapter);
-    let request = CreateRequest::new(
+    let request = make_request(
         absolute(&source),
         WorkspaceName::from_str("unsupported-entry").unwrap(),
         false,
         UnixMillis::new(1_700_000_000_100).unwrap(),
     );
     let first = service.create(request.clone(), &clone, &copy).unwrap_err();
-    assert_eq!(first.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(first.diagnostic().code(), ErrorCode::TargetLayout);
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 1);
     fs::remove_file(fifo).unwrap();
     let second = service.create(request, &clone, &copy).unwrap_err();
@@ -684,7 +704,7 @@ fn p1_09_cross_volume_and_containment_fail_before_reserving_a_workspace() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let system_source = tempfile::tempdir().unwrap();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -700,23 +720,23 @@ fn p1_09_cross_volume_and_containment_fail_before_reserving_a_workspace() {
         .unwrap();
     let clone = ApfsCloneMaterializer::new(adapter.clone());
     let copy = FullCopyMaterializer::new(adapter);
-    let cross_volume = CreateRequest::new(
+    let cross_volume = make_request(
         absolute(system_source.path()),
         WorkspaceName::from_str("cross-volume").unwrap(),
         true,
         UnixMillis::new(1_700_000_000_100).unwrap(),
     );
     let error = service.create(cross_volume, &clone, &copy).unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetLayout);
 
-    let contained = CreateRequest::new(
+    let contained = make_request(
         absolute(&data_root.join("workspaces")),
         WorkspaceName::from_str("contained").unwrap(),
         false,
         UnixMillis::new(1_700_000_000_100).unwrap(),
     );
     let error = service.create(contained, &clone, &copy).unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetLayout);
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
 }
 
@@ -730,7 +750,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -752,7 +772,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
     assert_eq!(alias_metadata.dev(), registered_metadata.dev());
     assert_eq!(alias_metadata.ino(), registered_metadata.ino());
     let source = alias.join("logs");
-    let request = CreateRequest::new(
+    let request = make_request(
         absolute(&source),
         WorkspaceName::from_str("case-alias").unwrap(),
         false,
@@ -764,7 +784,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootLayout
+        ErrorCode::TargetLayout
     );
     assert_eq!(
         service
@@ -776,7 +796,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootLayout
+        ErrorCode::TargetLayout
     );
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
 
@@ -796,7 +816,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
         ancestor_metadata.ino(),
         fs::metadata(temp.path()).unwrap().ino()
     );
-    let ancestor_request = CreateRequest::new(
+    let ancestor_request = make_request(
         absolute(&ancestor_alias),
         WorkspaceName::from_str("ancestor-alias").unwrap(),
         false,
@@ -808,7 +828,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootLayout
+        ErrorCode::TargetLayout
     );
     assert_eq!(
         service
@@ -820,7 +840,7 @@ fn p1_09_case_alias_inside_data_root_is_rejected_before_reservation() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootLayout
+        ErrorCode::TargetLayout
     );
     assert_eq!(service.doctor().unwrap().incomplete_workspaces(), 0);
 }
@@ -835,7 +855,7 @@ fn p1_09_missing_source_is_not_reported_as_cow_unavailable() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -850,7 +870,7 @@ fn p1_09_missing_source_is_not_reported_as_cow_unavailable() {
         .unwrap();
     let source = absolute(&temp.path().join("missing-source"));
     for allow_copy in [false, true] {
-        let request = CreateRequest::new(
+        let request = make_request(
             source.clone(),
             WorkspaceName::from_str(if allow_copy {
                 "missing-copy"
@@ -898,7 +918,7 @@ fn p1_09_unreadable_source_is_not_reported_as_cow_unavailable() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("file.txt"), b"source").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -914,7 +934,7 @@ fn p1_09_unreadable_source_is_not_reported_as_cow_unavailable() {
     for (mode, name_prefix) in [(0o400, "no-search"), (0o100, "no-read")] {
         fs::set_permissions(&source, fs::Permissions::from_mode(mode)).unwrap();
         for allow_copy in [false, true] {
-            let request = CreateRequest::new(
+            let request = make_request(
                 absolute(&source),
                 WorkspaceName::from_str(&format!(
                     "{name_prefix}-{}",
@@ -951,7 +971,7 @@ fn p1_09_unreadable_source_is_not_reported_as_cow_unavailable() {
 }
 
 #[test]
-fn p1_09_missing_registered_data_root_uses_unavailable_error() {
+fn p1_09_missing_fixed_control_directory_is_not_initialized() {
     let controlled =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-application-tests");
     fs::create_dir_all(&controlled).unwrap();
@@ -962,7 +982,7 @@ fn p1_09_missing_registered_data_root_uses_unavailable_error() {
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -976,7 +996,7 @@ fn p1_09_missing_registered_data_root_uses_unavailable_error() {
         ))
         .unwrap();
     fs::rename(&data_root, temp.path().join("data-root-moved")).unwrap();
-    let request = CreateRequest::new(
+    let request = make_request(
         absolute(&source),
         WorkspaceName::from_str("missing-root").unwrap(),
         false,
@@ -988,7 +1008,7 @@ fn p1_09_missing_registered_data_root_uses_unavailable_error() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootUnavailable
+        ErrorCode::NotInitialized
     );
     assert_eq!(
         service
@@ -1000,6 +1020,6 @@ fn p1_09_missing_registered_data_root_uses_unavailable_error() {
             .unwrap_err()
             .diagnostic()
             .code(),
-        ErrorCode::DataRootUnavailable
+        ErrorCode::NotInitialized
     );
 }

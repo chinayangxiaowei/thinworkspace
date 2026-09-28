@@ -25,7 +25,7 @@ pub enum DocumentError {
     InvalidToml,
     /// The schema version is not supported by this binary.
     UnsupportedVersion,
-    /// The data-root hex is odd, uppercase, or contains a non-hex byte.
+    /// The control-root hex is odd, uppercase, or contains a non-hex byte.
     InvalidPathHex,
     /// One or more identity fields violate their Core value-object contract.
     InvalidIdentity,
@@ -72,6 +72,14 @@ struct OwnershipDocument {
     target_inode: u64,
     target_birth_seconds: i64,
     target_birth_nanoseconds: u32,
+    staging_path_hex: String,
+    staging_inode: u64,
+    staging_birth_seconds: i64,
+    staging_birth_nanoseconds: u32,
+    trash_path_hex: String,
+    trash_inode: u64,
+    trash_birth_seconds: i64,
+    trash_birth_nanoseconds: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     isolated_path_hex: Option<String>,
 }
@@ -84,7 +92,15 @@ pub(crate) struct WorkspaceOwnership {
     pub(crate) target_path: AbsolutePath,
     pub(crate) parent: HistoricalDirectoryIdentity,
     pub(crate) target: HistoricalDirectoryIdentity,
+    pub(crate) staging: OperationDirectoryOwnership,
+    pub(crate) trash: OperationDirectoryOwnership,
     pub(crate) isolated_path: Option<AbsolutePath>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OperationDirectoryOwnership {
+    pub(crate) path: AbsolutePath,
+    pub(crate) identity: HistoricalDirectoryIdentity,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -107,7 +123,7 @@ pub fn decode_bootstrap_config(bytes: &[u8]) -> Result<InstallationIdentity, Doc
     )
 }
 
-/// Decodes a versioned data-root marker without touching the filesystem.
+/// Decodes a versioned control-root marker without touching the filesystem.
 pub fn decode_root_marker(bytes: &[u8]) -> Result<RootMarker, DocumentError> {
     let document: MarkerDocument = decode_toml(bytes)?;
     if document.schema_version != DOCUMENT_SCHEMA_VERSION {
@@ -163,6 +179,14 @@ pub(crate) fn encode_workspace_ownership(
         target_inode: ownership.target.inode,
         target_birth_seconds: ownership.target.birth_seconds,
         target_birth_nanoseconds: ownership.target.birth_nanoseconds,
+        staging_path_hex: encode_hex(ownership.staging.path.as_bytes()),
+        staging_inode: ownership.staging.identity.inode,
+        staging_birth_seconds: ownership.staging.identity.birth_seconds,
+        staging_birth_nanoseconds: ownership.staging.identity.birth_nanoseconds,
+        trash_path_hex: encode_hex(ownership.trash.path.as_bytes()),
+        trash_inode: ownership.trash.identity.inode,
+        trash_birth_seconds: ownership.trash.identity.birth_seconds,
+        trash_birth_nanoseconds: ownership.trash.identity.birth_nanoseconds,
         isolated_path_hex: ownership
             .isolated_path
             .as_ref()
@@ -179,23 +203,65 @@ pub(crate) fn decode_workspace_ownership(
     }
     if document.target_parent_birth_nanoseconds >= 1_000_000_000
         || document.target_birth_nanoseconds >= 1_000_000_000
+        || document.staging_birth_nanoseconds >= 1_000_000_000
+        || document.trash_birth_nanoseconds >= 1_000_000_000
         || document.target_parent_inode == 0
         || document.target_inode == 0
+        || document.staging_inode == 0
+        || document.trash_inode == 0
         || document.target_parent_birth_seconds < 0
         || document.target_birth_seconds < 0
+        || document.staging_birth_seconds < 0
+        || document.trash_birth_seconds < 0
     {
         return Err(DocumentError::InvalidIdentity);
     }
+    let workspace_id = WorkspaceId::from_str(&document.workspace_id)
+        .map_err(|_| DocumentError::InvalidIdentity)?;
     let target_path = AbsolutePath::try_from_bytes(decode_hex(&document.target_path_hex)?)
         .map_err(|_| DocumentError::InvalidIdentity)?;
     let target_parent = parent_path_bytes(&target_path).ok_or(DocumentError::InvalidIdentity)?;
+    let decode_operation_directory =
+        |hex: &str, inode: u64, birth_seconds: i64, birth_nanoseconds: u32| {
+            let path = AbsolutePath::try_from_bytes(decode_hex(hex)?)
+                .map_err(|_| DocumentError::InvalidIdentity)?;
+            Ok(OperationDirectoryOwnership {
+                path,
+                identity: HistoricalDirectoryIdentity {
+                    inode,
+                    birth_seconds,
+                    birth_nanoseconds,
+                },
+            })
+        };
+    let staging = decode_operation_directory(
+        &document.staging_path_hex,
+        document.staging_inode,
+        document.staging_birth_seconds,
+        document.staging_birth_nanoseconds,
+    )?;
+    let trash = decode_operation_directory(
+        &document.trash_path_hex,
+        document.trash_inode,
+        document.trash_birth_seconds,
+        document.trash_birth_nanoseconds,
+    )?;
+    if staging.path.as_bytes()
+        != sibling_path_bytes(target_parent, &format!(".thinws-staging-{workspace_id}"))
+        || trash.path.as_bytes()
+            != sibling_path_bytes(target_parent, &format!(".thinws-trash-{workspace_id}"))
+    {
+        return Err(DocumentError::InvalidIdentity);
+    }
     let isolated_path = document
         .isolated_path_hex
         .as_deref()
         .map(|hex| {
             let path = AbsolutePath::try_from_bytes(decode_hex(hex)?)
                 .map_err(|_| DocumentError::InvalidIdentity)?;
-            if path == target_path || parent_path_bytes(&path) != Some(target_parent) {
+            if path.as_bytes()
+                != sibling_path_bytes(target_parent, &format!(".thinws-remove-{workspace_id}"))
+            {
                 return Err(DocumentError::InvalidIdentity);
             }
             Ok(path)
@@ -204,8 +270,7 @@ pub(crate) fn decode_workspace_ownership(
     Ok(WorkspaceOwnership {
         instance_id: InstanceId::from_str(&document.instance_id)
             .map_err(|_| DocumentError::InvalidIdentity)?,
-        workspace_id: WorkspaceId::from_str(&document.workspace_id)
-            .map_err(|_| DocumentError::InvalidIdentity)?,
+        workspace_id,
         volume_id: VolumeId::from_str(&document.volume_id)
             .map_err(|_| DocumentError::InvalidIdentity)?,
         target_path,
@@ -219,6 +284,8 @@ pub(crate) fn decode_workspace_ownership(
             birth_seconds: document.target_birth_seconds,
             birth_nanoseconds: document.target_birth_nanoseconds,
         },
+        staging,
+        trash,
         isolated_path,
     })
 }
@@ -237,6 +304,15 @@ fn parent_path_bytes(path: &AbsolutePath) -> Option<&[u8]> {
     } else {
         &bytes[..last_slash]
     })
+}
+
+fn sibling_path_bytes(parent: &[u8], leaf: &str) -> Vec<u8> {
+    let mut bytes = parent.to_vec();
+    if bytes != b"/" {
+        bytes.push(b'/');
+    }
+    bytes.extend_from_slice(leaf.as_bytes());
+    bytes
 }
 
 fn decode_toml<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, DocumentError> {
@@ -462,17 +538,117 @@ mod tests {
 
         let ownership = decode_workspace_ownership(valid.as_bytes()).unwrap();
         let mut isolated = ownership.clone();
-        isolated.isolated_path =
-            Some(AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-workspace".to_vec()).unwrap());
+        isolated.isolated_path = Some(
+            AbsolutePath::try_from_bytes(
+                b"/tmp/.thinws-remove-ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42".to_vec(),
+            )
+            .unwrap(),
+        );
         assert_eq!(
             decode_workspace_ownership(&encode_workspace_ownership(&isolated).unwrap()),
             Ok(isolated.clone())
         );
         isolated.isolated_path = Some(
-            AbsolutePath::try_from_bytes(b"/outside/.thinws-remove-workspace".to_vec()).unwrap(),
+            AbsolutePath::try_from_bytes(
+                b"/outside/.thinws-remove-ws_01890a5d-ac96-774b-bd5b-55c7b8d09f42".to_vec(),
+            )
+            .unwrap(),
         );
         assert_eq!(
             decode_workspace_ownership(&encode_workspace_ownership(&isolated).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn v2_ownership_validates_each_historical_identity_field_independently() {
+        let valid = decode_workspace_ownership(include_bytes!(
+            "../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership"
+        ))
+        .unwrap();
+        let invalid_cases = [
+            (
+                "parent inode",
+                (|value: &mut WorkspaceOwnership| value.parent.inode = 0)
+                    as fn(&mut WorkspaceOwnership),
+            ),
+            ("target inode", |value| value.target.inode = 0),
+            ("staging inode", |value| value.staging.identity.inode = 0),
+            ("trash inode", |value| value.trash.identity.inode = 0),
+            ("parent birth seconds", |value| {
+                value.parent.birth_seconds = -1
+            }),
+            ("target birth seconds", |value| {
+                value.target.birth_seconds = -1
+            }),
+            ("staging birth seconds", |value| {
+                value.staging.identity.birth_seconds = -1
+            }),
+            ("trash birth seconds", |value| {
+                value.trash.identity.birth_seconds = -1
+            }),
+            ("parent birth nanos", |value| {
+                value.parent.birth_nanoseconds = 1_000_000_000
+            }),
+            ("target birth nanos", |value| {
+                value.target.birth_nanoseconds = 1_000_000_000
+            }),
+            ("staging birth nanos", |value| {
+                value.staging.identity.birth_nanoseconds = 1_000_000_000
+            }),
+            ("trash birth nanos", |value| {
+                value.trash.identity.birth_nanoseconds = 1_000_000_000
+            }),
+        ];
+        for (name, mutate) in invalid_cases {
+            let mut invalid = valid.clone();
+            mutate(&mut invalid);
+            assert_eq!(
+                decode_workspace_ownership(&encode_workspace_ownership(&invalid).unwrap()),
+                Err(DocumentError::InvalidIdentity),
+                "{name}"
+            );
+        }
+
+        for (name, mutate) in [
+            (
+                "staging birth seconds",
+                (|value: &mut WorkspaceOwnership| {
+                    value.staging.identity.birth_seconds = 0;
+                }) as fn(&mut WorkspaceOwnership),
+            ),
+            ("trash birth seconds", |value: &mut WorkspaceOwnership| {
+                value.trash.identity.birth_seconds = 0;
+            }),
+        ] {
+            let mut boundary = valid.clone();
+            mutate(&mut boundary);
+            assert_eq!(
+                decode_workspace_ownership(&encode_workspace_ownership(&boundary).unwrap()),
+                Ok(boundary),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_ownership_rejects_each_noncanonical_operation_path() {
+        let valid = decode_workspace_ownership(include_bytes!(
+            "../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership"
+        ))
+        .unwrap();
+        let mut wrong_staging = valid.clone();
+        wrong_staging.staging.path =
+            AbsolutePath::try_from_bytes(b"/tmp/other-staging".to_vec()).unwrap();
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&wrong_staging).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+        let mut wrong_trash = valid;
+        wrong_trash.trash.path =
+            AbsolutePath::try_from_bytes(b"/tmp/other-trash".to_vec()).unwrap();
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&wrong_trash).unwrap()),
             Err(DocumentError::InvalidIdentity)
         );
     }

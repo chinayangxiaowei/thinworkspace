@@ -6,26 +6,29 @@ use rustix::fs::{AtFlags, RenameFlags};
 
 use thinws_core::{
     AbsolutePath, InstallationIdentity, RootMarker, RootMarkerState, VolumeId, WorkspaceId,
+    WorkspaceReservation,
 };
 use thinws_ports::{
-    BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PortConflict,
-    PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence, PublishResult,
-    RemovalLogRecord, WorkspaceRemoval, WorkspaceSpace,
+    BootstrapStore, DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PlatformProbe,
+    PortConflict, PortError, PortErrorKind, PreparedDataRootEvidence, PreparedWorkspaceEvidence,
+    PublishResult, RemovalLogRecord, WorkspaceRemoval, WorkspaceSpace,
 };
 
 use crate::destroy::remove_root_contents;
 use crate::document::{
-    DocumentError, WorkspaceOwnership, decode_bootstrap_config, decode_root_marker,
-    decode_workspace_ownership, encode_config, encode_marker, encode_workspace_ownership,
+    DocumentError, OperationDirectoryOwnership, WorkspaceOwnership, decode_bootstrap_config,
+    decode_root_marker, decode_workspace_ownership, encode_config, encode_marker,
+    encode_workspace_ownership,
 };
 use crate::filesystem::{
     FileIdentity, NoReplaceError, PrivateTemp, ValidatedDirectory, create_private_child_directory,
     create_private_file, create_target_child_directory, duplicate_validated_directory,
-    entry_identity, historical_directory_identity, io_error, open_owned_child_directory,
-    open_private_child_directory, open_private_directory, open_private_directory_optional,
-    open_private_file, open_target_parent, path_from_absolute, prepare_private_directory,
-    read_private_file, require_empty_directory, revalidate_attached_directory,
-    revalidate_directory, sync_directory, unlink_entry, validate_file_entry,
+    entry_identity, historical_directory_identity, historical_target_parent_identity, io_error,
+    open_owned_child_directory, open_private_child_directory, open_private_directory,
+    open_private_directory_optional, open_private_file, open_target_parent, path_from_absolute,
+    prepare_private_directory, read_private_file, require_empty_directory, revalidate_directory,
+    revalidate_target_child, revalidate_target_parent, sync_directory, unlink_entry,
+    validate_file_entry,
 };
 use crate::space::measure_root;
 use crate::volume::decode_volume_id;
@@ -34,7 +37,7 @@ use crate::{MacOsHostAdapter, MacOsLockGuard};
 const CONFIG_NAME: &str = "config.toml";
 const MARKER_NAME: &str = ".thinws-control.toml";
 const STATE_DATABASE_NAME: &str = "state.db";
-const CONTROLLED_DIRECTORIES: [&str; 5] = ["metadata", "logs", "workspaces", "staging", "trash"];
+const CONTROLLED_DIRECTORIES: [&str; 2] = ["metadata", "logs"];
 
 /// Non-copyable proof that this process published one exact initializing marker.
 pub struct MacOsInitializingProof {
@@ -44,7 +47,7 @@ pub struct MacOsInitializingProof {
     marker: RootMarker,
 }
 
-/// Descriptor-backed evidence for one prepared APFS data root.
+/// Descriptor-backed evidence for the prepared APFS control root.
 pub struct MacOsPreparedDataRoot {
     data_root: AbsolutePath,
     volume_id: VolumeId,
@@ -61,7 +64,7 @@ impl PreparedDataRootEvidence for MacOsPreparedDataRoot {
     }
 }
 
-/// Descriptor-backed evidence for one controlled data-root layout.
+/// Descriptor-backed evidence for the verified control-root layout.
 pub struct MacOsDataRootLayout {
     data_root: ValidatedDirectory,
     controlled_directories: Vec<ValidatedDirectory>,
@@ -74,16 +77,17 @@ pub struct MacOsDataRootLayout {
 
 /// Proof of one newly created Workspace container.
 pub struct MacOsPreparedWorkspace {
-    container: ValidatedDirectory,
-    state: ValidatedDirectory,
+    parent: ValidatedDirectory,
     root: ValidatedDirectory,
-    incomplete_file: File,
-    incomplete_identity: FileIdentity,
+    staging: ValidatedDirectory,
+    trash: ValidatedDirectory,
     ownership_metadata: ValidatedDirectory,
     ownership_file: File,
     ownership_identity: FileIdentity,
     ownership: WorkspaceOwnership,
     target_root: AbsolutePath,
+    staging_root: AbsolutePath,
+    trash_root: AbsolutePath,
     volume_id: VolumeId,
 }
 
@@ -92,18 +96,20 @@ impl PreparedWorkspaceEvidence for MacOsPreparedWorkspace {
         &self.target_root
     }
 
+    fn staging_root(&self) -> &AbsolutePath {
+        &self.staging_root
+    }
+
+    fn trash_root(&self) -> &AbsolutePath {
+        &self.trash_root
+    }
+
     fn target_identity(&self) -> thinws_core::FileIdentity {
         self.root.identity.as_core()
     }
 
     fn revalidate(&self) -> Result<(), PortError> {
         self.revalidate_directories()?;
-        validate_file_entry(
-            &self.state.fd,
-            OsStr::new("incomplete"),
-            &self.incomplete_file,
-            self.incomplete_identity,
-        )?;
         revalidate_directory(&self.ownership_metadata)?;
         let name = ownership_name(self.ownership.workspace_id);
         validate_file_entry(
@@ -126,37 +132,53 @@ impl PreparedWorkspaceEvidence for MacOsPreparedWorkspace {
 
 impl MacOsPreparedWorkspace {
     fn revalidate_directories(&self) -> Result<(), PortError> {
-        for directory in [&self.container, &self.state] {
-            revalidate_directory(directory)?;
+        revalidate_target_parent(&self.parent)?;
+        for (directory, name) in [
+            (&self.root, self.root.path.file_name()),
+            (&self.staging, self.staging.path.file_name()),
+            (&self.trash, self.trash.path.file_name()),
+        ] {
+            let name = name.ok_or_else(|| {
+                PortError::new(PortErrorKind::InvalidLayout, "Workspace child has no name")
+            })?;
+            revalidate_target_child(&self.parent, directory, name)?;
             if volume_id_for_directory(directory)? != self.volume_id {
                 return Err(PortError::new(
                     PortErrorKind::InvalidLayout,
-                    "revalidate Workspace container volume",
+                    "revalidate Workspace operation directory volume",
                 ));
             }
         }
-        revalidate_attached_directory(&self.container, &self.root, OsStr::new("root"))?;
-        if volume_id_for_directory(&self.root)? != self.volume_id {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "revalidate Workspace root volume",
-            ));
+        require_prepared_historical_ownership(&self.ownership, &self.parent, &self.root)?;
+        for (evidence, actual) in [
+            (&self.ownership.staging, &self.staging),
+            (&self.ownership.trash, &self.trash),
+        ] {
+            if evidence.path.as_bytes() != actual.path.as_os_str().as_bytes()
+                || !evidence
+                    .identity
+                    .permits_current(historical_directory_identity(actual)?)
+            {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace temporary directory ownership changed",
+                ));
+            }
         }
-        require_prepared_historical_ownership(&self.ownership, &self.container, &self.root)?;
         Ok(())
     }
 }
 
 fn require_prepared_historical_ownership(
     ownership: &WorkspaceOwnership,
-    container: &ValidatedDirectory,
+    parent: &ValidatedDirectory,
     root: &ValidatedDirectory,
 ) -> Result<(), PortError> {
     if ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
         || ownership.isolated_path.is_some()
         || !ownership
             .parent
-            .permits_current(historical_directory_identity(container)?)
+            .permits_current(historical_target_parent_identity(parent)?)
         || !ownership
             .target
             .permits_current(historical_directory_identity(root)?)
@@ -187,7 +209,7 @@ impl MacOsDataRootLayout {
         if volume_id_for_directory(&self.data_root)? != self.volume_id {
             return Err(PortError::new(
                 PortErrorKind::InvalidData,
-                "revalidate data-root volume identity",
+                "revalidate control-root volume identity",
             ));
         }
         for directory in &self.controlled_directories {
@@ -227,12 +249,14 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         data_root: &AbsolutePath,
     ) -> Result<Self::PreparedDataRoot, PortError> {
-        let directory = prepare_private_directory(&path_from_absolute(data_root), false)?;
-        if directory.path == self.bootstrap_dir {
-            require_unclaimed_control_root(&directory)?;
-        } else {
-            require_empty_directory(&directory)?;
+        if path_from_absolute(data_root) != self.bootstrap_dir {
+            return Err(PortError::conflict(
+                "prepare fixed control root",
+                PortConflict::InstallationIdentity,
+            ));
         }
+        let directory = prepare_private_directory(&path_from_absolute(data_root), false)?;
+        require_unclaimed_control_root(&directory)?;
         let volume_id = volume_id_for_directory(&directory)?;
         Ok(MacOsPreparedDataRoot {
             data_root: data_root.clone(),
@@ -252,6 +276,12 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         data_root: &thinws_core::AbsolutePath,
     ) -> Result<Option<RootMarker>, PortError> {
+        if path_from_absolute(data_root) != self.bootstrap_dir {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "read fixed control marker",
+            ));
+        }
         let Some(directory) = open_private_directory_optional(&path_from_absolute(data_root))?
         else {
             return Ok(None);
@@ -270,7 +300,7 @@ impl BootstrapStore for MacOsHostAdapter {
             || prepared.volume_id() != identity.volume_id()
         {
             return Err(PortError::conflict(
-                "validate prepared data root",
+                "validate prepared control root",
                 PortConflict::InstallationIdentity,
             ));
         }
@@ -278,15 +308,17 @@ impl BootstrapStore for MacOsHostAdapter {
         revalidate_directory(&directory)?;
         if volume_id_for_directory(&directory)? != identity.volume_id() {
             return Err(PortError::conflict(
-                "revalidate prepared data-root volume",
+                "revalidate prepared control-root volume",
                 PortConflict::InstallationIdentity,
             ));
         }
-        if directory.path == self.bootstrap_dir {
-            require_unclaimed_control_root(&directory)?;
-        } else {
-            require_empty_directory(&directory)?;
+        if directory.path != self.bootstrap_dir {
+            return Err(PortError::conflict(
+                "validate fixed control root",
+                PortConflict::InstallationIdentity,
+            ));
         }
+        require_unclaimed_control_root(&directory)?;
         let marker = RootMarker::new(identity.clone(), RootMarkerState::Initializing);
         let bytes = encode_marker(&marker).map_err(document_error)?;
         let temporary = PrivateTemp::create(&directory.fd, "root-marker", &bytes)?;
@@ -333,7 +365,7 @@ impl BootstrapStore for MacOsHostAdapter {
         revalidate_directory(&proof.data_root)?;
         if volume_id_for_directory(&proof.data_root)? != proof.marker.identity().volume_id() {
             return Err(PortError::conflict(
-                "revalidate initializing data-root volume",
+                "revalidate initializing control-root volume",
                 PortConflict::InstallationIdentity,
             ));
         }
@@ -373,18 +405,24 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         identity: &InstallationIdentity,
     ) -> Result<Self::DataRootLayout, PortError> {
+        if path_from_absolute(identity.data_root()) != self.bootstrap_dir {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "validate fixed control root",
+            ));
+        }
         let Some(data_root) =
             open_private_directory_optional(&path_from_absolute(identity.data_root()))?
         else {
             return Err(PortError::new(
                 PortErrorKind::Unavailable,
-                "open registered data root",
+                "open registered control root",
             ));
         };
         if volume_id_for_directory(&data_root)? != identity.volume_id() {
             return Err(PortError::new(
                 PortErrorKind::InvalidData,
-                "validate registered data-root volume",
+                "validate registered control-root volume",
             ));
         }
         let mut controlled_directories = Vec::with_capacity(CONTROLLED_DIRECTORIES.len());
@@ -421,40 +459,83 @@ impl BootstrapStore for MacOsHostAdapter {
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
+        target: &AbsolutePath,
     ) -> Result<Self::PreparedWorkspace, PortError> {
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
-        let workspaces = &layout.controlled_directories[2];
-        let name = workspace_id.to_string();
-        let container = create_private_child_directory(workspaces, OsStr::new(&name))?;
-        let state = create_private_child_directory(&container, OsStr::new(".state"))?;
-        let (incomplete_file, incomplete_identity) =
-            create_private_file(&state, OsStr::new("incomplete"))?;
-        let target_path = crate::filesystem::absolute_from_path(&container.path.join("root"))
-            .map_err(|error| {
-                PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
-                    .with_source(error)
-            })?;
-        let (target_parent, target_name) = open_target_parent(&target_path)?;
-        if target_parent.identity != container.identity {
+        let (parent, target_name) = open_target_parent(target)?;
+        let parent_path = crate::filesystem::absolute_from_path(&parent.path).map_err(|error| {
+            PortError::new(
+                PortErrorKind::InvalidLayout,
+                "derive Workspace target parent",
+            )
+            .with_source(error)
+        })?;
+        let parent_report = self.inspect_path(&parent_path)?;
+        // For a missing path, ancestry ends at a different existing ancestor;
+        // one identity comparison also covers that case.
+        if parent_report
+            .ancestry()
+            .last()
+            .map(|entry| entry.identity())
+            != Some(parent.identity.as_core())
+        {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
-                "Workspace target parent differs from prepared container",
+                "Workspace target parent changed before creation",
             ));
         }
-        let root = create_target_child_directory(&target_parent, &target_name)?;
+        if parent_report
+            .ancestry()
+            .iter()
+            .any(|entry| entry.identity() == layout.data_root.identity.as_core())
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace target overlaps the control root",
+            ));
+        }
+        let volume_id = volume_id_for_directory(&parent)?;
+        let root = create_target_child_directory(&parent, &target_name)?;
         require_empty_directory(&root)?;
+        let staging_name = format!(".thinws-staging-{workspace_id}");
+        let trash_name = format!(".thinws-trash-{workspace_id}");
+        let staging = create_target_child_directory(&parent, OsStr::new(&staging_name))?;
+        let trash = create_target_child_directory(&parent, OsStr::new(&trash_name))?;
+        require_empty_directory(&staging)?;
+        require_empty_directory(&trash)?;
         let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
             PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
                 .with_source(error)
         })?;
+        if &target_root != target {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "created target differs from requested target",
+            ));
+        }
+        let staging_root =
+            crate::filesystem::absolute_from_path(&staging.path).map_err(|error| {
+                PortError::new(PortErrorKind::InvalidData, "derive staging path").with_source(error)
+            })?;
+        let trash_root = crate::filesystem::absolute_from_path(&trash.path).map_err(|error| {
+            PortError::new(PortErrorKind::InvalidData, "derive rollback path").with_source(error)
+        })?;
         let ownership = WorkspaceOwnership {
             instance_id: layout.instance_id,
             workspace_id,
-            volume_id: layout.volume_id,
+            volume_id,
             target_path: target_root.clone(),
-            parent: historical_directory_identity(&container)?,
+            parent: historical_target_parent_identity(&parent)?,
             target: historical_directory_identity(&root)?,
+            staging: OperationDirectoryOwnership {
+                path: staging_root.clone(),
+                identity: historical_directory_identity(&staging)?,
+            },
+            trash: OperationDirectoryOwnership {
+                path: trash_root.clone(),
+                identity: historical_directory_identity(&trash)?,
+            },
             isolated_path: None,
         };
         let ownership_metadata = duplicate_validated_directory(&layout.controlled_directories[0])?;
@@ -477,17 +558,18 @@ impl BootstrapStore for MacOsHostAdapter {
             Err(NoReplaceError::Other(error)) => return Err(error),
         };
         let prepared = MacOsPreparedWorkspace {
-            container,
-            state,
+            parent,
             root,
-            incomplete_file,
-            incomplete_identity,
+            staging,
+            trash,
             ownership_metadata,
             ownership_file,
             ownership_identity,
             ownership,
             target_root,
-            volume_id: layout.volume_id,
+            staging_root,
+            trash_root,
+            volume_id,
         };
         prepared.revalidate()?;
         layout.revalidate()?;
@@ -503,22 +585,28 @@ impl BootstrapStore for MacOsHostAdapter {
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
         prepared.revalidate()?;
-        let workspaces = &layout.controlled_directories[2];
-        if prepared.container.path.parent() != Some(workspaces.path.as_path()) {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "verify prepared Workspace parent",
-            ));
+        for directory in [&prepared.staging, &prepared.trash] {
+            require_empty_directory(directory)?;
+            let name = directory.path.file_name().ok_or_else(|| {
+                PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace temporary root has no name",
+                )
+            })?;
+            revalidate_target_child(&prepared.parent, directory, name)?;
+            rustix::fs::unlinkat(&prepared.parent.fd, name, AtFlags::REMOVEDIR)
+                .map_err(|error| io_error("remove completed Workspace temporary root", error))?;
+            sync_directory(&prepared.parent.fd)?;
         }
-        unlink_entry(&prepared.state.fd, OsStr::new("incomplete"))?;
-        sync_directory(&prepared.state.fd)?;
-        prepared.revalidate_directories()?;
-        if read_private_file(&prepared.state.fd, OsStr::new("incomplete"))?.is_some() {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "verify incomplete marker removal",
-            ));
-        }
+        revalidate_target_child(
+            &prepared.parent,
+            &prepared.root,
+            prepared
+                .root
+                .path
+                .file_name()
+                .expect("prepared target has a leaf"),
+        )?;
         layout.revalidate()?;
         Ok(())
     }
@@ -526,54 +614,36 @@ impl BootstrapStore for MacOsHostAdapter {
     fn validate_ready_workspace(
         &self,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<AbsolutePath, PortError> {
         layout.revalidate()?;
-        let workspaces = &layout.controlled_directories[2];
-        let container =
-            open_private_child_directory(workspaces, OsStr::new(&workspace_id.to_string()))?;
-        let state = open_private_child_directory(&container, OsStr::new(".state"))?;
-        if read_private_file(&state.fd, OsStr::new("incomplete"))?.is_some() {
+        let (parent, name, ownership) = registered_target(layout, reservation)?;
+        if ownership.isolated_path.is_some() {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
-                "Ready Workspace still has an incomplete marker",
+                "Ready target is isolated",
             ));
         }
-        let root = open_owned_child_directory(&container, OsStr::new("root"))?;
-        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
-        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-        require_ready_ownership(
-            &ownership,
-            layout.instance_id,
-            layout.volume_id,
-            &container,
-            &root,
-        )?;
-        for directory in [&container, &state, &root] {
-            if volume_id_for_directory(directory)? != layout.volume_id {
-                return Err(PortError::new(
-                    PortErrorKind::InvalidLayout,
-                    "Ready Workspace volume changed",
-                ));
-            }
-        }
-        let path = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
-            PortError::new(PortErrorKind::InvalidData, "derive Ready Workspace path")
-                .with_source(error)
+        let root = open_optional_owned_child(&parent, &name)?.ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::NotFound,
+                "registered Ready target is missing",
+            )
         })?;
-        revalidate_attached_directory(
-            workspaces,
-            &container,
-            OsStr::new(&workspace_id.to_string()),
-        )?;
-        revalidate_attached_directory(&container, &state, OsStr::new(".state"))?;
-        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
-        if read_workspace_ownership(&layout.controlled_directories[0], workspace_id)? != ownership {
+        verify_target_directory(&parent, &root, &name, &ownership)?;
+        require_operation_directories_absent(&parent, &ownership)?;
+        let path = reservation.target_path().clone();
+        if read_workspace_ownership(
+            &layout.controlled_directories[0],
+            reservation.workspace_id(),
+        )? != ownership
+        {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
-                "Ready Workspace ownership proof changed",
+                "Ready ownership proof changed",
             ));
         }
+        revalidate_target_child(&parent, &root, &name)?;
         layout.revalidate()?;
         Ok(path)
     }
@@ -581,27 +651,20 @@ impl BootstrapStore for MacOsHostAdapter {
     fn measure_ready_workspace_space(
         &self,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<WorkspaceSpace, PortError> {
-        let expected_path = self.validate_ready_workspace(layout, workspace_id)?;
-        let workspaces = &layout.controlled_directories[2];
-        let name = workspace_id.to_string();
-        let container = open_private_child_directory(workspaces, OsStr::new(&name))?;
-        let root = open_owned_child_directory(&container, OsStr::new("root"))?;
-        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
-        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
-        let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-        require_space_scan_ownership(
-            &ownership,
-            layout.instance_id,
-            layout.volume_id,
-            &container,
-            &root,
-        )?;
+        let expected_path = self.validate_ready_workspace(layout, reservation)?;
+        let (parent, name, ownership) = registered_target(layout, reservation)?;
+        let root = open_optional_owned_child(&parent, &name)?.ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::NotFound,
+                "registered Ready target is missing",
+            )
+        })?;
+        verify_target_directory(&parent, &root, &name, &ownership)?;
         let measurement = measure_root(&root.fd);
-        revalidate_attached_directory(workspaces, &container, OsStr::new(&name))?;
-        revalidate_attached_directory(&container, &root, OsStr::new("root"))?;
-        if self.validate_ready_workspace(layout, workspace_id)? != expected_path {
+        revalidate_target_child(&parent, &root, &name)?;
+        if self.validate_ready_workspace(layout, reservation)? != expected_path {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
                 "Ready Workspace path changed during space scan",
@@ -614,39 +677,19 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<Option<AbsolutePath>, PortError> {
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
-        let workspaces = &layout.controlled_directories[2];
-        let trash = &layout.controlled_directories[4];
-        let active_name = workspace_id.to_string();
-        let isolated_name = format!("remove-{workspace_id}");
-        let active = open_optional_private_child(workspaces, OsStr::new(&active_name))?;
-        let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
-        let located = match (active, isolated) {
-            (None, None) => None,
-            (Some(_), Some(_)) => {
-                return Err(PortError::new(
-                    PortErrorKind::InvalidLayout,
-                    "Workspace exists at both active and isolated paths",
-                ));
-            }
-            (Some(container), None) => Some((workspaces, active_name.as_str(), container)),
-            (None, Some(container)) => Some((trash, isolated_name.as_str(), container)),
-        };
-        let result = if let Some((parent, name, container)) = located {
-            let _ = validate_removal_layout(layout, workspace_id, &container)?;
-            revalidate_attached_directory(parent, &container, OsStr::new(name))?;
-            Some(
-                crate::filesystem::absolute_from_path(&container.path).map_err(|error| {
-                    PortError::new(PortErrorKind::InvalidData, "derive removal container path")
+        let (parent, target_name, ownership) = registered_target(layout, reservation)?;
+        let result = locate_target(&parent, &target_name, &ownership)?
+            .map(|(directory, _)| {
+                crate::filesystem::absolute_from_path(&directory.path).map_err(|error| {
+                    PortError::new(PortErrorKind::InvalidData, "derive removal target path")
                         .with_source(error)
-                })?,
-            )
-        } else {
-            None
-        };
+                })
+            })
+            .transpose()?;
         layout.revalidate()?;
         self.validate_data_root_lock(lock, layout)?;
         Ok(result)
@@ -671,108 +714,89 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &WorkspaceReservation,
     ) -> Result<WorkspaceRemoval, PortError> {
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
-        let workspaces = &layout.controlled_directories[2];
-        let trash = &layout.controlled_directories[4];
-        let name = workspace_id.to_string();
-        let isolated_name = format!("remove-{workspace_id}");
-        let source = open_optional_private_child(workspaces, OsStr::new(&name))?;
-        let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
-        let container = match (source, isolated) {
-            (None, None) => {
-                return Err(PortError::new(
+        let (parent, target_name, mut ownership) = registered_target(layout, reservation)?;
+        let (target, at_isolated_path) = locate_target(&parent, &target_name, &ownership)?
+            .ok_or_else(|| {
+                PortError::new(
                     PortErrorKind::NotFound,
                     "registered Workspace target is missing",
-                ));
-            }
-            (Some(_), Some(_)) => {
+                )
+            })?;
+        // Operation directories are independently registered. Remove them first,
+        // while the exact target still exists, so a failed cleanup leaves an
+        // addressable Workspace rather than an orphaned registration.
+        for evidence in [&ownership.staging, &ownership.trash] {
+            remove_operation_directory(self, lock, layout, &parent, evidence)?;
+        }
+        let isolated_name = format!(".thinws-remove-{}", reservation.workspace_id());
+        let isolated_path = crate::filesystem::absolute_from_path(
+            &parent.path.join(&isolated_name),
+        )
+        .map_err(|error| {
+            PortError::new(PortErrorKind::InvalidData, "derive isolated target path")
+                .with_source(error)
+        })?;
+        let isolated = if at_isolated_path {
+            if ownership.isolated_path.as_ref() != Some(&isolated_path) {
                 return Err(PortError::new(
                     PortErrorKind::InvalidLayout,
-                    "Workspace exists at both active and isolated paths",
+                    "isolated target is not registered",
                 ));
             }
-            (None, Some(container)) => container,
-            (Some(source), None) => {
-                let _ = validate_removal_layout(layout, workspace_id, &source)?;
-                revalidate_attached_directory(workspaces, &source, OsStr::new(&name))?;
-                self.validate_data_root_lock(lock, layout)?;
-                rustix::fs::renameat_with(
-                    &workspaces.fd,
-                    name.as_str(),
-                    &trash.fd,
-                    isolated_name.as_str(),
-                    RenameFlags::NOREPLACE,
-                )
-                .map_err(|error| io_error("isolate Workspace without replacement", error))?;
-                sync_directory(&workspaces.fd)?;
-                sync_directory(&trash.fd)?;
-                let moved = open_private_child_directory(trash, OsStr::new(&isolated_name));
-                let matches_source = moved
-                    .as_ref()
-                    .is_ok_and(|moved| moved.identity == source.identity);
-                if !matches_source {
-                    return Err(PortError::new(
-                        PortErrorKind::InvalidLayout,
-                        "isolated Workspace identity changed; unsafe to restore or remove",
-                    ));
-                }
-                moved.expect("matched isolated Workspace is open")
+            target
+        } else {
+            if ownership.isolated_path.as_ref() != Some(&isolated_path) {
+                ownership.isolated_path = Some(isolated_path);
+                persist_workspace_ownership(layout, &ownership)?;
             }
+            self.validate_data_root_lock(lock, layout)?;
+            verify_target_directory(&parent, &target, &target_name, &ownership)?;
+            rustix::fs::renameat_with(
+                &parent.fd,
+                &target_name,
+                &parent.fd,
+                isolated_name.as_str(),
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(|error| io_error("isolate Workspace target without replacement", error))?;
+            sync_directory(&parent.fd)?;
+            let moved = open_owned_child_directory(&parent, OsStr::new(&isolated_name))?;
+            if moved.identity != target.identity {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "isolated target identity changed",
+                ));
+            }
+            moved
         };
-        let post_isolation = self
-            .validate_data_root_lock(lock, layout)
-            .and_then(|()| {
-                revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
-            })
-            .and_then(|()| validate_removal_layout(layout, workspace_id, &container));
-        // A failed recheck leaves the container at its isolated name. A later
-        // explicit request may retry only after proving that same container.
-        let (state, root) = post_isolation?;
-        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))?;
-        let mut root_entries = 0;
-        if let Some(root) = &root {
-            revalidate_attached_directory(&container, root, OsStr::new("root"))?;
-            let verify_scope = || {
-                self.validate_data_root_lock(lock, layout)
-                    .and_then(|()| {
-                        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))
-                    })
-                    .and_then(|()| {
-                        revalidate_attached_directory(&container, root, OsStr::new("root"))
-                    })
-                    .map_err(|_| std::io::Error::from_raw_os_error(libc::ESTALE))
-            };
-            root_entries = remove_root_contents(&root.fd, root.identity.as_core(), &verify_scope)
+        verify_target_directory(&parent, &isolated, OsStr::new(&isolated_name), &ownership)?;
+        let verify_scope = || {
+            self.validate_data_root_lock(lock, layout)
+                .and_then(|()| {
+                    verify_target_directory(
+                        &parent,
+                        &isolated,
+                        OsStr::new(&isolated_name),
+                        &ownership,
+                    )
+                })
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::ESTALE))
+        };
+        let root_entries =
+            remove_root_contents(&isolated.fd, isolated.identity.as_core(), &verify_scope)
                 .map_err(classify_root_removal_error)?;
-            revalidate_attached_directory(&container, root, OsStr::new("root"))?;
-            rustix::fs::unlinkat(&container.fd, "root", AtFlags::REMOVEDIR)
-                .map_err(|error| io_error("remove Workspace root directory", error))?;
-            sync_directory(&container.fd)?;
-        }
-        if let Some(state) = &state {
-            revalidate_attached_directory(&container, state, OsStr::new(".state"))?;
-            if read_private_file(&state.fd, OsStr::new("incomplete"))?.is_some() {
-                unlink_entry(&state.fd, OsStr::new("incomplete"))?;
-                sync_directory(&state.fd)?;
-            }
-            require_empty_directory(state)?;
-            revalidate_attached_directory(&container, state, OsStr::new(".state"))?;
-            rustix::fs::unlinkat(&container.fd, ".state", AtFlags::REMOVEDIR)
-                .map_err(|error| io_error("remove Workspace state directory", error))?;
-            sync_directory(&container.fd)?;
-        }
-        require_empty_directory(&container)?;
-        revalidate_attached_directory(trash, &container, OsStr::new(&isolated_name))?;
-        rustix::fs::unlinkat(&trash.fd, isolated_name.as_str(), AtFlags::REMOVEDIR)
-            .map_err(|error| io_error("remove Workspace container", error))?;
-        sync_directory(&trash.fd)?;
+        verify_target_directory(&parent, &isolated, OsStr::new(&isolated_name), &ownership)?;
+        rustix::fs::unlinkat(&parent.fd, isolated_name.as_str(), AtFlags::REMOVEDIR)
+            .map_err(|error| io_error("remove isolated Workspace target", error))?;
+        sync_directory(&parent.fd)?;
         self.validate_data_root_lock(lock, layout)?;
         layout.revalidate()?;
-        require_missing_entry(workspaces, OsStr::new(&name))?;
-        require_missing_entry(trash, OsStr::new(&isolated_name))?;
+        require_missing_entry(&parent, &target_name)?;
+        require_missing_entry(&parent, OsStr::new(&isolated_name))?;
         layout.revalidate()?;
         Ok(WorkspaceRemoval::Removed { root_entries })
     }
@@ -928,11 +952,11 @@ impl BootstrapStore for MacOsHostAdapter {
 
 fn volume_id_for_directory(directory: &ValidatedDirectory) -> Result<VolumeId, PortError> {
     let filesystem = crate::ffi::file_system_type(&directory.fd)
-        .map_err(|error| io_error("inspect data-root filesystem", error))?;
+        .map_err(|error| io_error("inspect control-root filesystem", error))?;
     if filesystem != "apfs" {
         return Err(PortError::new(
             PortErrorKind::CapabilityUnavailable,
-            "require APFS data root",
+            "require APFS control root",
         ));
     }
     let bytes = crate::ffi::volume_uuid(&directory.fd)
@@ -964,7 +988,7 @@ impl MacOsHostAdapter {
         {
             return Err(PortError::new(
                 PortErrorKind::InvalidData,
-                "require matching data-root lifecycle lock",
+                "require matching control-root lifecycle lock",
             ));
         }
         lock.revalidate()
@@ -1024,141 +1048,183 @@ fn read_workspace_ownership(
     Ok(ownership)
 }
 
-fn require_removal_ownership(
+fn registered_target(
     layout: &MacOsDataRootLayout,
-    workspace_id: WorkspaceId,
-    container: &ValidatedDirectory,
-) -> Result<WorkspaceOwnership, PortError> {
-    let ownership = read_workspace_ownership(&layout.controlled_directories[0], workspace_id)?;
-    validate_removal_ownership(&ownership, layout.instance_id, layout.volume_id, container)?;
-    Ok(ownership)
-}
-
-fn require_ready_ownership(
-    ownership: &WorkspaceOwnership,
-    instance_id: thinws_core::InstanceId,
-    volume_id: VolumeId,
-    container: &ValidatedDirectory,
-    root: &ValidatedDirectory,
-) -> Result<(), PortError> {
-    if ownership.instance_id != instance_id
-        || ownership.volume_id != volume_id
-        || ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
-        || ownership.isolated_path.is_some()
-        || !ownership
-            .parent
-            .permits_current(historical_directory_identity(container)?)
-        || !ownership
-            .target
-            .permits_current(historical_directory_identity(root)?)
-    {
-        Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "Ready Workspace historical ownership changed",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn require_space_scan_ownership(
-    ownership: &WorkspaceOwnership,
-    instance_id: thinws_core::InstanceId,
-    volume_id: VolumeId,
-    container: &ValidatedDirectory,
-    root: &ValidatedDirectory,
-) -> Result<(), PortError> {
-    if ownership.instance_id != instance_id
-        || ownership.volume_id != volume_id
-        || ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
-        || ownership.isolated_path.is_some()
-        || !ownership
-            .parent
-            .permits_current(historical_directory_identity(container)?)
-        || !ownership
-            .target
-            .permits_current(historical_directory_identity(root)?)
-        || volume_id_for_directory(root)? != volume_id
-    {
-        Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "Ready Workspace space-scan ownership changed",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_removal_ownership(
-    ownership: &WorkspaceOwnership,
-    instance_id: thinws_core::InstanceId,
-    volume_id: VolumeId,
-    container: &ValidatedDirectory,
-) -> Result<(), PortError> {
-    if ownership.instance_id != instance_id
-        || ownership.volume_id != volume_id
-        || !ownership
-            .parent
-            .permits_current(historical_directory_identity(container)?)
-        || volume_id_for_directory(container)? != volume_id
-    {
-        Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "Workspace container historical ownership changed",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_removal_layout(
-    layout: &MacOsDataRootLayout,
-    workspace_id: WorkspaceId,
-    container: &ValidatedDirectory,
-) -> Result<(Option<ValidatedDirectory>, Option<ValidatedDirectory>), PortError> {
-    let ownership = require_removal_ownership(layout, workspace_id, container)?;
-    let state = open_optional_private_child(container, OsStr::new(".state"))?;
-    let root = open_optional_owned_child(container, OsStr::new("root"))?.ok_or_else(|| {
-        PortError::new(
-            PortErrorKind::NotFound,
-            "registered Workspace root is missing",
-        )
-    })?;
-    if !ownership
-        .target
-        .permits_current(historical_directory_identity(&root)?)
-        || volume_id_for_directory(&root)? != layout.volume_id
+    reservation: &WorkspaceReservation,
+) -> Result<(ValidatedDirectory, std::ffi::OsString, WorkspaceOwnership), PortError> {
+    let ownership = read_workspace_ownership(
+        &layout.controlled_directories[0],
+        reservation.workspace_id(),
+    )?;
+    if reservation.instance_id() != layout.instance_id
+        || ownership.instance_id != reservation.instance_id()
+        || ownership.target_path != *reservation.target_path()
+        || ownership.volume_id != reservation.target_volume_id()
+        || reservation.source_volume_id() != reservation.target_volume_id()
     {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
-            "Workspace root historical ownership changed",
+            "Workspace registration and ownership proof differ",
         ));
     }
-    if let Some(state) = &state
-        && volume_id_for_directory(state)? != layout.volume_id
+    let (parent, name) = open_target_parent(reservation.target_path())?;
+    if volume_id_for_directory(&parent)? != ownership.volume_id
+        || !ownership
+            .parent
+            .permits_current(historical_target_parent_identity(&parent)?)
     {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
-            "Workspace state volume changed",
+            "Workspace target parent identity changed",
         ));
     }
-    require_only_entries(container, &[".state", "root"])?;
-    if let Some(state) = &state {
-        require_only_entries(state, &["incomplete"])?;
-        let _ = read_private_file(&state.fd, OsStr::new("incomplete"))?;
-    }
-    Ok((state, Some(root)))
+    Ok((parent, name, ownership))
 }
 
-fn open_optional_private_child(
+fn verify_target_directory(
     parent: &ValidatedDirectory,
+    directory: &ValidatedDirectory,
     name: &OsStr,
-) -> Result<Option<ValidatedDirectory>, PortError> {
-    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => open_private_child_directory(parent, name).map(Some),
-        Err(rustix::io::Errno::NOENT) => Ok(None),
-        Err(error) => Err(io_error("inspect Workspace private child", error)),
+    ownership: &WorkspaceOwnership,
+) -> Result<(), PortError> {
+    revalidate_target_child(parent, directory, name)?;
+    if volume_id_for_directory(directory)? != ownership.volume_id
+        || !ownership
+            .target
+            .permits_current(historical_directory_identity(directory)?)
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace target historical identity changed",
+        ));
     }
+    Ok(())
+}
+
+fn isolated_name(ownership: &WorkspaceOwnership) -> String {
+    format!(".thinws-remove-{}", ownership.workspace_id)
+}
+
+fn locate_target(
+    parent: &ValidatedDirectory,
+    target_name: &OsStr,
+    ownership: &WorkspaceOwnership,
+) -> Result<Option<(ValidatedDirectory, bool)>, PortError> {
+    let active = open_optional_owned_child(parent, target_name)?;
+    let isolated_name = isolated_name(ownership);
+    let isolated = open_optional_owned_child(parent, OsStr::new(&isolated_name))?;
+    if isolated.is_some()
+        && ownership.isolated_path.as_ref().is_none_or(|path| {
+            path.as_bytes() != parent.path.join(&isolated_name).as_os_str().as_bytes()
+        })
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "unregistered isolated Workspace target exists",
+        ));
+    }
+    match (active, isolated) {
+        (Some(_), Some(_)) => Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace target exists at active and isolated paths",
+        )),
+        (Some(directory), None) => {
+            verify_target_directory(parent, &directory, target_name, ownership)?;
+            Ok(Some((directory, false)))
+        }
+        (None, Some(directory)) => {
+            verify_target_directory(parent, &directory, OsStr::new(&isolated_name), ownership)?;
+            Ok(Some((directory, true)))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn require_operation_directories_absent(
+    parent: &ValidatedDirectory,
+    ownership: &WorkspaceOwnership,
+) -> Result<(), PortError> {
+    for evidence in [&ownership.staging, &ownership.trash] {
+        let name = evidence.path.as_bytes();
+        let leaf = name
+            .rsplit(|byte| *byte == b'/')
+            .next()
+            .expect("absolute path has a leaf");
+        require_missing_entry(parent, OsStr::from_bytes(leaf))?;
+    }
+    Ok(())
+}
+
+fn remove_operation_directory(
+    adapter: &MacOsHostAdapter,
+    lock: &MacOsLockGuard,
+    layout: &MacOsDataRootLayout,
+    parent: &ValidatedDirectory,
+    evidence: &OperationDirectoryOwnership,
+) -> Result<(), PortError> {
+    let bytes = evidence.path.as_bytes();
+    let leaf = bytes
+        .rsplit(|byte| *byte == b'/')
+        .next()
+        .expect("absolute path has a leaf");
+    let name = OsStr::from_bytes(leaf);
+    let Some(directory) = open_optional_owned_child(parent, name)? else {
+        return Ok(());
+    };
+    revalidate_target_child(parent, &directory, name)?;
+    if volume_id_for_directory(&directory)? != volume_id_for_directory(parent)?
+        || !evidence
+            .identity
+            .permits_current(historical_directory_identity(&directory)?)
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "operation directory identity changed",
+        ));
+    }
+    let verify_scope = || {
+        adapter
+            .validate_data_root_lock(lock, layout)
+            .and_then(|()| revalidate_target_child(parent, &directory, name))
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::ESTALE))
+    };
+    remove_root_contents(&directory.fd, directory.identity.as_core(), &verify_scope)
+        .map_err(classify_root_removal_error)?;
+    revalidate_target_child(parent, &directory, name)?;
+    rustix::fs::unlinkat(&parent.fd, name, AtFlags::REMOVEDIR)
+        .map_err(|error| io_error("remove Workspace operation directory", error))?;
+    sync_directory(&parent.fd)
+}
+
+fn persist_workspace_ownership(
+    layout: &MacOsDataRootLayout,
+    desired: &WorkspaceOwnership,
+) -> Result<(), PortError> {
+    let metadata = &layout.controlled_directories[0];
+    let current = read_workspace_ownership(metadata, desired.workspace_id)?;
+    if current == *desired {
+        return Ok(());
+    }
+    let mut previous = desired.clone();
+    previous.isolated_path = None;
+    if current != previous {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership changed before isolation",
+        ));
+    }
+    let bytes = encode_workspace_ownership(desired).map_err(document_error)?;
+    let mut temporary = PrivateTemp::create(&metadata.fd, "workspace-ownership-update", &bytes)?;
+    temporary.exchange_with(OsStr::new(&ownership_name(desired.workspace_id)))?;
+    sync_directory(&metadata.fd)?;
+    if read_workspace_ownership(metadata, desired.workspace_id)? != *desired {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "isolated ownership publication changed",
+        ));
+    }
+    unlink_entry(&metadata.fd, temporary.name())?;
+    sync_directory(&metadata.fd)
 }
 
 fn open_optional_owned_child(
@@ -1181,21 +1247,6 @@ fn require_missing_entry(parent: &ValidatedDirectory, name: &OsStr) -> Result<()
         )),
         Err(error) => Err(io_error("verify removed Workspace path", error)),
     }
-}
-
-fn require_only_entries(directory: &ValidatedDirectory, allowed: &[&str]) -> Result<(), PortError> {
-    let names = crate::ffi::read_directory(&directory.fd)
-        .map_err(|error| io_error("inspect Workspace platform entries", error))?;
-    if names
-        .iter()
-        .any(|name| !allowed.iter().any(|allowed| name == OsStr::new(allowed)))
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "Workspace container has unrecognized platform entries",
-        ));
-    }
-    Ok(())
 }
 
 fn require_unclaimed_control_root(directory: &ValidatedDirectory) -> Result<(), PortError> {
@@ -1271,7 +1322,7 @@ fn classify_layout_revalidation(error: PortError) -> PortError {
     ) {
         PortError::new(
             PortErrorKind::InvalidLayout,
-            "revalidate controlled data-root layout",
+            "revalidate control-root layout",
         )
         .with_source(error)
     } else {
@@ -1290,264 +1341,6 @@ mod tests {
     use thinws_core::{AbsolutePath, InstanceId, VolumeId};
 
     use super::*;
-    use crate::filesystem::HistoricalDirectoryIdentity;
-
-    fn ownership_guard_fixture() -> (
-        tempfile::TempDir,
-        ValidatedDirectory,
-        ValidatedDirectory,
-        WorkspaceOwnership,
-    ) {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-15-ownership-tests");
-        fs::create_dir_all(&root).unwrap();
-        let temp = Builder::new()
-            .prefix("ownership-guard-")
-            .tempdir_in(fs::canonicalize(root).unwrap())
-            .unwrap();
-        let container_path = temp.path().join("container");
-        let root_path = container_path.join("root");
-        fs::create_dir(&container_path).unwrap();
-        fs::create_dir(&root_path).unwrap();
-        fs::set_permissions(&container_path, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::set_permissions(&root_path, fs::Permissions::from_mode(0o700)).unwrap();
-        let container = open_private_directory(&container_path).unwrap();
-        let root = open_private_directory(&root_path).unwrap();
-        let ownership = WorkspaceOwnership {
-            instance_id: InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
-            workspace_id: WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40").unwrap(),
-            volume_id: volume_id_for_directory(&container).unwrap(),
-            target_path: crate::filesystem::absolute_from_path(&root_path).unwrap(),
-            parent: historical_directory_identity(&container).unwrap(),
-            target: historical_directory_identity(&root).unwrap(),
-            isolated_path: None,
-        };
-        (temp, container, root, ownership)
-    }
-
-    #[test]
-    fn prepared_workspace_rejects_each_historical_directory_mismatch() {
-        let (_temp, container, root, ownership) = ownership_guard_fixture();
-        require_prepared_historical_ownership(&ownership, &container, &root).unwrap();
-        for changed in [
-            WorkspaceOwnership {
-                parent: HistoricalDirectoryIdentity {
-                    inode: ownership.parent.inode + 1,
-                    ..ownership.parent
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target: HistoricalDirectoryIdentity {
-                    inode: ownership.target.inode + 1,
-                    ..ownership.target
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                isolated_path: Some(
-                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
-                ),
-                ..ownership.clone()
-            },
-        ] {
-            let error =
-                require_prepared_historical_ownership(&changed, &container, &root).unwrap_err();
-            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
-            assert_eq!(
-                error.operation(),
-                "Workspace historical directory identity changed"
-            );
-        }
-    }
-
-    #[test]
-    fn ready_ownership_rejects_each_single_identity_mismatch() {
-        let (_temp, container, root, ownership) = ownership_guard_fixture();
-        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
-        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        require_ready_ownership(
-            &ownership,
-            ownership.instance_id,
-            ownership.volume_id,
-            &container,
-            &root,
-        )
-        .unwrap();
-        for changed in [
-            WorkspaceOwnership {
-                instance_id: other_instance,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                volume_id: other_volume,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                parent: HistoricalDirectoryIdentity {
-                    inode: ownership.parent.inode + 1,
-                    ..ownership.parent
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target: HistoricalDirectoryIdentity {
-                    inode: ownership.target.inode + 1,
-                    ..ownership.target
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                isolated_path: Some(
-                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
-                ),
-                ..ownership.clone()
-            },
-        ] {
-            let error = require_ready_ownership(
-                &changed,
-                ownership.instance_id,
-                ownership.volume_id,
-                &container,
-                &root,
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
-            assert_eq!(
-                error.operation(),
-                "Ready Workspace historical ownership changed"
-            );
-        }
-    }
-
-    #[test]
-    fn space_scan_rechecks_each_identity_after_ready_validation() {
-        let (_temp, container, root, ownership) = ownership_guard_fixture();
-        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
-        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        require_space_scan_ownership(
-            &ownership,
-            ownership.instance_id,
-            ownership.volume_id,
-            &container,
-            &root,
-        )
-        .unwrap();
-        for changed in [
-            WorkspaceOwnership {
-                instance_id: other_instance,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                volume_id: other_volume,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                parent: HistoricalDirectoryIdentity {
-                    inode: ownership.parent.inode + 1,
-                    ..ownership.parent
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target: HistoricalDirectoryIdentity {
-                    inode: ownership.target.inode + 1,
-                    ..ownership.target
-                },
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                isolated_path: Some(
-                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
-                ),
-                ..ownership.clone()
-            },
-        ] {
-            let error = require_space_scan_ownership(
-                &changed,
-                ownership.instance_id,
-                ownership.volume_id,
-                &container,
-                &root,
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
-            assert_eq!(
-                error.operation(),
-                "Ready Workspace space-scan ownership changed"
-            );
-        }
-        let mut matching_foreign_claim = ownership.clone();
-        matching_foreign_claim.volume_id = other_volume;
-        let error = require_space_scan_ownership(
-            &matching_foreign_claim,
-            ownership.instance_id,
-            other_volume,
-            &container,
-            &root,
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.operation(),
-            "Ready Workspace space-scan ownership changed"
-        );
-    }
-
-    #[test]
-    fn removal_ownership_rejects_each_single_container_mismatch() {
-        let (_temp, container, _root, ownership) = ownership_guard_fixture();
-        let other_instance = InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap();
-        let other_volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        validate_removal_ownership(
-            &ownership,
-            ownership.instance_id,
-            ownership.volume_id,
-            &container,
-        )
-        .unwrap();
-        for changed in [
-            WorkspaceOwnership {
-                instance_id: other_instance,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                volume_id: other_volume,
-                ..ownership.clone()
-            },
-            WorkspaceOwnership {
-                parent: HistoricalDirectoryIdentity {
-                    inode: ownership.parent.inode + 1,
-                    ..ownership.parent
-                },
-                ..ownership.clone()
-            },
-        ] {
-            let error = validate_removal_ownership(
-                &changed,
-                ownership.instance_id,
-                ownership.volume_id,
-                &container,
-            )
-            .unwrap_err();
-            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
-            assert_eq!(
-                error.operation(),
-                "Workspace container historical ownership changed"
-            );
-        }
-    }
 
     #[test]
     fn root_removal_classifies_identity_and_depth_failures_as_layout_errors() {
@@ -1695,6 +1488,88 @@ mod tests {
             let error = classify_layout_revalidation(PortError::new(kind, "injected drift"));
             assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
         }
+    }
+
+    #[test]
+    fn prepared_workspace_revalidates_each_persisted_directory_identity() {
+        let test_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-layout-v2-tests");
+        fs::create_dir_all(&test_root).unwrap();
+        let temp = Builder::new()
+            .prefix("prepared-ownership-")
+            .tempdir_in(fs::canonicalize(test_root).unwrap())
+            .unwrap();
+        let parent_path = temp.path().join("parent");
+        fs::create_dir(&parent_path).unwrap();
+        let target_root = crate::filesystem::absolute_from_path(&parent_path.join("copy")).unwrap();
+        let (parent, root_name) = open_target_parent(&target_root).unwrap();
+        let root = create_target_child_directory(&parent, &root_name).unwrap();
+        let staging = create_target_child_directory(&parent, OsStr::new("staging")).unwrap();
+        let trash = create_target_child_directory(&parent, OsStr::new("trash")).unwrap();
+        let staging_root = crate::filesystem::absolute_from_path(&staging.path).unwrap();
+        let trash_root = crate::filesystem::absolute_from_path(&trash.path).unwrap();
+        let metadata_path = temp.path().join("metadata");
+        fs::create_dir(&metadata_path).unwrap();
+        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let ownership_metadata = open_private_directory(&metadata_path).unwrap();
+        let (ownership_file, ownership_identity) =
+            create_private_file(&ownership_metadata, OsStr::new("proof")).unwrap();
+        let workspace_id =
+            WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f48").unwrap();
+        let volume_id = volume_id_for_directory(&parent).unwrap();
+        let ownership = WorkspaceOwnership {
+            instance_id: InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
+            workspace_id,
+            volume_id,
+            target_path: target_root.clone(),
+            parent: historical_target_parent_identity(&parent).unwrap(),
+            target: historical_directory_identity(&root).unwrap(),
+            staging: OperationDirectoryOwnership {
+                path: staging_root.clone(),
+                identity: historical_directory_identity(&staging).unwrap(),
+            },
+            trash: OperationDirectoryOwnership {
+                path: trash_root.clone(),
+                identity: historical_directory_identity(&trash).unwrap(),
+            },
+            isolated_path: None,
+        };
+        let mut prepared = MacOsPreparedWorkspace {
+            parent,
+            root,
+            staging,
+            trash,
+            ownership_metadata,
+            ownership_file,
+            ownership_identity,
+            ownership: ownership.clone(),
+            target_root,
+            staging_root,
+            trash_root,
+            volume_id,
+        };
+        prepared.revalidate_directories().unwrap();
+
+        prepared.ownership.staging.path =
+            crate::filesystem::absolute_from_path(&parent_path.join("wrong-staging")).unwrap();
+        assert!(prepared.revalidate_directories().is_err());
+        prepared.ownership = ownership.clone();
+        prepared.ownership.staging.identity.inode += 1;
+        assert!(prepared.revalidate_directories().is_err());
+        prepared.ownership = ownership.clone();
+        prepared.ownership.target_path =
+            crate::filesystem::absolute_from_path(&parent_path.join("wrong-target")).unwrap();
+        assert!(prepared.revalidate_directories().is_err());
+        prepared.ownership = ownership.clone();
+        prepared.ownership.parent.inode += 1;
+        assert!(prepared.revalidate_directories().is_err());
+        prepared.ownership = ownership.clone();
+        prepared.ownership.target.inode += 1;
+        assert!(prepared.revalidate_directories().is_err());
+        prepared.ownership = ownership;
+        prepared.ownership.isolated_path =
+            Some(crate::filesystem::absolute_from_path(&parent_path.join("isolated")).unwrap());
+        assert!(prepared.revalidate_directories().is_err());
     }
 
     #[test]

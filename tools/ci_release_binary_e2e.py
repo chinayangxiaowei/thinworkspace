@@ -16,10 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BINARY = REPO_ROOT / "target/release/thinws"
 
 
-def run_command(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+def run_command(home: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
     result = subprocess.run(
         [str(BINARY), *arguments],
         cwd=REPO_ROOT,
+        env=environment,
         capture_output=True,
         check=False,
         timeout=60,
@@ -32,8 +35,8 @@ def run_command(*arguments: str) -> subprocess.CompletedProcess[bytes]:
     return result
 
 
-def run_json(*arguments: str) -> dict[str, Any]:
-    document = json.loads(run_command("--json", *arguments).stdout)
+def run_json(home: Path, *arguments: str) -> dict[str, Any]:
+    document = json.loads(run_command(home, "--json", *arguments).stdout)
     if document.get("schema_version") != 1 or document.get("ok") is not True:
         raise RuntimeError(f"unexpected success envelope: {document!r}")
     if not isinstance(document.get("data"), dict):
@@ -55,9 +58,6 @@ def main() -> int:
     ):
         raise RuntimeError("release binary E2E requires a GitHub-hosted macOS runner")
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
-    config = Path.home() / "Library/Application Support/ThinWorkspace/config.toml"
-    if config.exists() or config.is_symlink():
-        raise RuntimeError(f"refusing to replace an existing bootstrap config: {config}")
     require(BINARY.is_file(), f"release binary is missing: {BINARY}")
 
     # The hosted runner is disposable. Keep this exact test root on failure so
@@ -66,17 +66,24 @@ def main() -> int:
     source = test_root / "source"
     source.mkdir()
     (source / "note.txt").write_bytes(b"source content")
-    data_root = test_root / "data-root"
+    home = test_root / "home"
+    home.mkdir()
+    legacy = home / "Library/Application Support/ThinWorkspace/config.toml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy instance must remain untouched")
+    target = test_root / "target"
     print(f"release CLI test root: {test_root}", flush=True)
 
-    initialized = run_json("init", "--data-root", str(data_root))
+    initialized = run_json(home, "init")
     require(initialized.get("result") == "initialized", "init did not create a new instance")
-    require(initialized.get("data_root") == str(data_root), "init changed the data root")
-    doctor = run_json("doctor")
+    require(initialized.get("control_root") == str(home / ".thinws"), "init changed the control root")
+    require(legacy.read_bytes() == b"legacy instance must remain untouched", "init changed legacy data")
+    doctor = run_json(home, "doctor")
     require(doctor.get("status") == "ready", "doctor did not report a ready instance")
 
     created = run_json(
-        "workspace", "create", "--source", str(source), "--name", "release-e2e"
+        home, "workspace", "create", "--source", str(source),
+        "--target", str(target), "--name", "release-e2e"
     )
     require(created.get("result") == "created", "workspace was not newly created")
     materialization = created.get("materialization")
@@ -84,18 +91,15 @@ def main() -> int:
     require(materialization.get("actual_mode") == "cow-clone", "create was not CoW")
     require(materialization.get("cow") == "confirmed", "CoW was not confirmed")
     workspace = Path(created["path"])
-    require(
-        workspace.resolve(strict=True).is_relative_to(data_root.resolve(strict=True)),
-        "workspace path escaped the test data root",
-    )
+    require(workspace.resolve(strict=True) == target.resolve(strict=True), "workspace path differs from target")
     require((workspace / "note.txt").read_bytes() == b"source content", "copy content differs")
 
-    path_output = run_command("workspace", "path", "release-e2e").stdout
+    path_output = run_command(home, "workspace", "path", "release-e2e").stdout
     require(path_output == os.fsencode(workspace) + b"\n", "workspace path bytes differ")
     (workspace / "note.txt").write_bytes(b"workspace content")
     require((source / "note.txt").read_bytes() == b"source content", "clone changed source")
 
-    removed = run_json("workspace", "remove", "release-e2e")
+    removed = run_json(home, "workspace", "remove", "release-e2e")
     require(removed.get("result") == "removed", "workspace remove did not complete")
     require(removed.get("forced") is False, "ordinary remove was marked forced")
     require(not workspace.exists(), "workspace path remained after remove")

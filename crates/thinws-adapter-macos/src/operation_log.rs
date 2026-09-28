@@ -1,4 +1,4 @@
-//! Synchronous JSONL cleanup logging in the verified data-root logs directory.
+//! Synchronous JSONL cleanup logging in the verified control-root logs directory.
 
 use std::ffi::OsStr;
 use std::fs::File;

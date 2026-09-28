@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,6 +22,32 @@ use thinws_ports::{
 
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+}
+
+fn make_request(
+    source: AbsolutePath,
+    name: WorkspaceName,
+    allow_copy: bool,
+    now: UnixMillis,
+) -> CreateRequest {
+    let bytes = source.as_bytes();
+    let parent_end = bytes.iter().rposition(|byte| *byte == b'/').unwrap();
+    let mut target = if parent_end == 0 {
+        b"/".to_vec()
+    } else {
+        bytes[..parent_end].to_vec()
+    };
+    if target != b"/" {
+        target.push(b'/');
+    }
+    target.extend_from_slice(format!("thinws-test-{}", name.as_str()).as_bytes());
+    CreateRequest::new(
+        source,
+        AbsolutePath::try_from_bytes(target).unwrap(),
+        name,
+        allow_copy,
+        now,
+    )
 }
 
 struct NoRepositories;
@@ -61,7 +88,7 @@ fn ready_fixture() -> (
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source survives removal").unwrap();
     let data_root = temp.path().join("data-root");
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
         adapter.clone(),
         SqliteMetadataStoreFactory,
@@ -75,19 +102,35 @@ fn ready_fixture() -> (
     let name: WorkspaceName = "remove-case".parse().unwrap();
     let created = service
         .create(
-            CreateRequest::new(absolute(&source), name, false, now),
+            make_request(absolute(&source), name, false, now),
             &ApfsCloneMaterializer::new(adapter.clone()),
             &FullCopyMaterializer::new(adapter),
         )
         .unwrap();
     let workspace_id = created.record().reservation().workspace_id();
+    assert_eq!(
+        created.record().reservation().target_path(),
+        &absolute(&temp.path().join("thinws-test-remove-case")),
+    );
     (temp, service, workspace_id)
 }
 
 fn target(temp: &TempDir, id: WorkspaceId) -> PathBuf {
-    temp.path()
-        .join("data-root/workspaces")
-        .join(id.to_string())
+    let document = fs::read_to_string(
+        temp.path()
+            .join(format!("data-root/metadata/ownership-{id}.toml")),
+    )
+    .unwrap();
+    let encoded = document
+        .lines()
+        .find_map(|line| line.strip_prefix("target_path_hex = \"")?.strip_suffix('"'))
+        .unwrap();
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    PathBuf::from(OsString::from_vec(bytes))
 }
 
 fn log_events(temp: &TempDir) -> Vec<serde_json::Value> {
@@ -102,7 +145,7 @@ fn log_events(temp: &TempDir) -> Vec<serde_json::Value> {
 fn p1_12_normal_remove_deletes_only_registered_copy_and_records_durable_events() {
     let (temp, service, workspace_id) = ready_fixture();
     let target = target(&temp, workspace_id);
-    assert!(target.join("root/note.txt").is_file());
+    assert!(target.join("note.txt").is_file());
 
     let outcome = service
         .remove(
@@ -161,7 +204,7 @@ fn p1_12_tracked_dirty_refuses_ordinary_remove_but_explicit_force_succeeds() {
             "Preserve and commit required work, or use workspace remove <name-or-id> --force to discard the copy."
         )
     );
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     let refused = log_events(&temp);
     assert_eq!(refused[0]["event"], "refused");
     assert_eq!(refused[0]["git_check_complete"], true);
@@ -198,7 +241,7 @@ fn p1_12_incomplete_git_check_refuses_ordinary_remove_but_force_can_continue() {
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::GitCheckIncomplete);
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     let refused = log_events(&temp);
     assert_eq!(refused[0]["git_state"], "unknown");
     assert_eq!(refused[0]["git_check_complete"], false);
@@ -255,7 +298,7 @@ fn p1_12_confirmed_process_use_blocks_force_without_deletion() {
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::WorkspaceBusy);
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     let events = log_events(&temp);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event"], "refused");
@@ -314,10 +357,13 @@ fn missing_registered_target_keeps_the_active_record_even_with_force() {
 }
 
 #[test]
-fn missing_registered_root_inside_old_container_keeps_the_active_record() {
+fn replaced_registered_target_keeps_the_active_record() {
     let (temp, service, id) = ready_fixture();
-    let container = target(&temp, id);
-    fs::remove_dir_all(container.join("root")).unwrap();
+    let target = target(&temp, id);
+    let original = temp.path().join("original-target");
+    fs::rename(&target, &original).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("foreign"), b"keep").unwrap();
 
     let error = service
         .remove(
@@ -326,8 +372,9 @@ fn missing_registered_root_inside_old_container_keeps_the_active_record() {
             &NoExternalUse,
         )
         .unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::TargetMissing);
-    assert!(container.exists());
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetIdentity);
+    assert_eq!(fs::read(target.join("foreign")).unwrap(), b"keep");
+    assert!(original.exists());
     let active = service.list_workspaces().unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].record().reservation().workspace_id(), id);
@@ -367,7 +414,7 @@ fn p1_12_complete_discovery_with_unknown_repository_is_not_logged_as_a_complete_
     );
     assert_eq!(log_events(&temp)[0]["git_check_complete"], false);
     assert_eq!(log_events(&temp)[0]["process_use"], "scan-incomplete");
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
 }
 
 #[test]
@@ -408,7 +455,7 @@ fn p1_12_unwritable_log_stops_force_before_deleting_or_entering_deleting() {
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::Filesystem);
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     assert_eq!(fs::read(external).unwrap(), b"unchanged");
     assert!(service.workspace_path("remove-case").is_ok());
 }
@@ -416,7 +463,7 @@ fn p1_12_unwritable_log_stops_force_before_deleting_or_entering_deleting() {
 #[test]
 fn p1_12_error_workspace_requires_new_explicit_force_without_replaying_creation() {
     let (temp, service, id) = ready_fixture();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let identity = adapter.read_config().unwrap().unwrap();
     let lock = adapter
         .acquire_data_root(identity.data_root(), Duration::from_secs(1))
@@ -459,7 +506,7 @@ fn p1_12_error_workspace_requires_new_explicit_force_without_replaying_creation(
             .map(|value| value.user_value()),
         Some("scan-incomplete")
     );
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     let forced = service
         .remove(
             RemoveRequest::try_from_raw("remove-case", true, 1_700_000_000_003).unwrap(),
@@ -485,8 +532,8 @@ impl ProcessProbe for ReplaceRootDuringProcessScan {
             workspace_container.as_bytes(),
             self.container.as_os_str().as_bytes()
         );
-        fs::remove_dir_all(self.container.join("root")).unwrap();
-        symlink(&self.external, self.container.join("root")).unwrap();
+        fs::remove_dir_all(&self.container).unwrap();
+        symlink(&self.external, &self.container).unwrap();
         Ok(ProcessObservation {
             observed_at: UnixMillis::new(1_700_000_000_000).unwrap(),
             use_state: ProcessUse::NoEvidence,
@@ -516,7 +563,7 @@ fn p1_12_root_replacement_before_delete_fails_and_logs_without_touching_external
         fs::read(external.join("precious.txt")).unwrap(),
         b"untouched"
     );
-    assert!(container.join("root").is_symlink());
+    assert!(container.is_symlink());
     let events = log_events(&temp);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["event"], "started");
@@ -524,7 +571,7 @@ fn p1_12_root_replacement_before_delete_fails_and_logs_without_touching_external
     let listed = service.list_workspaces().unwrap();
     assert_eq!(listed[0].record().state(), WorkspaceState::Error);
 
-    fs::remove_file(container.join("root")).unwrap();
+    fs::remove_file(&container).unwrap();
     let retried = service
         .remove(
             RemoveRequest::try_from_raw("remove-case", true, 1_700_000_000_002).unwrap(),
@@ -533,7 +580,7 @@ fn p1_12_root_replacement_before_delete_fails_and_logs_without_touching_external
         )
         .unwrap_err();
     assert_eq!(retried.diagnostic().code(), ErrorCode::TargetMissing);
-    assert!(container.exists());
+    assert!(!container.exists());
     assert_eq!(service.list_workspaces().unwrap().len(), 1);
     assert_eq!(
         fs::read(external.join("precious.txt")).unwrap(),
@@ -566,7 +613,7 @@ fn p1_12_process_preflight_failure_is_logged_before_any_removal_state_change() {
         )
         .unwrap_err();
     assert_eq!(error.diagnostic().code(), ErrorCode::Filesystem);
-    assert!(target(&temp, id).join("root/note.txt").is_file());
+    assert!(target(&temp, id).join("note.txt").is_file());
     assert!(service.workspace_path("remove-case").is_ok());
     let events = log_events(&temp);
     assert_eq!(events.len(), 1);
@@ -581,8 +628,8 @@ fn p1_12_unproven_root_refuses_force_and_persists_a_failed_preflight_event() {
     fs::create_dir(&external).unwrap();
     fs::write(external.join("precious.txt"), b"untouched").unwrap();
     let container = target(&temp, id);
-    fs::remove_dir_all(container.join("root")).unwrap();
-    symlink(&external, container.join("root")).unwrap();
+    fs::remove_dir_all(&container).unwrap();
+    symlink(&external, &container).unwrap();
     let error = service
         .remove(
             RemoveRequest::try_from_raw("remove-case", true, 1_700_000_000_001).unwrap(),
@@ -595,7 +642,7 @@ fn p1_12_unproven_root_refuses_force_and_persists_a_failed_preflight_event() {
         fs::read(external.join("precious.txt")).unwrap(),
         b"untouched"
     );
-    assert!(container.join("root").is_symlink());
+    assert!(container.is_symlink());
     let events = log_events(&temp);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event"], "failed");
@@ -605,11 +652,11 @@ fn p1_12_unproven_root_refuses_force_and_persists_a_failed_preflight_event() {
 #[test]
 fn p1_12_name_that_equals_another_id_cannot_silently_select_the_wrong_workspace() {
     let (temp, service, id_b) = ready_fixture();
-    let adapter = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let adapter = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let name_a: WorkspaceName = id_b.to_string().parse().unwrap();
     let created_a = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&temp.path().join("source")),
                 name_a,
                 false,

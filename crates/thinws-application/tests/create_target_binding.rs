@@ -30,6 +30,32 @@ fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
 }
 
+fn make_request(
+    source: AbsolutePath,
+    name: WorkspaceName,
+    allow_copy: bool,
+    now: UnixMillis,
+) -> CreateRequest {
+    let bytes = source.as_bytes();
+    let parent_end = bytes.iter().rposition(|byte| *byte == b'/').unwrap();
+    let mut target = if parent_end == 0 {
+        b"/".to_vec()
+    } else {
+        bytes[..parent_end].to_vec()
+    };
+    if target != b"/" {
+        target.push(b'/');
+    }
+    target.extend_from_slice(format!("thinws-test-{}", name.as_str()).as_bytes());
+    CreateRequest::new(
+        source,
+        AbsolutePath::try_from_bytes(target).unwrap(),
+        name,
+        allow_copy,
+        now,
+    )
+}
+
 struct SwapBeforeTargetProbe {
     inner: MacOsHostAdapter,
     swap_on_probe: usize,
@@ -128,8 +154,10 @@ impl BootstrapStore for SwapBeforeTargetProbe {
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
         workspace_id: WorkspaceId,
+        target: &AbsolutePath,
     ) -> Result<Self::PreparedWorkspace, PortError> {
-        self.inner.prepare_workspace(lock, layout, workspace_id)
+        self.inner
+            .prepare_workspace(lock, layout, workspace_id, target)
     }
 
     fn clear_workspace_incomplete(
@@ -145,28 +173,28 @@ impl BootstrapStore for SwapBeforeTargetProbe {
     fn validate_ready_workspace(
         &self,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &thinws_core::WorkspaceReservation,
     ) -> Result<AbsolutePath, PortError> {
-        self.inner.validate_ready_workspace(layout, workspace_id)
+        self.inner.validate_ready_workspace(layout, reservation)
     }
 
     fn measure_ready_workspace_space(
         &self,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &thinws_core::WorkspaceReservation,
     ) -> Result<thinws_ports::WorkspaceSpace, PortError> {
         self.inner
-            .measure_ready_workspace_space(layout, workspace_id)
+            .measure_ready_workspace_space(layout, reservation)
     }
 
     fn inspect_removal_container(
         &self,
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &thinws_core::WorkspaceReservation,
     ) -> Result<Option<AbsolutePath>, PortError> {
         self.inner
-            .inspect_removal_container(lock, layout, workspace_id)
+            .inspect_removal_container(lock, layout, reservation)
     }
 
     fn append_removal_log(
@@ -182,9 +210,9 @@ impl BootstrapStore for SwapBeforeTargetProbe {
         &self,
         lock: &Self::LockGuard,
         layout: &Self::DataRootLayout,
-        workspace_id: WorkspaceId,
+        reservation: &thinws_core::WorkspaceReservation,
     ) -> Result<thinws_ports::WorkspaceRemoval, PortError> {
-        self.inner.remove_workspace(lock, layout, workspace_id)
+        self.inner.remove_workspace(lock, layout, reservation)
     }
 
     fn publish_ready(
@@ -318,9 +346,9 @@ fn p1_12_rejects_replaced_root_before_initial_plan_without_writing_it() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"must not write the replacement").unwrap();
     let data_root = temp.path().join("data-root");
-    let inner = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let inner = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let service = ThinWorkspaceService::new(
-        SwapBeforeTargetProbe::new(inner.clone(), 1),
+        SwapBeforeTargetProbe::new(inner.clone(), 2),
         SqliteMetadataStoreFactory,
         Duration::from_secs(1),
         Duration::from_secs(1),
@@ -334,7 +362,7 @@ fn p1_12_rejects_replaced_root_before_initial_plan_without_writing_it() {
 
     let error = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("replaced-root").unwrap(),
                 false,
@@ -344,9 +372,15 @@ fn p1_12_rejects_replaced_root_before_initial_plan_without_writing_it() {
             &FullCopyMaterializer::new(inner),
         )
         .unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetLayout);
     let id = error.diagnostic().context()["workspace_id"].user_value();
-    let replacement = data_root.join("workspaces").join(id).join("root");
+    let replacement = temp.path().join("thinws-test-replaced-root");
+    assert!(
+        data_root
+            .join("metadata")
+            .join(format!("ownership-{id}.toml"))
+            .exists()
+    );
     let metadata = fs::metadata(&replacement).unwrap();
     assert_eq!(metadata.mode() & 0o7777, 0o700);
     assert_eq!(metadata.mtime(), 946_684_800);
@@ -374,10 +408,10 @@ fn p1_12_rejects_replaced_root_before_fallback_plan_without_writing_it() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"must not write the replacement").unwrap();
     let data_root = temp.path().join("data-root");
-    let inner = MacOsHostAdapter::new(temp.path().join("bootstrap")).unwrap();
+    let inner = MacOsHostAdapter::new(temp.path().join("data-root")).unwrap();
     let digest = source_digest(&inner, &source, temp.path());
     let service = ThinWorkspaceService::new(
-        SwapBeforeTargetProbe::restoring(inner.clone(), 2),
+        SwapBeforeTargetProbe::restoring(inner.clone(), 3),
         SqliteMetadataStoreFactory,
         Duration::from_secs(1),
         Duration::from_secs(1),
@@ -391,7 +425,7 @@ fn p1_12_rejects_replaced_root_before_fallback_plan_without_writing_it() {
 
     let error = service
         .create(
-            CreateRequest::new(
+            make_request(
                 absolute(&source),
                 WorkspaceName::from_str("replaced-fallback-root").unwrap(),
                 true,
@@ -403,19 +437,22 @@ fn p1_12_rejects_replaced_root_before_fallback_plan_without_writing_it() {
             &FullCopyMaterializer::new(inner),
         )
         .unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetLayout);
     assert_eq!(error.partial_receipts().len(), 1);
     let id = error.diagnostic().context()["workspace_id"].user_value();
-    let replacement = data_root
-        .join("workspaces")
-        .join(id)
-        .join("root-replacement");
+    let replacement = temp.path().join("root-replacement");
+    assert!(
+        data_root
+            .join("metadata")
+            .join(format!("ownership-{id}.toml"))
+            .exists()
+    );
     let metadata = fs::metadata(&replacement).unwrap();
     assert_eq!(metadata.mode() & 0o7777, 0o700);
     assert_eq!(metadata.mtime(), 946_684_800);
     assert_eq!(fs::read_dir(&replacement).unwrap().count(), 0);
     assert_eq!(
-        fs::read_dir(replacement.with_file_name("root"))
+        fs::read_dir(temp.path().join("thinws-test-replaced-fallback-root"))
             .unwrap()
             .count(),
         0

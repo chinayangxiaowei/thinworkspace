@@ -1,7 +1,6 @@
 //! Best-effort cwd and open-vnode occupancy inspection via macOS libproc.
 
 use std::fs;
-use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,7 +13,11 @@ use crate::ffi::{
     RawProcessIdentity, RawProcessVnode, fd_kernel_path, process_cwd, process_identity,
     process_vnode_fd, process_vnode_fds, visible_user_pids,
 };
-use crate::filesystem::{io_error, open_private_directory, revalidate_directory};
+#[cfg(test)]
+use crate::filesystem::open_private_directory;
+use crate::filesystem::{
+    io_error, open_owned_child_directory, open_target_parent, revalidate_target_child,
+};
 
 const SCAN_BUDGET: Duration = Duration::from_secs(2);
 
@@ -23,10 +26,9 @@ impl ProcessProbe for MacOsHostAdapter {
         &self,
         workspace_container: &AbsolutePath,
     ) -> Result<ProcessObservation, PortError> {
-        let container = PathBuf::from(std::ffi::OsString::from_vec(
-            workspace_container.as_bytes().to_vec(),
-        ));
-        let held = open_private_directory(&container)?;
+        let (parent, name) = open_target_parent(workspace_container)?;
+        let held = open_owned_child_directory(&parent, &name)?;
+        revalidate_target_child(&parent, &held, &name)?;
         let kernel_path = PathBuf::from(
             fd_kernel_path(&held.fd)
                 .map_err(|error| io_error("resolve Workspace process-scan root", error))?,
@@ -36,8 +38,9 @@ impl ProcessProbe for MacOsHostAdapter {
         let kernel_metadata = fs::metadata(&kernel_path)
             .map_err(|error| io_error("inspect resolved process-scan root", error))?;
         validate_scan_root_identity(&kernel_metadata, &held_metadata)?;
-        revalidate_directory(&held)?;
+        revalidate_target_child(&parent, &held, &name)?;
         let use_state = scan_visible_processes(&kernel_path);
+        revalidate_target_child(&parent, &held, &name)?;
         let observed_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()

@@ -166,6 +166,32 @@ fn path_probe_never_follows_an_intermediate_symlink() {
 }
 
 #[test]
+fn path_probe_distinguishes_occupied_final_leaf_from_invalid_intermediate_component() {
+    let temp = controlled_root("occupied-leaf-");
+    let file = temp.path().join("file");
+    fs::write(&file, b"keep").unwrap();
+    let link = temp.path().join("link");
+    symlink("file", &link).unwrap();
+    let adapter = probe();
+
+    for leaf in [&file, &link] {
+        assert_eq!(
+            adapter.inspect_path(&absolute(leaf)).unwrap_err().kind(),
+            PortErrorKind::NotEmpty
+        );
+        assert_eq!(
+            adapter
+                .inspect_path(&absolute(&leaf.join("child")))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+    assert_eq!(fs::read(&file).unwrap(), b"keep");
+    assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("file"));
+}
+
+#[test]
 fn source_and_target_containment_disables_the_clone_candidate() {
     let temp = controlled_root("overlap-");
     let source = temp.path().join("source");

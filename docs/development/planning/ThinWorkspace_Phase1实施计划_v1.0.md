@@ -751,14 +751,72 @@ P1-15 技术候选收口（2026-09-27 UTC）：最终实现/测试提交为 `4e6
 | 任务 | 交付结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
 | P1-17 固定控制目录与新 schema | `~/.thinws` 实例、配置/SQLite/单锁/日志/归属；不读取旧布局 | ADR-0006 | R4 | In Progress |
-| P1-18 显式 target 创建与 CoW | `--target` 精确路径、同卷探测/重验、目标父目录暂存、唯一性与 Ready 归属 | P1-17 | R4 | Planned |
-| P1-19 查询与安全删除 | 任意已登记 target 的 Ready 核验、Git/空间查询、目标缺失或身份不符时关联保留，force 不绕过 | P1-18 | R4 | Planned |
-| P1-20 CLI 与工具联动 | 手册参数、JSON/错误码、help、Skill、性能与 CI 工具同步 | P1-17–P1-19 | R3 | Planned |
-| P1-21 新布局收口 | 受影响变异/fuzz、真实 APFS 多卷、Release 黑盒、供应链、独立本地审核与人工结构测试入口 | P1-17–P1-20 | R4 | Planned |
+| P1-18 显式 target 创建与 CoW | `--target` 精确路径、同卷探测/重验、目标父目录暂存、唯一性与 Ready 归属 | P1-17 | R4 | In Progress |
+| P1-19 查询与安全删除 | 任意已登记 target 的 Ready 核验、Git/空间查询、目标缺失或身份不符时关联保留，force 不绕过 | P1-18 | R4 | In Progress |
+| P1-20 CLI 与工具联动 | 手册参数、JSON/错误码、help、Skill、性能与 CI 工具同步 | P1-17–P1-19 | R3 | In Progress |
+| P1-21 新布局收口 | 受影响变异/fuzz、真实 APFS 多卷、Release 黑盒、供应链、独立本地审核与人工结构测试入口 | P1-17–P1-20 | R4 | In Progress |
 
 本轮只在维护者指定的本地 checkout 实施、提交与审核，不创建线上 PR、不推送，也不使用子 Agent 开发。独立只读审核可使用 GPT-6 Astra / `xhigh`。用户已有旧控制目录、旧 data root 与已安装的旧 `thinws` 二进制不在清理或自动替换范围内。新 `init` 的测试须使用隔离 HOME，防止触碰真实 `~/.thinws`。
 
 收口断言：两个不同 APFS 卷上各自的 source/target 同卷组合成功，source/target 跨卷（含 `--allow-copy`）拒绝；目标已存在、重复 target、路径别名/符号链接、目标卷卸载和路径替换均不误写误删；普通/force 清理在 target 缺失或身份不符时保留行、名称及日志，归属可证且内容清理完成时才写 tombstone；新命令不访问旧布局；新候选全量普通门禁与受影响专项门禁通过。完成这些仍不等于 Phase 1 人工放行。
+
+本地候选验证进行中（2026-09-28 UTC）：首批 `git diff --unified=0` 选出的 173 个变异点，在隔离副本中以 `-j 2 --jobserver-tasks 4 --timeout 180` 执行，因随后在真实 APFS 上复现 target 大小写别名进入控制目录的缺陷而主动中止（exit 130）；中止前 54 caught、21 missed，其余未执行，原始结果留在 `target/p1-layout-v2-mutants-diff/mutants.out/`，不算通过。补了预览/创建/Adapter 双重身份保护及逐字段回归后，全 workspace 普通测试、fmt 和严格 Clippy 曾通过。18:23 UTC 启动修订候选的 176 点受影响代码变异批次；在下面两项真实 CLI 缺陷复现后主动中止（exit 130），中止前 100 caught、28 unviable、19 missed，余下 29 项未执行，原始结果位于 `target/p1-layout-v2-mutants-final/mutants.out/`，不算最终候选证据。
+
+本地只读复核又发现预检使用固定的 `.thinws-preview-staging`/`.thinws-preview-trash` 假路径；真实 APFS 隔离 HOME 实验中，合法来源恰好叫 `.thinws-preview-staging` 时，`--dry-run` 错误返回 `E_COW_UNAVAILABLE`（加 `--allow-copy` 为 `E_FILESYSTEM`），同级普通名称来源则成功规划 `cow-clone`。这是预览路径与用户目录偶然重名导致的误拒绝。已由真实 CLI 回归先 RED 后 GREEN，预检改用本次随机 ID 对应的真实私有兄弟路径；dry-run 的 ID 不登记或返回。实验目录仅位于一次性 `/private/tmp` 根，核对无符号链接后已删除。
+
+另一项 CLI 契约缺口：真实 APFS 隔离 HOME 下，未登记的 target 末级为既有普通文件时，`--dry-run` 返回 exit 33 / `E_TARGET_LAYOUT`，而用户手册对“目标末级已存在”规定 `E_TARGET_EXISTS`。目录情形已有测试；文件及末级符号链接的真实 CLI 回归先 RED 后 GREEN，最终路径组件已存在但不是目录时改为报告被占用，中间组件非目录仍是布局错误，原对象均不覆盖、不删除。对应一次性实验目录核对无符号链接后已删除。第二批存活项已补操作目录存在/替换/清理、错误映射与逐条件重叠的定向回归，相关定向测试和严格 Clippy 已通过；最终变异与 Release 仍待收口。
+
+18:47 UTC 启动 57 项定向变异（`cargo mutants --workspace -F 'require_operation_directories_absent|remove_operation_directory|map_port|requested_paths_overlap|materialization_overlaps_control|provisional_materialization_paths'`；执行负责人为主 Agent，macOS/APFS，本地未提交候选，5 个相关测试包，`-j 2 --jobserver-tasks 4 --timeout 180`，结果在 `target/p1-layout-v2-targeted-mutants/mutants.out/`）。参考上一未完成批次的实际吞吐，首次查看暂定 19:05 UTC；期间不修改生产或测试候选，不轮询。完成后仍须覆盖当前差异中未跑完及新引入的变异点。
+
+该批实际于 18:48:00–18:52:54 UTC 完成，按约定 19:05 UTC 首次读取，执行器 exit 2：52 caught、2 unviable、3 missed、0 timeout；结果 SHA-256 `f97401edc8867fffe72cfa83932b4d18319041a9ac8609c473fc832fa4950812`。其中两个 `git_query.rs` 的 `Budget.run_timeout` 存活项来自未修改的 Git 模块，因 cargo-mutants 的筛选枚举仍进入本批，不能算作本次布局代码闭合证据；它们不因本次任务静默改动 Git 实现。第三项是 `map_port` 中 `Unavailable` 的 Control 专门分支，删除该分支仍由紧随其后的通用分支返回相同的 `E_CONTROL_UNAVAILABLE`，属可直接消除的冗余判断，已删并用原实现的 4 项错误映射单测验证。当前重新枚举 `map_port` 为 38 项，按去除行号的完整变异名称核对，均包含于上批 38 caught 或 1 unviable 的旧集合；被删除的正是一个 caught 和一个 missed 的原冗余分支。其余受影响差异中的未执行变异仍待单独收口，不把这批 exit 2 写成通过。
+
+19:09 UTC 在当前代码差异上以零上下文 Git diff 重新枚举受影响生产代码，共 184 项；按文件、函数、变异操作和重复数量与第二批已完成的 100 caught/28 unviable、上述定向批次的 52 caught/2 unviable 对照，尚有 37 项未被有效结果覆盖（Probe 8、Application 创建 13/查询 4/删除 1、CLI 9、Core 错误码 2）。用精确完整名称正则和同一 diff 双重筛选，`cargo mutants --list` 确认为恰好 37 项；后续只跑此集合，保留先前退出 130 的完整原始记录。已闭合项在最终审核中仍须逐项确认候选语义未变，不能仅凭行号复用。
+
+19:09:57 UTC 启动上述 37 项精确未闭合变异，执行负责人为主 Agent，使用同一 macOS/APFS 本地冻结候选和 Core/Ports/macOS/Application/CLI 五包验证集、`-j 2 --jobserver-tasks 4 --timeout 180 --gitignore true`，结果目录为 `target/p1-layout-v2-unresolved-mutants/mutants.out/`。参考 57 项定向批次约 5 分钟，但本批含较大的 CLI/查询入口，保守首次主动查看暂定 19:20 UTC；此前不修改生产或测试代码、不轮询。
+
+该批实际于 19:09:55–19:13:18 UTC 完成，按约定 19:20 UTC 首次读取，执行器 exit 2：26 caught、9 unviable、2 missed、0 timeout；结果 SHA-256 `a70335d07751e674525bab72b969d4f7f6601d443e577fb95f4c42ee70e7b43d`。两个存活项均为 `require_missing_target` 中 `||→&&`：现有真实 Probe 会把“最近存在祖先不符”与“缺失组件不是一个”一起报告，未单独验证 Port 返回相互矛盾事实时的防御。旧工具存活结果构成旧测试集的 RED 证据；主 Agent 增加只改测试的单因素 Port 报告用例，分别让最近祖先与缺失组件数单独失配，原实现的定向单测已 GREEN。当前筛选精确两项，须用同一五包测试集重新变异确认新断言确实捕获它们；不能以普通测试 GREEN 代替变异闭合。
+
+19:22 UTC 启动两项 `require_missing_target` 精确复测，仍用 Core/Ports/macOS/Application/CLI 五包、2 jobs/4 jobserver tasks、180 秒上限，结果目录 `target/p1-layout-v2-missing-target-followup/mutants.out/`。参考上批 37 项实际约 3 分 22 秒、当前仅两项但包含基线编译，首次主动查看保守定为 19:26 UTC；期间不改生产或测试候选、不轮询。
+
+收口范围纠偏（19:23 UTC）：上述 184 项只来自当前未提交差异；本轮新布局从 `7d74977` 技术候选之后还包含 `0d9c107`、`e55b9f5`、`b030617`、`6bc5923`、`60c5e41`、`91f4bdf` 六个本地提交，不能漏掉已提交的新布局生产代码。以 `git diff --unified=0 7d74977` 重建完整生产差异，当前 cargo-mutants 枚举为 **325 项**。对照本轮第二批、57 项定向批及 37 项补测的 caught/unviable，按文件、函数、操作和重复数量匹配后仍有 **131 项**未闭合，其中包含正在精确复测的 2 项；集中于新文档编码、文件系统路径/归属、SQLite v2 及少量应用/CLI。旧 P1-15 的全量变异属于旧布局，不用于替代这 131 项。下一批须在两项复测终态后只跑剩余精确集合，不能以 184 项未提交差异冒充整个新布局门禁。
+
+两项 `require_missing_target` 精确复测实际于 19:22:48–19:23:29 UTC 完成，按约定 19:26 UTC 首次读取，exit 0、2 caught、0 missed/timeout/unviable；结果 SHA-256 `8d634c9704a78a5352e60d3a968e7b02614610164ec4938ea8b0cf0d2fdd3fd9`。新单因素断言已由真实 mutation RED/原实现 GREEN 闭合，旧 exit 2 记录保留；完整新布局仍有上段的 129 项待运行。
+
+19:26 UTC 启动剩余 129 项精确变异：`--in-diff target/p1-layout-v2-all-changes.diff` 与 129 个完整名称的正则交集经 `--list` 核对为 129；执行负责人主 Agent，macOS/APFS 本地冻结候选，测试包为 Core、Ports、macOS Adapter、SQLite、Application、CLI，`-j 2 --jobserver-tasks 4 --timeout 180 --gitignore true`，结果目录 `target/p1-layout-v2-full-scope-remaining-mutants/mutants.out/`。参考 37 项实际 3 分 22 秒、57 项约 5 分钟，但本批含更多文件系统和 SQLite 分支，留正常波动后首次主动查看暂定 **19:48 UTC**；期间不改生产或测试候选、不短轮询、不并发 Release 构建。
+
+该 129 项批次按约定于 19:48 UTC 首次读取终态：执行器 exit 2，**100 caught、27 unviable、2 missed、0 timeout**，总耗时 11 分钟；`outcomes.json` SHA-256 `62e702bfa7bb196bc7a70ac184c58a924495878dd93a69d52758c2b3beda8a29`。两项存活分别是 `validate_data_root_lock -> Ok(())` 和 `registered_target` 的父目录身份 `||→&&`；前者缺少错误 scope 的直接 Adapter 断言，后者缺少“同卷且原 target 不变，仅登记父目录被替换”的单因素用例。只增加这两条真实 APFS 测试，`explicit_target` 14 项全绿；原批的 missed 是测试修改前 RED 证据，仍需两项精确变异复测，不以普通测试 GREEN 代替。
+
+19:50 UTC 启动上述两项精确复测：`--in-diff target/p1-layout-v2-all-changes.diff -F 'store.rs:(983|1072):9:'` 的 `--list` 恰为 2，仍用六包验证集、2 jobs/4 jobserver tasks、180 秒单项上限；结果目录 `target/p1-layout-v2-final-two-mutants/mutants.out/`。参考此前两项复测约 41 秒、此次 Adapter 集成测试更重，首次主动查看暂定 19:54 UTC；期间不修改生产或测试候选、不轮询。
+
+该两项实际 45 秒完成，19:54 UTC 首次读取：执行器 exit 0、**2 caught、0 missed/timeout/unviable**；`outcomes.json` SHA-256 `88fc941d208ce928bac62aecd65f549983b3c6b64a00b7ad01a9755c6d31e373`。本轮旧 129 项批次的两处存活已由真实 Adapter 用例捕获；完整 325 项新布局生产差异仍须与历史有效 caught/unviable 结果逐名核对，不用单批 2/2 代替完整范围。
+
+完整范围对账（19:56 UTC）：以 `7d74977` 到当前生产差异 `target/p1-layout-v2-all-changes.diff`（SHA-256 `6b46a5832be9ab50dce89e7cafbd4652195db8e7ca6bbf0c6bcfe3527b157fcc`）重新列举仍为 **325** 项。六批结果的 caught/unviable 按去行号的文件、函数、变异操作和重复数虽可覆盖 325/325，但其中 76 项并无当前源码坐标的同名有效结果；鉴于实现期间有行移动和局部生产修订，不能仅凭归一化多重集合宣布闭合。当前精确名称匹配已闭合 249 项；其余 **76 项**由完整名称正则与 `--in-diff` 交集复核为恰好 76，计划仅补跑这一差集。候选为本地 `91f4bdf` 加未提交新布局差异及两项仅测试补强；macOS/APFS，执行负责人主 Agent，六包测试集，2 jobs/4 jobserver tasks、180 秒单项上限；预计参考上批 129 项 11 分钟，首次主动查看暂定启动后 12 分钟，不短轮询。
+
+精确差集批次于 **19:57 UTC** 启动，结果目录 `target/p1-layout-v2-coordinate-gap-mutants/mutants.out/`，首次主动查看定为 **20:10 UTC**；运行期间不修改生产或测试候选，也不并发执行争用同一构建资源的 Release/全仓测试。
+
+该批实际约 8 分钟完成，20:10 UTC 首次读取：执行器 exit 0、**65 caught、11 unviable、0 missed/timeout**；`outcomes.json` SHA-256 `3252b36c918ef70be738fc298269997ce99561275932a0ac1a7bfcd3815db616`。重新枚举当前 325 项并以完整文件、行列及变异名称逐一核对七批 caught/unviable，**325/325 均有精确当前名称的有效正结果、0 缺口**；原先 aborted/exit 2 批次照实保留，只有其中已完成且与当前候选一致的单项结果参与组合，不把整批失败改写为通过。生产候选在上述三批最新补测期间未改动；后续只改诊断文字时须确认其不改变变异位置/逻辑，并重新列举对账。此为本次新布局受影响生产差异的任务级变异证据，不宣称阶段全 workspace 变异已重新执行或人工放行。
+
+术语同步仅将旧 `data root` 诊断文字和源码注释改为 `control root`，未改符号、分支、状态或系统调用。重建完整生产差异 `target/p1-layout-v2-all-changes-final.diff`（SHA-256 `2ceb55bb02d4e201f0a047f3a85d2a3ee3e61f095f180688273248e0f489388d`）后，cargo-mutants 因函数所在行新增触及而枚举 **330** 项；原 325 项的完整名称及坐标仍逐项一致，新增 5 项函数级变异无有效旧结果。精确完整名称 `--list` 核对为 5，须仅补跑这 5 项并复核最终 330 项，不以“只有文字改动”跳过工具选中的新范围。
+
+5 项术语联动精确变异于 **20:12 UTC** 启动：六包测试集、2 jobs/4 jobserver tasks、180 秒单项上限，结果目录 `target/p1-layout-v2-terminology-five-mutants/mutants.out/`。参考两项 45 秒和 76 项约 8 分钟，首次主动查看暂定 **20:16 UTC**；期间不再改生产或测试候选，不轮询。
+
+20:16 UTC 首次读取发现该批在**未变异 baseline** 即失败（执行器 exit 4，0 项变异被测试；`outcomes.json` SHA-256 `348c82e3dddd11f79d79a9b12b9a7dbfa8ce48320e909257af4963782220ac21`）。唯一失败是 `bootstrap.rs` 仍断言旧操作描述 `validate prepared data root`，而生产术语已变为 `validate prepared control root`。更新该测试期望后，真实 Adapter 定向测试退出 0；旧失败批次保留，不作为变异证据，须重新运行同一 5 项并在全仓普通门禁中复核其它文字断言。
+
+同一 5 项于 **20:17 UTC** 在更新后的测试候选上重启，结果目录 `target/p1-layout-v2-terminology-five-mutants-fixed/mutants.out/`，六包测试集与资源/超时配置不变；首次主动查看暂定 **20:21 UTC**，期间不改生产或测试候选、不轮询。
+
+该批实际 40 秒完成，20:21 UTC 首次读取：执行器 exit 0、**1 caught、4 unviable、0 missed/timeout**；`outcomes.json` SHA-256 `07cd2a5f45fbb7d319f7c3e0740d74de20d3b5f5e47b305e1218cf607ef2a2a2`。以最终完整差异重列举 **330** 项，按文件、行列与完整变异名称交叉八批有效 caught/unviable，**330/330 均有精确结果、0 缺口**。这只证明本次新布局受影响生产差异的变异范围已闭合；未执行阶段级全 workspace 变异，也不替代后续全仓普通测试和人工放行。
+
+当前候选的供应链离线核查（18:53 UTC）：`cargo deny --locked check`、`cargo audit --no-fetch` 和 `cargo audit --no-fetch --file fuzz/Cargo.lock` 均退出 0；deny 仅有既有未命中许可 allowance/exception 警告，audit 使用本地 1261 条 advisory，不能冒充在线最新漏洞库核查。工具单元测试 45 项退出 0；测试生成的 `tools/__pycache__/` 已移入忽略的 `target/` 验证目录。
+
+真实目标卷离线补验（2026-09-28 UTC）：第一次在项目数据卷创建的一次性 APFS 镜像挂载被本机拒绝，确认未挂载后清理；随后按既有 CI 方式在 `/private/tmp` 创建专用 128 MB APFS 镜像，挂载为 UUID `42daf8db-3f96-497e-a854-5869fee4bcfc` 的第三卷。使用当前 Debug 二进制、隔离 HOME 与该镜像卷内 source/target 创建得到 `cow-clone/confirmed`；核对镜像关联后仅卸载这张测试镜像，`workspace remove offline-volume --force` 返回 exit 37 / `E_TARGET_MISSING`，`workspace list` 仍含 Ready 记录，SQLite 活动行/tombstone 为 `1/0`，控制目录日志有 `failed` 与该错误码。重新挂载同一镜像后，源/副本内容一致，显式清理成功，目录消失、源保留，活动行/tombstone 为 `0/1` 且日志为 `completed`。再次核对关联并卸载；两个一次性镜像及其隔离测试目录随后均已删除，未卸载或清理用户现有卷。另有目标父路径消失/恢复的真实 APFS CLI 回归通过；下文记录了冻结候选的 Release 复验。
+
+冻结候选的完整普通/真实平台门禁（2026-09-28 UTC）：主 workspace `cargo fmt --all -- --check`、严格全目标全 feature Clippy、`cargo test --locked --workspace --all-targets`、Doc Test，fuzz workspace fmt 与带 `--cfg fuzzing` 的严格 Clippy，crate 依赖脚本、45 项工具单测和 `git diff --check` 均退出 0。用 `/private/tmp/thinws-layout-check.DNfUOA/thinws-p0-cross-volume.dmg` 的专用 APFS 卷（UUID `D4332CC3-9041-4CD3-9DC6-E87F515CBC18`）设定 P0/P1 子挂载及异卷测试根，`cargo test --quiet --locked --workspace --all-targets -- --include-ignored` 全绿；`cargo build --locked --release --workspace` 及同环境 `cargo test --quiet --locked --release --workspace --all-targets -- --include-ignored` 均退出 0。Release arm64 二进制 SHA-256 为 `40b0c682e5197452f5306db02210831263db1a07f6c6cd71e4594fe8eae078cd`。`tools/ci_release_binary_e2e.py` 用隔离 HOME 和本机模拟的 GitHub Actions 环境执行，Release CLI 的 init/create/path/remove 与旧配置不变断言全绿；这只是本机模拟，**线上 CI 未执行**。
+
+Release 黑盒多卷与离线删除复验：控制目录在上述专用 APFS 镜像卷，source/target 在 `/Volumes/data` APFS 卷，系统 `/private/tmp` 为第三个卷，`workspace create` 返回 `cow-clone/confirmed`，精确 target 的 path/status 与正常删除均成功，镜像控制目录外无新控制文件。在另一隔离 HOME 下把 source/target 同置镜像卷，Release 创建确认 CoW 后精确卸载该镜像；`workspace remove offline-volume --force` 返回 exit 37 / `E_TARGET_MISSING`，SQLite 活动行/tombstone 仍为 `1/0`，`~/.thinws/logs/operations.jsonl` 留下 `failed` 与该码。重挂同一 UUID 后源与 target 文件仍存在，普通 `remove` 成功；行/tombstone 转为 `0/1`，日志有 `completed`，源保留、target 删除。最后再次核对镜像关联并卸载，只涉及一次性测试镜像；没有触碰用户实际 HOME 或现有卷。此次 Release 结果补足前段仅 Debug 的离线卷证据，但不等于人工阶段放行。
+
+受影响 fuzz smoke：固定 `cargo-fuzz 0.12.0`、`nightly-2026-08-14`，隔离 `target/p1-layout-fuzz-smoke/` 语料及 artifact，以 `-max_total_time=60 -timeout=5` 分别运行 `thinws_bootstrap_document`、`thinws_create_request`、`thinws_init_request` 和 `thinws_materialization_path`；四项 exit 0，无 crash/hang，artifact 目录为空。前者约 79.8 万次执行，其后三项分别约 986 万、1305 万、1654 万次执行；变异生成的语料只留在忽略目录，不回写仓库。`thinws_remove_request` 只覆盖未变化的参数/名称解析，不覆盖此次删除归属判定；该判定由真实 APFS、故障注入和变异测试验证，不把不相关 fuzz 当成删除安全证明。
+
+Release CoW 性能基线（同日、本机非并发 I/O）：运行 `PYTHONDONTWRITEBYTECODE=1 python3 tools/p1_perf_baseline.py --binary target/release/thinws --volume-root /Volumes/data --output target/p1-layout-perf-baseline.json`，在 UUID `1A42C888-32E3-489C-9BFA-67FD640A94E8` 的 APFS 卷上用 264 文件、约 65 MiB 逻辑数据做 3×10 次显式 target 创建，30/30 均返回 `cow-clone/confirmed` 且 target 精确匹配；中位 331.245 ms、p95 358.285 ms。输出在忽略的 `target/`，一次性 fixture 已自动清理；容量差只作参考，不将该数据表述为跨设备性能保证。
 
 ---
 

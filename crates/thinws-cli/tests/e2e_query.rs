@@ -109,6 +109,7 @@ fn initialize(bootstrap: &Path, data_root: &Path) {
 }
 
 fn create(bootstrap: &Path, source: &Path, name: &str) -> Value {
+    let target = bootstrap.parent().unwrap().join(format!("target-{name}"));
     let (code, result) = json(
         bootstrap,
         vec![
@@ -118,6 +119,8 @@ fn create(bootstrap: &Path, source: &Path, name: &str) -> Value {
             "create".into(),
             "--source".into(),
             source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
             "--name".into(),
             name.into(),
         ],
@@ -544,7 +547,7 @@ fn path_and_status_refuse_symlink_replacement_and_missing_names() {
         ],
     );
     assert_eq!(code, 33, "{refused}");
-    assert_eq!(refused["error"]["code"], "E_DATA_ROOT_LAYOUT");
+    assert_eq!(refused["error"]["code"], "E_TARGET_LAYOUT");
 }
 
 #[test]
@@ -743,7 +746,7 @@ fn creating_without_receipt_stays_diagnostic_and_is_not_a_usable_path() {
     assert_eq!(code, 0, "{doctor}");
     let instance_id = doctor["data"]["instance_id"].as_str().unwrap();
     let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40";
-    let target = data_root.join("workspaces").join(workspace_id).join("root");
+    let target = bootstrap.parent().unwrap().join("unfinished-target");
     let connection = Connection::open(data_root.join("metadata/state.db")).unwrap();
     let volume_id: String = connection
         .query_row("SELECT control_volume_id FROM installation", [], |row| {

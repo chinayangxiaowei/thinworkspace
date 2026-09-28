@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 use thinws_core::{
-    AbsolutePath, ErrorCode, FallbackPolicy, FallbackReason, InstallationRecord,
+    AbsolutePath, ErrorCode, Evidence, FallbackPolicy, FallbackReason, InstallationRecord,
     MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
     MaterializationPlan, MaterializationPlanError, MaterializeRequest, MaterializerKind,
     PathCapabilityReport, PathResolution, SupportState, UnixMillis, VolumeId, WorkspaceId,
@@ -226,16 +226,7 @@ where
                 self.sqlite_timeout,
             )
             .map_err(|error| map_port(Stage::Metadata, error))?;
-        if snapshot
-            .workspaces()
-            .iter()
-            .any(|record| paths_overlap(record.reservation().target_path(), request.target()))
-        {
-            return Err(semantic_error(
-                ErrorCode::TargetConflict,
-                "Workspace target overlaps an active Workspace target",
-            ));
-        }
+        require_no_active_workspace_path_overlap(request.target(), snapshot.workspaces())?;
         let source = self
             .bootstrap
             .inspect_path(request.source())
@@ -255,6 +246,14 @@ where
             .inspect_materialization_paths(&paths)
             .map_err(|error| map_port(Stage::Layout, error))?;
         require_existing_source(report.source())?;
+        if let Evidence::Known(volume) = report.target_root().filesystem().volume_id() {
+            require_no_active_workspace_identity_overlap(
+                &self.bootstrap,
+                report.target_root(),
+                *volume,
+                snapshot.workspaces(),
+            )?;
+        }
         require_missing_target(report.target_root(), &target_parent)?;
         let data_root_report = self
             .bootstrap
@@ -271,12 +270,6 @@ where
             ));
         }
         let plan = select_plan(&report, request.allow_full_copy())?;
-        require_no_active_target_alias(
-            &self.bootstrap,
-            report.target_root(),
-            plan.target_volume_id(),
-            snapshot.workspaces(),
-        )?;
         layout
             .revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
@@ -400,15 +393,7 @@ where
                 })?;
             return Ok(CreateOutcome::new(existing, summary, false));
         }
-        if active
-            .iter()
-            .any(|record| paths_overlap(record.reservation().target_path(), request.target()))
-        {
-            return Err(semantic_error(
-                ErrorCode::TargetConflict,
-                "Workspace target overlaps an active Workspace target",
-            ));
-        }
+        require_no_active_workspace_path_overlap(request.target(), &active)?;
 
         // Only this preliminary source observation precedes Creating: its actual
         // APFS Volume UUID is an immutable reservation field, not a caller guess.
@@ -439,6 +424,14 @@ where
             )?)
             .map_err(|error| map_port(Stage::Layout, error))?;
         require_existing_source(preliminary.source())?;
+        if let Evidence::Known(volume) = preliminary.target_root().filesystem().volume_id() {
+            require_no_active_workspace_identity_overlap(
+                &self.bootstrap,
+                preliminary.target_root(),
+                *volume,
+                &active,
+            )?;
+        }
         require_missing_target(preliminary.target_root(), &target_parent)?;
         if target_enters_existing_root(preliminary.target_root(), &data_root_report) {
             return Err(semantic_error(
@@ -447,12 +440,6 @@ where
             ));
         }
         let preliminary_plan = select_plan(&preliminary, request.allow_full_copy())?;
-        require_no_active_target_alias(
-            &self.bootstrap,
-            preliminary.target_root(),
-            preliminary_plan.target_volume_id(),
-            &active,
-        )?;
         let target = request.target().clone();
         let reservation = WorkspaceReservation::new(
             workspace_id,
@@ -683,7 +670,45 @@ fn select_plan(
     }
 }
 
-fn require_no_active_target_alias(
+fn active_workspace_protected_paths(
+    record: &WorkspaceRecord,
+) -> Result<[AbsolutePath; 4], UseCaseError> {
+    let registered = record.reservation();
+    let parent = target_parent(registered.target_path())?;
+    let operation = provisional_materialization_paths(
+        registered.source_path(),
+        registered.target_path(),
+        &parent,
+        registered.workspace_id(),
+    )?;
+    let isolated_name = format!(".thinws-remove-{}", registered.workspace_id());
+    Ok([
+        registered.target_path().clone(),
+        operation.staging().clone(),
+        operation.trash().clone(),
+        derived_path(&parent, &[isolated_name.as_bytes()])?,
+    ])
+}
+
+fn require_no_active_workspace_path_overlap(
+    target: &AbsolutePath,
+    active: &[WorkspaceRecord],
+) -> Result<(), UseCaseError> {
+    for record in active {
+        if active_workspace_protected_paths(record)?
+            .iter()
+            .any(|path| paths_overlap(path, target))
+        {
+            return Err(semantic_error(
+                ErrorCode::TargetConflict,
+                "Workspace target overlaps an active Workspace path",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_no_active_workspace_identity_overlap(
     probe: &impl PlatformProbe,
     target: &PathCapabilityReport,
     target_volume_id: VolumeId,
@@ -697,16 +722,18 @@ fn require_no_active_target_alias(
             // creation on the available volume.
             continue;
         }
-        let existing = probe
-            .inspect_path(registered.target_path())
-            .map_err(|error| map_port(Stage::Layout, error))?;
-        if existing.resolution() == PathResolution::ExistingDirectory
-            && target_enters_existing_root(target, &existing)
-        {
-            return Err(semantic_error(
-                ErrorCode::TargetConflict,
-                "Workspace target enters an active Workspace target",
-            ));
+        for path in active_workspace_protected_paths(record)? {
+            let existing = probe
+                .inspect_path(&path)
+                .map_err(|error| map_port(Stage::Layout, error))?;
+            if existing.resolution() == PathResolution::ExistingDirectory
+                && target_enters_existing_root(target, &existing)
+            {
+                return Err(semantic_error(
+                    ErrorCode::TargetConflict,
+                    "Workspace target enters an active Workspace path",
+                ));
+            }
         }
     }
     Ok(())
@@ -1147,10 +1174,15 @@ mod tests {
         let active_record =
             WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
         assert_eq!(
-            require_no_active_target_alias(&adapter, &alias, volume, &[active_record])
-                .unwrap_err()
-                .diagnostic()
-                .code(),
+            require_no_active_workspace_identity_overlap(
+                &adapter,
+                &alias,
+                volume,
+                &[active_record]
+            )
+            .unwrap_err()
+            .diagnostic()
+            .code(),
             ErrorCode::TargetConflict
         );
     }
@@ -1179,7 +1211,49 @@ mod tests {
             now,
         );
         let active = WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
-        assert!(require_no_active_target_alias(&adapter, &candidate, available, &[active]).is_ok());
+        assert!(
+            require_no_active_workspace_identity_overlap(
+                &adapter,
+                &candidate,
+                available,
+                &[active]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn active_workspace_protects_all_paths_that_its_cleanup_can_remove() {
+        let id = WorkspaceId::new();
+        let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let now = UnixMillis::new(1).unwrap();
+        let reservation = WorkspaceReservation::new(
+            id,
+            InstanceId::new(),
+            WorkspaceName::from_str("parent").unwrap(),
+            path("/source"),
+            path("/parent/target"),
+            volume,
+            volume,
+            false,
+            now,
+        );
+        let record = WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
+        let protected = active_workspace_protected_paths(&record).unwrap();
+        assert_eq!(protected[0], path("/parent/target"));
+        assert_eq!(protected[1], path(&format!("/parent/.thinws-staging-{id}")));
+        assert_eq!(protected[2], path(&format!("/parent/.thinws-trash-{id}")));
+        assert_eq!(protected[3], path(&format!("/parent/.thinws-remove-{id}")));
+        for location in protected {
+            let nested = derived_path(&location, &[b"child"]).unwrap();
+            assert_eq!(
+                require_no_active_workspace_path_overlap(&nested, std::slice::from_ref(&record))
+                    .unwrap_err()
+                    .diagnostic()
+                    .code(),
+                ErrorCode::TargetConflict
+            );
+        }
     }
 
     #[test]

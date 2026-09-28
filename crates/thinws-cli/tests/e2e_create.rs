@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -170,6 +171,14 @@ fn real_cli_rejects_a_target_inside_an_active_workspace() {
     if aliased_parent.is_dir() {
         // Case-insensitive APFS resolves this alternate spelling to the same
         // registered target. The identity guard must still reject the child.
+        for extra in [&["--dry-run"][..], &[][..]] {
+            let (code, conflict) = execute(
+                &bootstrap,
+                create_args(&source, &aliased_parent, "alias-equal", extra),
+            );
+            assert_eq!(code, 42, "{conflict}");
+            assert_eq!(conflict["error"]["code"], "E_TARGET_CONFLICT");
+        }
         let alias_child = aliased_parent.join("alias-child");
         for extra in [&["--dry-run"][..], &[][..]] {
             let (code, conflict) = execute(
@@ -195,6 +204,77 @@ fn real_cli_rejects_a_target_inside_an_active_workspace() {
     assert_eq!(
         fs::read(parent_target.join("sentinel.txt")).unwrap(),
         b"source remains"
+    );
+}
+
+#[test]
+fn real_cli_rejects_a_target_inside_an_active_isolation() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-isolated-target-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let source = temp.path().join("source");
+    let target = temp.path().join("parent-target");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("sentinel.txt"), b"source remains").unwrap();
+    init(&bootstrap, &bootstrap);
+
+    let (code, created) = execute(&bootstrap, create_args(&source, &target, "parent", &[]));
+    assert_eq!(code, 0, "{created}");
+    let id = created["data"]["workspace_id"].as_str().unwrap();
+    let nested = target.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("file.txt"), b"keep in isolation").unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o000)).unwrap();
+    let (remove_code, failed) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "parent".into(),
+            "--force".into(),
+        ],
+    );
+    let isolated = temp.path().join(format!(".thinws-remove-{id}"));
+    assert_ne!(remove_code, 0, "{failed}");
+    assert!(isolated.is_dir(), "{failed}");
+    assert!(!target.exists());
+
+    let child = isolated.join("child-target");
+    let attempts: Vec<_> = [&["--dry-run"][..], &[][..]]
+        .into_iter()
+        .map(|extra| execute(&bootstrap, create_args(&source, &child, "child", extra)))
+        .collect();
+    let aliased_isolated = temp.path().join(format!(".THINWS-REMOVE-{id}"));
+    let alias_child = aliased_isolated.join("alias-child");
+    let alias_attempts: Vec<_> = if aliased_isolated.is_dir() {
+        [&["--dry-run"][..], &[][..]]
+            .into_iter()
+            .map(|extra| {
+                execute(
+                    &bootstrap,
+                    create_args(&source, &alias_child, "alias", extra),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    fs::set_permissions(isolated.join("nested"), fs::Permissions::from_mode(0o700)).unwrap();
+    for (code, result) in attempts.into_iter().chain(alias_attempts) {
+        assert_eq!(code, 42, "{result}");
+        assert_eq!(result["error"]["code"], "E_TARGET_CONFLICT");
+    }
+    assert!(!child.exists());
+    assert!(!alias_child.exists());
+    assert_eq!(
+        fs::read(isolated.join("nested/file.txt")).unwrap(),
+        b"keep in isolation"
     );
 }
 

@@ -87,7 +87,7 @@ doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`hos
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh
 ```
 
-source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在，且与 source 位于同一 APFS Volume；`~/.thinws` 可以在其他卷。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。新 target 不能与任一活跃 Workspace 的 target 相同或相互包含，APFS 大小写/Unicode 别名也按实际目录身份判断；否则删除外层副本会误删内层副本。预览和正式创建都拒绝此冲突。
+source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在，且与 source 位于同一 APFS Volume；`~/.thinws` 可以在其他卷。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。新 target 不能与任一活跃 Workspace 的 target 相同或相互包含，也不能进入它仍可能清理的受控暂存、回滚或隔离目录；APFS 大小写/Unicode 别名按实际目录身份判断。预览和正式创建都拒绝这些冲突，活跃 target 的别名归为 E_TARGET_CONFLICT，而普通未登记既有目录归为 E_TARGET_EXISTS。
 
 目标输出示例（时间仅为示意，不是性能承诺）：
 
@@ -107,7 +107,7 @@ Git setup:       not performed
 
 加 `--dry-run` 只展示当前 source/target 卷关系、精确目标路径、后端计划和降级原因，不分配 WorkspaceId、不预留名称或目标、不保留可执行 plan token。正式创建重新检测。预览不生成实际复制结果或 CoW 证明。重复创建已 Ready 的同名、同源、同 target 和同策略工作区时，人类输出的 Result 为 `already-ready`，JSON 的 result 同名。
 
-名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称和规范化 target 路径均全局唯一，实际目录是用户指定的 target，不由 WorkspaceId 推导。`workspace path/status` 当前按名称查询；`workspace remove` 可用名称或完整 ID。Workspace ID 为 `ws_` 加标准小写 UUIDv7。若 `workspace remove` 的位置参数同时是某个活跃名称和另一个 Workspace 的完整 ID（含已删除 ID），命令拒绝而不猜测目标；可写 `name:<名称>` 或 `id:<完整 ID>` 明确指定。两种前缀只用于清理目标，不属于 Workspace 名称。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
+名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称和登记 target 的路径字节均全局唯一，创建时还按前述包含与 APFS 别名规则拒绝冲突；实际目录是用户指定的 target，不由 WorkspaceId 推导。`workspace path/status` 当前按名称查询；`workspace remove` 可用名称或完整 ID。Workspace ID 为 `ws_` 加标准小写 UUIDv7。若 `workspace remove` 的位置参数同时是某个活跃名称和另一个 Workspace 的完整 ID（含已删除 ID），命令拒绝而不猜测目标；可写 `name:<名称>` 或 `id:<完整 ID>` 明确指定。两种前缀只用于清理目标，不属于 Workspace 名称。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
 
 相同名称、规范源路径、规范 target 路径和创建策略，若已有 Ready 记录且目标仍存在并归属匹配，则返回原副本，不重新复制，也不比较源是否已变。想复制当前源的新内容必须使用新名称及新目标；同名参数不同返回 E_NAME_CONFLICT，原记录未 Ready 返回 E_WORKSPACE_INCOMPLETE。来源随后消失不使这一幂等返回失效，但目标缺失或被替换不能返回成功。
 
@@ -391,7 +391,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 | 39 | E_CONTROL_LAYOUT | 控制目录身份、权限或受控布局不合法 |
 | 40 | E_WORKSPACE_INCOMPLETE | 工作区创建或清理未完成；只允许显式强制清理受控残留 |
 | 41 | E_LOCK_TIMEOUT | 生命周期锁等待超过 5 秒，未开始修改目标 |
-| 42 | E_TARGET_CONFLICT | 目标路径与其他活跃 Workspace 的 target 相同或相互包含 |
+| 42 | E_TARGET_CONFLICT | 目标路径与活跃 Workspace 的 target 或可清理的受控目录冲突，包含 APFS 别名 |
 | 43 | E_TARGET_EXISTS | 未登记但目标末级已存在，禁止覆盖 |
 
 旧 Repository/Base/分支保护相关编号 13、14、17、18、19、24，旧 data root 切换编号 16，以及旧执行包装编号 34 保留不再分配，不重新赋义。工具自身的退出码不受本表管理。

@@ -826,6 +826,16 @@ Release CoW 性能基线（同日、本机非并发 I/O）：运行 `PYTHONDONTW
 
 审核修订 Release 复验：`cargo build --locked --release --workspace` 退出 0，新 `target/release/thinws` SHA-256 为 `2c087cb20a2e712a85edad1a2605793c3c75d139e287ce606daf8b1def0f54d5`。本机以隔离 HOME 模拟 GitHub Actions 环境运行 `tools/ci_release_binary_e2e.py`，init/create/path/remove 的 CoW 黑盒链路退出 0；这不是线上 CI。Release 下 CLI contract、e2e_create、e2e_query 三个测试套件分别 17、7、14 项通过，另有 2 项需专用异卷环境而 ignored；包括新嵌套 target 拒绝和登记 target JSON 字段。脚本的一次性 `/private/tmp/thinws-release-e2e-7bd9tou0` 夹具经无符号链接核对后已按确切路径删除。最终 fmt、严格 Clippy、全 workspace 普通测试、差异检查、`cargo deny --locked check` 和缓存 `cargo audit --no-fetch` 均退出 0；deny 仍有既有未命中 allowance/exception 警告，audit 仅使用本地 advisory 库。Skill 创建器自带验证脚本因本机 Python 环境缺少 PyYAML 未执行成功；已用 Ruby YAML 解析核对 frontmatter，且手动通读窄幅修改，未把该替代检查写成脚本通过。既有真实多卷/APFS、长预算 fuzz 与性能证据未因本次仅涉及创建冲突和 CLI 展示的修订失效；规定模型的修订后只读审核尚待完成。
 
+第二次独立只读审核（GPT-6 Astra / `xhigh`，绑定 `b35cc2a374ddd472ba956cfaa24108ccab837ebc`）提出两项新增边界：已登记 target 移入隔离目录后，新 Workspace 可建在该隔离目录内并被旧 Workspace 续删误清理；活跃 target 的完全相同 APFS 大小写别名误报 `E_TARGET_EXISTS` 而不是 `E_TARGET_CONFLICT`。主 Agent 在真实 APFS CLI 中先复现 RED：隔离目录内候选预览实际成功、别名返回 43；随后把活跃记录的原 target 与按 ID 推导的暂存、回滚、隔离路径一并纳入词法和现存目录身份检查，且在未登记已存在分类前识别活跃目录别名。两条真实 CLI 回归现均 GREEN，受控路径四种角色另有 Application 单元断言，全 workspace 普通测试与严格 Clippy 已重新通过。此候选仍待新的受影响变异、Release 复验和精确提交审核；不得沿用 `b35cc2a` 的变异/Release 结果作为最终结论。
+
+相对 `b35cc2a` 的受影响生产差异用零上下文重新枚举为 **7 项**，集中在 Application 创建入口和活跃受控路径判断；继续使用六包反向依赖测试、2 jobs/4 jobserver tasks、180 秒单项上限，结果将置于独立忽略目录。参考上批 16 项约 2 分 49 秒，首次主动查看暂定启动后约 6 分钟；运行期间冻结生产和测试候选，不短轮询。终态待补。
+
+该 7 项实际于 **21:23:03–21:24:04 UTC** 完成约 60 秒，预计窗口首次读取时已终态：执行器 exit 0、**4 caught＋3 unviable、0 missed/timeout**，未变异基线通过；`outcomes.json` SHA-256 `9ab1f0938926a6ab8abbcd0a57e30ecfe87e2320de471d01d68b4ac059e2f235`。对 `7d74977` 以来的当前完整生产差异重新枚举为 333 项；和既有有效 caught/unviable 按当前完整名称比对后有 **35 项**因 Application `create.rs` 行坐标移动尚无精确当前名称证据，均已逐项列出并用行号正则加当前 diff 双重筛选确认恰好 35 项。本轮仅补跑这 35 项，不重做其他 298 项；仍用六包测试集、2 jobs/4 jobserver tasks、180 秒单项上限，结果目录 `target/p1-layout-review2-coordinate-gap-mutants/mutants.out/`。参照此前 16 项约 2 分 49 秒及本批 35 项的构建/测试量，首次主动查看暂定启动后约 9 分钟；运行期间冻结生产和测试候选，不短轮询。终态和 333 项精确对账待补。
+
+该 35 项实际于 **21:30:10–21:33:39 UTC** 完成约 3 分 29 秒，按预计窗口首次读取时已终态：执行器 exit 0、**30 caught＋5 unviable、0 missed/timeout**，未变异基线通过；`outcomes.json` SHA-256 `23771e11c4134ec4dabecb8b3dbe08a021d3202760235943441e023bac95d6a7`。再用当前完整零上下文差异重新枚举 333 项，逐一与此前八批及本轮三批的有效 caught/unviable 完整名称（含文件、行列、操作）求差，**333/333 有精确当前名称的正结果、0 缺口**。旧批次的 aborted/exit 2 和被修复的 missed 均保留原始记录，只采用其中仍有效的单项正结果；本轮两次独立批次并未重跑全 workspace 约三千项变异，也不是 Phase 1 人工放行。
+
+第二次审核修复的 Release 候选重新构建成功，`target/release/thinws` SHA-256 为 `f01b2748c7fb18429be70f9caa74e223a1f378c3aa4d96b348aaa61f4f32aa72`。首次 `cargo test --quiet --locked --release --workspace --all-targets` 在既有 `e2e_remove::real_cli_git_incomplete_refusal_exposes_the_specific_issue` 的第二次人类输出断言中偶发 exit 101：期望 25，实得 23；该用例单独运行通过，立即重跑相同全 workspace Release 命令退出 0，随后 Release `e2e_remove` 整个套件连续 10 次均退出 0。未找到稳定复现或与本轮创建路径变更的连接，保留首次失败记录与这项低频不确定性，不写成“从未失败”。新 Release 二进制在隔离 HOME、本机模拟 GitHub Actions 条件下通过 init/create/path/remove CoW 黑盒，非线上 CI；一次性 `/private/tmp/thinws-release-e2e-jr66vqhw` 夹具经确认无符号链接后按确切路径删除。最终 fmt、严格 Clippy、全 workspace Debug 测试、Release 全 workspace 重跑、crate 依赖方向及差异检查均退出 0；规定模型的最终精确提交审核仍待完成。
+
 ---
 
 ## 五、依赖摘要

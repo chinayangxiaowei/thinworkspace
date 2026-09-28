@@ -10,7 +10,7 @@ description: Use the thinws CLI from any project to create and work in a space-e
 ## 什么时候使用
 
 - 用户明确要求用 ThinWorkspace，或任务需要从**本机现有目录**建立独立、可直接编辑的低额外空间副本，例如多个 Agent 并行处理同一源码。
-- 当前首版要求 macOS、APFS，源目录与已配置 data root 在**同一个 APFS Volume**。它复制当前磁盘内容，不要求源目录是 Git 仓库。
+- 要求：macOS、APFS，源目录与已配置 data root 在**同一个 APFS Volume**。它复制当前磁盘内容，不要求源目录是 Git 仓库。
 - 不把它用于跨卷迁移、活跃数据库的原子快照、进程 Sandbox、自动 Git 分支/提交/PR、命令执行包装或构建缓存重定向。若任务只需读取现有目录，也不必创建工作区。
 - 不因 Skill 被加载就自行创建或删除工作区。先确认任务所指的源目录；若有多个候选，询问用户。已存在的同名工作区先查明归属，不覆盖。
 

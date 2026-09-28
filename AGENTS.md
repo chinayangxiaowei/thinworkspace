@@ -120,7 +120,7 @@
 | 任务拆分、并行 Agent、风险、验收或放行流程 | 《任务流程》对应完整章节 |
 | Agent 编码或审核派发、模型选择 | 《任务流程》§8.3 模型分工；在任务证据中记录实际模型 |
 | 任务编号、依赖、当前小阶段或计划调整 | 《Phase 1 实施计划》对应完整章节 |
-| Phase 1 功能验收或阶段候选测试 | 使用[项目验收 Skill](.agents/skills/thinws-phase1-acceptance/SKILL.md)编排命令与证据；产品和门禁事实仍按本表读取权威文档 |
+| 使用 ThinWorkspace CLI 创建、进入、查询或清理工作区 | 使用[ThinWorkspace 工作区 Skill](.agents/skills/thinws-workspace/SKILL.md)编排操作；CLI 精确契约仍以用户手册为准 |
 | 变异测试或模糊测试 | 技术栈测试章节；开发规范测试章节；任务流程专项门禁 |
 
 只需按需读取，不要求每次把全部文档装入上下文。读取方法：

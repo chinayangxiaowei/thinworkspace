@@ -27,19 +27,13 @@ fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let data_root = bootstrap.clone();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source stays").unwrap();
     let (code, init) = execute(
         &bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(code, 0, "{init}");
     let (code, created) = execute(
@@ -117,7 +111,6 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("tracked.txt"), b"baseline").unwrap();
@@ -138,13 +131,7 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
     );
     let (code, init) = execute(
         &bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(code, 0, "{init}");
     let create = |name: &str| {
@@ -250,19 +237,12 @@ fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source").unwrap();
     let (code, init) = execute(
         &bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(code, 0, "{init}");
     let (code, created) = execute(
@@ -321,7 +301,6 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
     let source = temp.path().join("source");
     let external_git = temp.path().join("external-git");
     fs::create_dir(&source).unwrap();
@@ -329,13 +308,7 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
     fs::write(source.join("note.txt"), b"source").unwrap();
     let (code, init) = execute(
         &bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(code, 0, "{init}");
     let (code, created) = execute(

@@ -11,8 +11,7 @@ fn unix_millis_or_invalid(now: SystemTime) -> i64 {
 }
 
 fn main() {
-    let commands =
-        LocalCommands::new(BaseDirs::new().map(|base| base.data_dir().join("ThinWorkspace")));
+    let commands = LocalCommands::new(BaseDirs::new().map(|base| base.home_dir().join(".thinws")));
     let now_ms = unix_millis_or_invalid(SystemTime::now());
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();

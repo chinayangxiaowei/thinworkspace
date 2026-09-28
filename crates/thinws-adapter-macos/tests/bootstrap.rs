@@ -39,6 +39,10 @@ fn private_dir(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
+fn absolute(path: &Path) -> AbsolutePath {
+    AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+}
+
 fn identity(root: &Path, instance: &str, volume_id: VolumeId) -> InstallationIdentity {
     InstallationIdentity::new(
         InstanceId::from_str(instance).unwrap(),
@@ -60,6 +64,55 @@ fn prepared_identity(
         prepared.volume_id(),
     );
     (prepared, identity)
+}
+
+#[test]
+fn fixed_control_root_accepts_only_its_lifecycle_lock_before_init() {
+    let temp = controlled_tempdir();
+    let control_root = temp.path().join(".thinws");
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
+    adapter.prepare_bootstrap().unwrap();
+    let lock = adapter
+        .acquire_bootstrap(Duration::from_millis(500))
+        .unwrap();
+    let (prepared, identity) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
+    let proof = adapter
+        .create_initializing(&lock, prepared, &identity)
+        .unwrap();
+    assert!(control_root.join(".thinws-control.toml").exists());
+    adapter.initialize_layout(&lock, &proof).unwrap();
+}
+
+#[test]
+fn fixed_control_root_rejects_unknown_content_before_and_after_preparation() {
+    for inject_after_prepare in [false, true] {
+        let temp = controlled_tempdir();
+        let control_root = temp.path().join(".thinws");
+        let adapter = MacOsHostAdapter::new(&control_root).unwrap();
+        adapter.prepare_bootstrap().unwrap();
+        let lock = adapter
+            .acquire_bootstrap(Duration::from_millis(500))
+            .unwrap();
+        let stray = control_root.join("user-file");
+        if !inject_after_prepare {
+            fs::write(&stray, b"preserve").unwrap();
+            let error = adapter
+                .prepare_data_root(&absolute(&control_root))
+                .err()
+                .expect("unknown content must prevent root preparation");
+            assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+        } else {
+            let (prepared, identity) = prepared_identity(&adapter, &control_root, INSTANCE_ID);
+            fs::write(&stray, b"preserve").unwrap();
+            let error = adapter
+                .create_initializing(&lock, prepared, &identity)
+                .err()
+                .expect("unknown content must prevent marker publication");
+            assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+        }
+        assert_eq!(fs::read(&stray).unwrap(), b"preserve");
+        assert!(!control_root.join(".thinws-control.toml").exists());
+    }
 }
 
 #[test]
@@ -86,8 +139,8 @@ fn initializing_never_writes_a_marker_for_a_different_same_volume_path() {
 
     assert_eq!(error.kind(), PortErrorKind::Conflict);
     assert_eq!(error.operation(), "validate prepared data root");
-    assert!(!prepared_path.join(".thinws-root.toml").exists());
-    assert!(!claimed_path.join(".thinws-root.toml").exists());
+    assert!(!prepared_path.join(".thinws-control.toml").exists());
+    assert!(!claimed_path.join(".thinws-control.toml").exists());
 }
 
 fn encoded_marker(identity: &InstallationIdentity, state: &str) -> Vec<u8> {
@@ -98,7 +151,7 @@ fn encoded_marker(identity: &InstallationIdentity, state: &str) -> Vec<u8> {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!(
-        "schema_version = 1\ninstance_id = \"{}\"\ndata_root_hex = \"{}\"\nvolume_id = \"{}\"\nstate = \"{}\"\n",
+        "schema_version = 2\ninstance_id = \"{}\"\ncontrol_root_hex = \"{}\"\ncontrol_volume_id = \"{}\"\nstate = \"{}\"\n",
         identity.instance_id(), root_hex, identity.volume_id(), state
     )
     .into_bytes()
@@ -1016,8 +1069,8 @@ fn p1_03_rejects_nonempty_or_replaced_prepared_roots_without_writing_a_marker() 
             .create_initializing(&lock, prepared, &expected)
             .is_err()
     );
-    assert!(!data_root.join(".thinws-root.toml").exists());
-    assert!(!displaced.join(".thinws-root.toml").exists());
+    assert!(!data_root.join(".thinws-control.toml").exists());
+    assert!(!displaced.join(".thinws-control.toml").exists());
 }
 
 #[test]
@@ -1043,7 +1096,7 @@ fn p1_03_rechecks_prepared_root_emptiness_before_publishing_the_marker() {
         fs::read(data_root.join("arrived-after-prepare")).unwrap(),
         b"preserve"
     );
-    assert!(!data_root.join(".thinws-root.toml").exists());
+    assert!(!data_root.join(".thinws-control.toml").exists());
 }
 
 #[test]
@@ -1137,7 +1190,7 @@ fn bootstrap_documents_publish_in_one_direction_with_exact_idempotence() {
     assert_eq!(marker.state(), RootMarkerState::Initializing);
     assert_eq!(marker.identity(), &expected);
     assert_eq!(
-        fs::metadata(data_root.join(".thinws-root.toml"))
+        fs::metadata(data_root.join(".thinws-control.toml"))
             .unwrap()
             .permissions()
             .mode()
@@ -1196,7 +1249,7 @@ fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
     let proof = adapter
         .create_initializing(&lock, first_prepared, &first)
         .unwrap();
-    let marker_path = first_root.join(".thinws-root.toml");
+    let marker_path = first_root.join(".thinws-control.toml");
     let displaced = first_root.join("displaced-marker");
     fs::rename(&marker_path, &displaced).unwrap();
     let replacement = encoded_marker(
@@ -1213,14 +1266,14 @@ fn existing_or_replaced_marker_is_never_adopted_or_overwritten() {
 
     let (second_prepared, second) = prepared_identity(&adapter, &second_root, INSTANCE_ID);
     let existing = encoded_marker(&second, "initializing");
-    write_private(&second_root.join(".thinws-root.toml"), &existing);
+    write_private(&second_root.join(".thinws-control.toml"), &existing);
     let error = adapter
         .create_initializing(&lock, second_prepared, &second)
         .err()
         .unwrap();
     assert_eq!(error.kind(), PortErrorKind::NotEmpty);
     assert_eq!(
-        fs::read(second_root.join(".thinws-root.toml")).unwrap(),
+        fs::read(second_root.join(".thinws-control.toml")).unwrap(),
         existing
     );
 }
@@ -1240,7 +1293,7 @@ fn an_in_place_modified_initializing_marker_cannot_be_promoted() {
     let proof = adapter
         .create_initializing(&lock, prepared, &expected)
         .unwrap();
-    let marker_path = data_root.join(".thinws-root.toml");
+    let marker_path = data_root.join(".thinws-control.toml");
     let replacement = encoded_marker(&expected, "ready");
     write_private(&marker_path, &replacement);
 
@@ -1272,15 +1325,15 @@ fn an_initializing_marker_moved_into_a_replacement_data_root_cannot_be_promoted(
     fs::rename(&data_root, &displaced_root).unwrap();
     private_dir(&data_root);
     fs::rename(
-        displaced_root.join(".thinws-root.toml"),
-        data_root.join(".thinws-root.toml"),
+        displaced_root.join(".thinws-control.toml"),
+        data_root.join(".thinws-control.toml"),
     )
     .unwrap();
 
     let error = adapter.publish_ready(&lock, proof).unwrap_err();
     assert_eq!(error.kind(), PortErrorKind::InvalidData);
     assert_eq!(
-        fs::read(data_root.join(".thinws-root.toml")).unwrap(),
+        fs::read(data_root.join(".thinws-control.toml")).unwrap(),
         encoded_marker(&expected, "initializing")
     );
     assert!(!bootstrap.join("config.toml").exists());
@@ -1342,7 +1395,7 @@ fn leaf_symlinks_and_a_guard_from_another_adapter_fail_without_touching_targets(
         .err()
         .unwrap();
     assert_eq!(error.kind(), PortErrorKind::InvalidData);
-    assert!(!root.join(".thinws-root.toml").exists());
+    assert!(!root.join(".thinws-control.toml").exists());
     drop(lock);
 
     let victim = temp.path().join("victim");
@@ -1353,7 +1406,7 @@ fn leaf_symlinks_and_a_guard_from_another_adapter_fail_without_touching_targets(
 
     fs::remove_file(bootstrap.join("config.toml")).unwrap();
     let unsafe_config = format!(
-        "schema_version = 1\ninstance_id = \"{INSTANCE_ID}\"\ndata_root_hex = \"2f746d70\"\nvolume_id = \"{VOLUME_ID}\"\n"
+        "schema_version = 2\ninstance_id = \"{INSTANCE_ID}\"\ncontrol_root_hex = \"2f746d70\"\ncontrol_volume_id = \"{VOLUME_ID}\"\n"
     );
     fs::write(bootstrap.join("config.toml"), unsafe_config).unwrap();
     fs::set_permissions(
@@ -1397,5 +1450,5 @@ fn intermediate_directory_symlinks_are_not_followed() {
             .prepare_data_root(aliased_identity.data_root())
             .is_err()
     );
-    assert!(!real_data_root.join(".thinws-root.toml").exists());
+    assert!(!real_data_root.join(".thinws-control.toml").exists());
 }

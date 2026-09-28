@@ -29,10 +29,8 @@ pub struct InitView {
     pub result: String,
     /// UUIDv7 installation identifier.
     pub instance_id: String,
-    /// Lossless canonical data-root bytes.
-    pub data_root: Vec<u8>,
-    /// APFS volume UUID.
-    pub volume_id: String,
+    /// Lossless canonical control-root bytes.
+    pub control_root: Vec<u8>,
 }
 
 /// Renderer-facing successful doctor data.
@@ -40,10 +38,8 @@ pub struct InitView {
 pub struct DoctorView {
     /// UUIDv7 installation identifier.
     pub instance_id: String,
-    /// Lossless canonical data-root bytes.
-    pub data_root: Vec<u8>,
-    /// APFS volume UUID.
-    pub volume_id: String,
+    /// Lossless canonical control-root bytes.
+    pub control_root: Vec<u8>,
     /// Number of active non-Ready Workspace records.
     pub incomplete_workspaces: usize,
 }
@@ -225,8 +221,8 @@ pub struct ErrorView {
 
 /// CLI seam that contains no renderer or business policy.
 pub trait Commands {
-    /// Executes init from lossless path bytes and an injected wall clock.
-    fn init(&self, data_root: Vec<u8>, now_ms: i64) -> Result<InitView, ErrorView>;
+    /// Executes init for the fixed control root with an injected wall clock.
+    fn init(&self, now_ms: i64) -> Result<InitView, ErrorView>;
 
     /// Executes product-state diagnosis.
     fn doctor(&self) -> Result<DoctorView, ErrorView>;
@@ -282,14 +278,14 @@ impl LocalCommands {
 
     fn adapter(&self) -> Result<MacOsHostAdapter, ErrorView> {
         let path = self.bootstrap_dir.as_ref().ok_or_else(|| ErrorView {
-            code: "E_FILESYSTEM".to_owned(),
-            message: "the current user data directory is unavailable".to_owned(),
+            code: "E_CONTROL_UNAVAILABLE".to_owned(),
+            message: "the current user home directory is unavailable".to_owned(),
             context: Map::new(),
             remediation: None,
         })?;
         MacOsHostAdapter::new(path).map_err(|_| ErrorView {
-            code: "E_FILESYSTEM".to_owned(),
-            message: "the ThinWorkspace bootstrap path is invalid".to_owned(),
+            code: "E_CONTROL_LAYOUT".to_owned(),
+            message: "the ThinWorkspace control path is invalid".to_owned(),
             context: Map::new(),
             remediation: None,
         })
@@ -297,8 +293,16 @@ impl LocalCommands {
 }
 
 impl Commands for LocalCommands {
-    fn init(&self, data_root: Vec<u8>, now_ms: i64) -> Result<InitView, ErrorView> {
-        let request = InitRequest::try_from_raw(data_root, now_ms).map_err(use_case_error_view)?;
+    fn init(&self, now_ms: i64) -> Result<InitView, ErrorView> {
+        let control_root = self.bootstrap_dir.as_ref().ok_or_else(|| ErrorView {
+            code: "E_CONTROL_UNAVAILABLE".to_owned(),
+            message: "the current user home directory is unavailable".to_owned(),
+            context: Map::new(),
+            remediation: None,
+        })?;
+        let request =
+            InitRequest::try_from_raw(control_root.as_os_str().as_bytes().to_vec(), now_ms)
+                .map_err(use_case_error_view)?;
         let service = ThinWorkspaceService::new(
             self.adapter()?,
             SqliteMetadataStoreFactory,
@@ -310,8 +314,7 @@ impl Commands for LocalCommands {
         Ok(InitView {
             result: outcome.result().as_str().to_owned(),
             instance_id: identity.instance_id().to_string(),
-            data_root: identity.data_root().as_bytes().to_vec(),
-            volume_id: identity.volume_id().to_string(),
+            control_root: identity.data_root().as_bytes().to_vec(),
         })
     }
 
@@ -326,8 +329,7 @@ impl Commands for LocalCommands {
         let identity = outcome.installation().identity();
         Ok(DoctorView {
             instance_id: identity.instance_id().to_string(),
-            data_root: identity.data_root().as_bytes().to_vec(),
-            volume_id: identity.volume_id().to_string(),
+            control_root: identity.data_root().as_bytes().to_vec(),
             incomplete_workspaces: outcome.incomplete_workspaces(),
         })
     }
@@ -638,9 +640,7 @@ where
     }
 
     let result = match cli.command {
-        Command::Init { data_root } => commands
-            .init(data_root.as_os_str().as_bytes().to_vec(), now_ms)
-            .map(Success::Init),
+        Command::Init => commands.init(now_ms).map(Success::Init),
         Command::Doctor => commands.doctor().map(Success::Doctor),
         Command::Workspace {
             command:
@@ -700,12 +700,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initializes one private ThinWorkspace data root.
-    Init {
-        /// Canonical absolute APFS directory used for ThinWorkspace data.
-        #[arg(long)]
-        data_root: PathBuf,
-    },
+    /// Initializes the fixed private ThinWorkspace control root.
+    Init,
     /// Validates installation and metadata state without repairing it.
     Doctor,
     /// Manages ordinary local Workspace directories.
@@ -794,10 +790,9 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
         Success::Init(view) => {
             writeln!(output, "ThinWorkspace initialized")?;
             writeln!(output, "Result:      {}", view.result)?;
-            output.write_all(b"Data root:   ")?;
-            output.write_all(&view.data_root)?;
-            output.write_all(b"\n")?;
-            writeln!(output, "Volume ID:   {}", view.volume_id)
+            output.write_all(b"Control root: ")?;
+            output.write_all(&view.control_root)?;
+            output.write_all(b"\n")
         }
         Success::Doctor(view) => {
             writeln!(output, "ThinWorkspace doctor")?;
@@ -808,8 +803,8 @@ fn render_success_human(success: &Success, output: &mut dyn Write) -> io::Result
                 platform_name(),
                 std::env::consts::ARCH
             )?;
-            output.write_all(b"Data root:           ")?;
-            output.write_all(&view.data_root)?;
+            output.write_all(b"Control root:        ")?;
+            output.write_all(&view.control_root)?;
             output.write_all(b"\n")?;
             writeln!(
                 output,
@@ -969,9 +964,8 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
             "command": "init",
             "result": view.result,
             "instance_id": view.instance_id,
-            "data_root": String::from_utf8_lossy(&view.data_root),
-            "data_root_hex": hex(&view.data_root),
-            "volume_id": view.volume_id,
+            "control_root": String::from_utf8_lossy(&view.control_root),
+            "control_root_hex": hex(&view.control_root),
         }),
         Success::Doctor(view) => json!({
             "command": "doctor",
@@ -981,9 +975,8 @@ fn render_success_json(success: &Success, output: &mut dyn Write) -> io::Result<
                 "architecture": std::env::consts::ARCH,
             },
             "instance_id": view.instance_id,
-            "data_root": String::from_utf8_lossy(&view.data_root),
-            "data_root_hex": hex(&view.data_root),
-            "volume_id": view.volume_id,
+            "control_root": String::from_utf8_lossy(&view.control_root),
+            "control_root_hex": hex(&view.control_root),
             "incomplete_workspaces": view.incomplete_workspaces,
             "git_check": {
                 "available": true,
@@ -1270,7 +1263,6 @@ fn exit_status(code: &str) -> i32 {
         ("E_CAPABILITY_UNAVAILABLE", 11),
         ("E_COW_UNAVAILABLE", 12),
         ("E_NAME_CONFLICT", 15),
-        ("E_DATA_ROOT_CHANGE_UNSUPPORTED", 16),
         ("E_WORKSPACE_NOT_FOUND", 20),
         ("E_WORKSPACE_NOT_READY", 21),
         ("E_WORKSPACE_DIRTY", 22),
@@ -1278,10 +1270,12 @@ fn exit_status(code: &str) -> i32 {
         ("E_GIT_CHECK_INCOMPLETE", 25),
         ("E_GIT", 30),
         ("E_FILESYSTEM", 31),
+        ("E_CONTROL_UNAVAILABLE", 32),
+        ("E_CONTROL_LAYOUT", 39),
+        ("E_CONTROL_NOT_EMPTY", 36),
         ("E_DATA_ROOT_UNAVAILABLE", 32),
         ("E_DATA_ROOT_LAYOUT", 33),
         ("E_METADATA", 35),
-        ("E_DATA_ROOT_NOT_EMPTY", 36),
         ("E_TARGET_MISSING", 37),
         ("E_TARGET_IDENTITY", 38),
         ("E_WORKSPACE_INCOMPLETE", 40),

@@ -54,7 +54,7 @@ pub struct MacOsHostAdapter {
 impl MacOsHostAdapter {
     /// Binds the Adapter to a canonical absolute bootstrap directory.
     ///
-    /// Production passes the fixed Application Support path; tests inject a
+    /// Production passes the fixed `~/.thinws` path; tests inject a
     /// private controlled directory without hidden environment overrides.
     pub fn new(bootstrap_dir: impl Into<PathBuf>) -> Result<Self, PortError> {
         let bootstrap_dir = bootstrap_dir.into();

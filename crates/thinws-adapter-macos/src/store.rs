@@ -31,7 +31,7 @@ use crate::volume::decode_volume_id;
 use crate::{MacOsHostAdapter, MacOsLockGuard};
 
 const CONFIG_NAME: &str = "config.toml";
-const MARKER_NAME: &str = ".thinws-root.toml";
+const MARKER_NAME: &str = ".thinws-control.toml";
 const STATE_DATABASE_NAME: &str = "state.db";
 const CONTROLLED_DIRECTORIES: [&str; 5] = ["metadata", "logs", "workspaces", "staging", "trash"];
 
@@ -224,7 +224,12 @@ impl BootstrapStore for MacOsHostAdapter {
         &self,
         data_root: &AbsolutePath,
     ) -> Result<Self::PreparedDataRoot, PortError> {
-        let directory = prepare_private_directory(&path_from_absolute(data_root), true)?;
+        let directory = prepare_private_directory(&path_from_absolute(data_root), false)?;
+        if directory.path == self.bootstrap_dir {
+            require_unclaimed_control_root(&directory)?;
+        } else {
+            require_empty_directory(&directory)?;
+        }
         let volume_id = volume_id_for_directory(&directory)?;
         Ok(MacOsPreparedDataRoot {
             data_root: data_root.clone(),
@@ -274,7 +279,11 @@ impl BootstrapStore for MacOsHostAdapter {
                 PortConflict::InstallationIdentity,
             ));
         }
-        require_empty_directory(&directory)?;
+        if directory.path == self.bootstrap_dir {
+            require_unclaimed_control_root(&directory)?;
+        } else {
+            require_empty_directory(&directory)?;
+        }
         let marker = RootMarker::new(identity.clone(), RootMarkerState::Initializing);
         let bytes = encode_marker(&marker).map_err(document_error)?;
         let temporary = PrivateTemp::create(&directory.fd, "root-marker", &bytes)?;
@@ -933,7 +942,7 @@ impl MacOsHostAdapter {
         if (
             lock.scope(),
             lock.belongs_to(self),
-            lock.protects_directory(&layout.controlled_directories[0]),
+            lock.protects_directory(&layout.data_root),
         ) != (LifecycleScope::DataRoot, true, true)
         {
             return Err(PortError::new(
@@ -1166,6 +1175,21 @@ fn require_only_entries(directory: &ValidatedDirectory, allowed: &[&str]) -> Res
         ));
     }
     Ok(())
+}
+
+fn require_unclaimed_control_root(directory: &ValidatedDirectory) -> Result<(), PortError> {
+    let names = crate::ffi::read_directory(&directory.fd)
+        .map_err(|error| io_error("inspect unclaimed control root", error))?;
+    if names
+        .iter()
+        .any(|name| name != OsStr::new("lifecycle.lock"))
+    {
+        return Err(PortError::new(
+            PortErrorKind::NotEmpty,
+            "unclaimed control root contains another entry",
+        ));
+    }
+    revalidate_directory(directory)
 }
 
 fn remove_exact_entry(

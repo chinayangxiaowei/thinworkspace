@@ -26,15 +26,10 @@ fn execute(bootstrap: &Path, arguments: Vec<OsString>) -> (i32, Value) {
 }
 
 fn init(bootstrap: &Path, data_root: &Path) {
+    assert_eq!(bootstrap, data_root);
     let (status, json) = execute(
         bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(status, 0, "{json}");
 }
@@ -63,7 +58,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let data_root = bootstrap.clone();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::create_dir(source.join(".git")).unwrap();
@@ -85,7 +80,7 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
         fs::read_dir(data_root.join("workspaces")).unwrap().count(),
         0
     );
-    assert!(!data_root.join("metadata/lifecycle.lock").exists());
+    assert!(data_root.join("lifecycle.lock").exists());
 
     let (status, created) = execute(&bootstrap, create_args(&source, "plain", &[]));
     assert_eq!(status, 0, "{created}");
@@ -150,7 +145,7 @@ fn real_cli_rejects_cross_volume_even_with_allow_copy() {
         .unwrap();
     let system_root = fs::canonicalize(temp.path()).unwrap();
     let bootstrap = system_root.join("bootstrap");
-    let data_root = system_root.join("data-root");
+    let data_root = bootstrap.clone();
     assert_ne!(
         fs::metadata(temp.path()).unwrap().dev(),
         fs::metadata(external.path()).unwrap().dev(),
@@ -170,7 +165,7 @@ fn real_cli_rejects_cross_volume_even_with_allow_copy() {
 }
 
 #[test]
-fn real_cli_distinguishes_missing_source_from_missing_registered_root() {
+fn real_cli_distinguishes_missing_source_from_absent_control_root() {
     let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
     fs::create_dir_all(&controlled).unwrap();
     let temp = Builder::new()
@@ -178,7 +173,7 @@ fn real_cli_distinguishes_missing_source_from_missing_registered_root() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let data_root = bootstrap.clone();
     let source = temp.path().join("source");
     init(&bootstrap, &data_root);
     for extra in [&[][..], &["--allow-copy"][..], &["--dry-run"][..]] {
@@ -187,10 +182,10 @@ fn real_cli_distinguishes_missing_source_from_missing_registered_root() {
         assert_eq!(error["error"]["code"], "E_FILESYSTEM");
     }
     fs::create_dir(&source).unwrap();
-    fs::rename(&data_root, temp.path().join("data-root-moved")).unwrap();
+    fs::rename(&data_root, temp.path().join("control-root-moved")).unwrap();
     let (status, error) = execute(&bootstrap, create_args(&source, "missing-root", &[]));
-    assert_eq!(status, 32, "{error}");
-    assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+    assert_eq!(status, 10, "{error}");
+    assert_eq!(error["error"]["code"], "E_NOT_INITIALIZED");
 }
 
 #[test]
@@ -202,7 +197,7 @@ fn ten_cow_workspaces_keep_ordinary_file_writes_independent() {
         .tempdir_in(fs::canonicalize(controlled).unwrap())
         .unwrap();
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let data_root = bootstrap.clone();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("note.txt"), b"source content").unwrap();

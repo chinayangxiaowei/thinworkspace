@@ -26,8 +26,6 @@ pub enum ErrorCode {
     CowUnavailable,
     /// An active Workspace already uses the requested name with other inputs.
     NameConflict,
-    /// Changing an initialized data root is unsupported.
-    DataRootChangeUnsupported,
     /// The requested Workspace does not exist.
     WorkspaceNotFound,
     /// The requested operation requires a Ready Workspace.
@@ -42,14 +40,18 @@ pub enum ErrorCode {
     Git,
     /// A filesystem or materialization operation failed.
     Filesystem,
+    /// The fixed user control directory cannot currently be accessed.
+    ControlUnavailable,
+    /// The fixed user control directory or its contents violate the registered layout.
+    ControlLayout,
+    /// An unowned fixed control directory contains user content.
+    ControlNotEmpty,
     /// The registered data root or volume is unavailable.
     DataRootUnavailable,
     /// Source, target, volume, or controlled path layout is invalid.
     DataRootLayout,
     /// SQLite, schema, or metadata persistence failed.
     Metadata,
-    /// A non-empty data root has no valid ThinWorkspace ownership marker.
-    DataRootNotEmpty,
     /// The registered Workspace target is absent at every proven location.
     TargetMissing,
     /// The registered target exists but does not match durable ownership evidence.
@@ -62,13 +64,12 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every currently assigned public error code in documented order.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Usage,
         Self::NotInitialized,
         Self::CapabilityUnavailable,
         Self::CowUnavailable,
         Self::NameConflict,
-        Self::DataRootChangeUnsupported,
         Self::WorkspaceNotFound,
         Self::WorkspaceNotReady,
         Self::WorkspaceDirty,
@@ -76,10 +77,12 @@ impl ErrorCode {
         Self::GitCheckIncomplete,
         Self::Git,
         Self::Filesystem,
+        Self::ControlUnavailable,
+        Self::ControlLayout,
+        Self::ControlNotEmpty,
         Self::DataRootUnavailable,
         Self::DataRootLayout,
         Self::Metadata,
-        Self::DataRootNotEmpty,
         Self::TargetMissing,
         Self::TargetIdentity,
         Self::WorkspaceIncomplete,
@@ -95,7 +98,6 @@ impl ErrorCode {
             Self::CapabilityUnavailable => "E_CAPABILITY_UNAVAILABLE",
             Self::CowUnavailable => "E_COW_UNAVAILABLE",
             Self::NameConflict => "E_NAME_CONFLICT",
-            Self::DataRootChangeUnsupported => "E_DATA_ROOT_CHANGE_UNSUPPORTED",
             Self::WorkspaceNotFound => "E_WORKSPACE_NOT_FOUND",
             Self::WorkspaceNotReady => "E_WORKSPACE_NOT_READY",
             Self::WorkspaceDirty => "E_WORKSPACE_DIRTY",
@@ -103,10 +105,12 @@ impl ErrorCode {
             Self::GitCheckIncomplete => "E_GIT_CHECK_INCOMPLETE",
             Self::Git => "E_GIT",
             Self::Filesystem => "E_FILESYSTEM",
+            Self::ControlUnavailable => "E_CONTROL_UNAVAILABLE",
+            Self::ControlLayout => "E_CONTROL_LAYOUT",
+            Self::ControlNotEmpty => "E_CONTROL_NOT_EMPTY",
             Self::DataRootUnavailable => "E_DATA_ROOT_UNAVAILABLE",
             Self::DataRootLayout => "E_DATA_ROOT_LAYOUT",
             Self::Metadata => "E_METADATA",
-            Self::DataRootNotEmpty => "E_DATA_ROOT_NOT_EMPTY",
             Self::TargetMissing => "E_TARGET_MISSING",
             Self::TargetIdentity => "E_TARGET_IDENTITY",
             Self::WorkspaceIncomplete => "E_WORKSPACE_INCOMPLETE",

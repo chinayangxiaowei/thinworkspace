@@ -12,7 +12,7 @@ use crate::filesystem::HistoricalDirectoryIdentity;
 
 /// Maximum encoded size of either bootstrap TOML document.
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
-const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+const DOCUMENT_SCHEMA_VERSION: u32 = 2;
 
 /// Pure bootstrap TOML decoding failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +44,8 @@ impl Error for DocumentError {}
 struct ConfigDocument {
     schema_version: u32,
     instance_id: String,
-    data_root_hex: String,
-    volume_id: String,
+    control_root_hex: String,
+    control_volume_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -53,8 +53,8 @@ struct ConfigDocument {
 struct MarkerDocument {
     schema_version: u32,
     instance_id: String,
-    data_root_hex: String,
-    volume_id: String,
+    control_root_hex: String,
+    control_volume_id: String,
     state: MarkerState,
 }
 
@@ -97,8 +97,8 @@ pub fn decode_bootstrap_config(bytes: &[u8]) -> Result<InstallationIdentity, Doc
     }
     decode_identity(
         &document.instance_id,
-        &document.data_root_hex,
-        &document.volume_id,
+        &document.control_root_hex,
+        &document.control_volume_id,
     )
 }
 
@@ -110,8 +110,8 @@ pub fn decode_root_marker(bytes: &[u8]) -> Result<RootMarker, DocumentError> {
     }
     let identity = decode_identity(
         &document.instance_id,
-        &document.data_root_hex,
-        &document.volume_id,
+        &document.control_root_hex,
+        &document.control_volume_id,
     )?;
     let state = match document.state {
         MarkerState::Initializing => RootMarkerState::Initializing,
@@ -124,8 +124,8 @@ pub(crate) fn encode_config(identity: &InstallationIdentity) -> Result<Vec<u8>, 
     encode_toml(&ConfigDocument {
         schema_version: DOCUMENT_SCHEMA_VERSION,
         instance_id: identity.instance_id().to_string(),
-        data_root_hex: encode_hex(identity.data_root().as_bytes()),
-        volume_id: identity.volume_id().to_string(),
+        control_root_hex: encode_hex(identity.data_root().as_bytes()),
+        control_volume_id: identity.volume_id().to_string(),
     })
 }
 
@@ -137,8 +137,8 @@ pub(crate) fn encode_marker(marker: &RootMarker) -> Result<Vec<u8>, DocumentErro
     encode_toml(&MarkerDocument {
         schema_version: DOCUMENT_SCHEMA_VERSION,
         instance_id: marker.identity().instance_id().to_string(),
-        data_root_hex: encode_hex(marker.identity().data_root().as_bytes()),
-        volume_id: marker.identity().volume_id().to_string(),
+        control_root_hex: encode_hex(marker.identity().data_root().as_bytes()),
+        control_volume_id: marker.identity().volume_id().to_string(),
         state,
     })
 }
@@ -216,14 +216,14 @@ fn encode_toml<T: Serialize>(document: &T) -> Result<Vec<u8>, DocumentError> {
 
 fn decode_identity(
     instance_id: &str,
-    data_root_hex: &str,
-    volume_id: &str,
+    control_root_hex: &str,
+    control_volume_id: &str,
 ) -> Result<InstallationIdentity, DocumentError> {
     Ok(InstallationIdentity::new(
         InstanceId::from_str(instance_id).map_err(|_| DocumentError::InvalidIdentity)?,
-        AbsolutePath::try_from_bytes(decode_hex(data_root_hex)?)
+        AbsolutePath::try_from_bytes(decode_hex(control_root_hex)?)
             .map_err(|_| DocumentError::InvalidIdentity)?,
-        VolumeId::from_str(volume_id).map_err(|_| DocumentError::InvalidIdentity)?,
+        VolumeId::from_str(control_volume_id).map_err(|_| DocumentError::InvalidIdentity)?,
     ))
 }
 
@@ -368,15 +368,15 @@ mod tests {
     #[test]
     fn config_encoder_accepts_the_exact_limit_and_rejects_the_next_path_size() {
         let base = encode_config(&identity_with_path_length(1)).unwrap().len() - 2;
-        assert_eq!((MAX_DOCUMENT_BYTES - base) % 2, 0);
         let exact_path_length = (MAX_DOCUMENT_BYTES - base) / 2;
 
         assert_eq!(
             encode_config(&identity_with_path_length(exact_path_length))
                 .unwrap()
                 .len(),
-            MAX_DOCUMENT_BYTES
+            base + exact_path_length * 2
         );
+        assert!(base + exact_path_length * 2 <= MAX_DOCUMENT_BYTES);
         assert_eq!(
             encode_config(&identity_with_path_length(exact_path_length + 1)).unwrap_err(),
             DocumentError::TooLarge

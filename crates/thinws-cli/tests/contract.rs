@@ -32,20 +32,18 @@ fn fixture_workspace_view() -> WorkspaceView {
 }
 
 impl Commands for FakeCommands {
-    fn init(&self, data_root: Vec<u8>, _now_ms: i64) -> Result<InitView, ErrorView> {
+    fn init(&self, _now_ms: i64) -> Result<InitView, ErrorView> {
         Ok(InitView {
             result: "initialized".to_owned(),
             instance_id: "01890a5d-ac96-774b-bd5b-55c7b8d09f33".to_owned(),
-            data_root,
-            volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            control_root: b"/Users/example/.thinws".to_vec(),
         })
     }
 
     fn doctor(&self) -> Result<DoctorView, ErrorView> {
         Ok(DoctorView {
             instance_id: "01890a5d-ac96-774b-bd5b-55c7b8d09f33".to_owned(),
-            data_root: b"/Volumes/data/thinws-data".to_vec(),
-            volume_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            control_root: b"/Users/example/.thinws".to_vec(),
             incomplete_workspaces: 2,
         })
     }
@@ -176,7 +174,7 @@ fn assert_ready_materialization_fixture(value: &Value) {
 struct FailingCommands(&'static str);
 
 impl Commands for FailingCommands {
-    fn init(&self, _data_root: Vec<u8>, _now_ms: i64) -> Result<InitView, ErrorView> {
+    fn init(&self, _now_ms: i64) -> Result<InitView, ErrorView> {
         Err(error(self.0))
     }
 
@@ -224,23 +222,39 @@ fn error(code: &str) -> ErrorView {
 // Concrete path validation is exercised through LocalCommands in E2E tests.
 
 #[test]
-fn init_human_and_json_outputs_match_the_frozen_contract() {
-    let (status, stdout, stderr) =
-        execute(&["thinws", "init", "--data-root", "/Volumes/data/thinws-data"]);
-    assert_eq!(status, 0);
+fn p1_17_init_uses_fixed_control_root_and_rejects_legacy_data_root_flag() {
+    let (status, stdout, stderr) = execute(&["thinws", "--json", "init"]);
+    assert_eq!(status, 0, "{}", String::from_utf8_lossy(&stderr));
     assert!(stderr.is_empty());
-    assert_eq!(
-        String::from_utf8(stdout).unwrap(),
-        "ThinWorkspace initialized\nResult:      initialized\nData root:   /Volumes/data/thinws-data\nVolume ID:   550e8400-e29b-41d4-a716-446655440000\n"
-    );
+    let output: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(output["data"]["control_root"], "/Users/example/.thinws");
+    assert!(output["data"].get("data_root").is_none());
+    assert!(output["data"].get("volume_id").is_none());
 
     let (status, stdout, stderr) = execute(&[
         "thinws",
         "--json",
         "init",
         "--data-root",
-        "/Volumes/data/thinws-data",
+        "/Volumes/data/legacy",
     ]);
+    assert_eq!(status, 2);
+    assert!(stderr.is_empty());
+    let error: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(error["error"]["code"], "E_USAGE");
+}
+
+#[test]
+fn init_human_and_json_outputs_match_the_frozen_contract() {
+    let (status, stdout, stderr) = execute(&["thinws", "init"]);
+    assert_eq!(status, 0);
+    assert!(stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(stdout).unwrap(),
+        "ThinWorkspace initialized\nResult:      initialized\nControl root: /Users/example/.thinws\n"
+    );
+
+    let (status, stdout, stderr) = execute(&["thinws", "--json", "init"]);
     assert_eq!(status, 0);
     assert!(stderr.is_empty());
     let json: Value = serde_json::from_slice(&stdout).unwrap();
@@ -248,10 +262,10 @@ fn init_human_and_json_outputs_match_the_frozen_contract() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["data"]["command"], "init");
     assert_eq!(json["data"]["result"], "initialized");
-    assert_eq!(json["data"]["data_root"], "/Volumes/data/thinws-data");
+    assert_eq!(json["data"]["control_root"], "/Users/example/.thinws");
     assert_eq!(
-        json["data"]["data_root_hex"],
-        "2f566f6c756d65732f646174612f7468696e77732d64617461"
+        json["data"]["control_root_hex"],
+        "2f55736572732f6578616d706c652f2e7468696e7773"
     );
 }
 
@@ -341,7 +355,6 @@ fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
         ("E_CAPABILITY_UNAVAILABLE", 11),
         ("E_COW_UNAVAILABLE", 12),
         ("E_NAME_CONFLICT", 15),
-        ("E_DATA_ROOT_CHANGE_UNSUPPORTED", 16),
         ("E_WORKSPACE_NOT_FOUND", 20),
         ("E_WORKSPACE_NOT_READY", 21),
         ("E_WORKSPACE_DIRTY", 22),
@@ -349,10 +362,12 @@ fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
         ("E_GIT_CHECK_INCOMPLETE", 25),
         ("E_GIT", 30),
         ("E_FILESYSTEM", 31),
+        ("E_CONTROL_UNAVAILABLE", 32),
+        ("E_CONTROL_LAYOUT", 39),
+        ("E_CONTROL_NOT_EMPTY", 36),
         ("E_DATA_ROOT_UNAVAILABLE", 32),
         ("E_DATA_ROOT_LAYOUT", 33),
         ("E_METADATA", 35),
-        ("E_DATA_ROOT_NOT_EMPTY", 36),
         ("E_TARGET_MISSING", 37),
         ("E_TARGET_IDENTITY", 38),
         ("E_WORKSPACE_INCOMPLETE", 40),
@@ -384,20 +399,13 @@ fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
 fn success_json_fixture_keys_match_the_public_command_matrix() {
     let cases: &[(&[&str], &[&str])] = &[
         (
-            &[
-                "thinws",
-                "--json",
-                "init",
-                "--data-root",
-                "/Volumes/data/thinws-data",
-            ],
+            &["thinws", "--json", "init"],
             &[
                 "command",
                 "result",
                 "instance_id",
-                "data_root",
-                "data_root_hex",
-                "volume_id",
+                "control_root",
+                "control_root_hex",
             ],
         ),
         (
@@ -407,9 +415,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 "status",
                 "host",
                 "instance_id",
-                "data_root",
-                "data_root_hex",
-                "volume_id",
+                "control_root",
+                "control_root_hex",
                 "incomplete_workspaces",
                 "git_check",
             ],
@@ -669,8 +676,8 @@ fn removed_commands_and_flags_have_no_compatibility_entry_points() {
 
 #[test]
 fn application_command_adapter_rejects_noncanonical_path_before_the_use_case() {
-    let commands = LocalCommands::new(None);
-    let error = commands.init(b"relative/path".to_vec(), 1).unwrap_err();
+    let commands = LocalCommands::new(Some("relative/path".into()));
+    let error = commands.init(1).unwrap_err();
     assert_eq!(error.code, "E_USAGE");
     let error = commands
         .create(b"relative/path".to_vec(), "one".to_owned(), false, false, 1)

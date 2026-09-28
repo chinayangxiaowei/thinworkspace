@@ -499,7 +499,7 @@ fn init_refuses_each_invalid_published_marker_without_writing_config() {
             ))
             .unwrap_err();
 
-        assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+        assert_eq!(error.diagnostic().code(), ErrorCode::ControlLayout);
         assert!(state.borrow().events.contains(&"marker.ready"));
         assert!(!state.borrow().events.contains(&"config.publish"));
         assert!(state.borrow().config.is_none());
@@ -520,7 +520,7 @@ fn init_revalidates_the_bootstrap_lock_after_config_read_before_touching_data_ro
         ))
         .unwrap_err();
 
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::ControlLayout);
     assert_eq!(
         state.borrow().events,
         [
@@ -576,10 +576,7 @@ fn a_different_requested_data_root_fails_before_touching_it() {
             UnixMillis::new(99).unwrap(),
         ))
         .unwrap_err();
-    assert_eq!(
-        error.diagnostic().code(),
-        ErrorCode::DataRootChangeUnsupported
-    );
+    assert_eq!(error.diagnostic().code(), ErrorCode::ControlLayout);
     assert!(!state.borrow().events.contains(&"data_root.prepare"));
     assert!(!state.borrow().events.contains(&"layout.validate"));
 }
@@ -587,7 +584,7 @@ fn a_different_requested_data_root_fails_before_touching_it() {
 #[test]
 fn port_failure_classes_map_to_the_frozen_public_codes() {
     for (kind, expected) in [
-        (PortErrorKind::NotEmpty, ErrorCode::DataRootNotEmpty),
+        (PortErrorKind::NotEmpty, ErrorCode::ControlNotEmpty),
         (
             PortErrorKind::CapabilityUnavailable,
             ErrorCode::CapabilityUnavailable,
@@ -621,7 +618,7 @@ fn port_failure_classes_map_to_the_frozen_public_codes() {
     let state = ready_state();
     state.borrow_mut().layout_error = Some(PortErrorKind::Unavailable);
     let error = service(state).doctor().unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootUnavailable);
+    assert_eq!(error.diagnostic().code(), ErrorCode::ControlUnavailable);
 
     let state = ready_state();
     state.borrow_mut().metadata_error = Some(PortErrorKind::Storage);
@@ -631,7 +628,7 @@ fn port_failure_classes_map_to_the_frozen_public_codes() {
     let state = ready_state();
     state.borrow_mut().metadata_error = Some(PortErrorKind::InvalidLayout);
     let error = service(state).doctor().unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::Metadata);
 
     let state = ready_state();
     state.borrow_mut().metadata_error = Some(PortErrorKind::Io);
@@ -645,7 +642,7 @@ fn port_failure_classes_map_to_the_frozen_public_codes() {
         RootMarkerState::Initializing,
     ));
     let error = service(state).doctor().unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code(), ErrorCode::ControlLayout);
 }
 
 #[test]

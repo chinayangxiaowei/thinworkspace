@@ -60,7 +60,7 @@ impl LifecycleLock for MacOsHostAdapter {
         acquire(
             self,
             self.bootstrap_dir.clone(),
-            OsString::from("init.lock"),
+            OsString::from("lifecycle.lock"),
             LifecycleScope::Bootstrap,
             timeout,
         )
@@ -73,7 +73,7 @@ impl LifecycleLock for MacOsHostAdapter {
     ) -> Result<Self::Guard, PortError> {
         acquire(
             self,
-            path_from_absolute(data_root).join("metadata"),
+            path_from_absolute(data_root),
             OsString::from("lifecycle.lock"),
             LifecycleScope::DataRoot,
             timeout,

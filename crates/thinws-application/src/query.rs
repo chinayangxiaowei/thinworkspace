@@ -161,7 +161,7 @@ where
         let identity = self
             .bootstrap
             .read_config()
-            .map_err(|error| map_port(Stage::Bootstrap, error))?
+            .map_err(|error| map_port(Stage::Control, error))?
             .ok_or_else(|| {
                 semantic_error(
                     ErrorCode::NotInitialized,
@@ -190,7 +190,7 @@ where
         let identity = self
             .bootstrap
             .read_config()
-            .map_err(|error| map_port(Stage::Bootstrap, error))?
+            .map_err(|error| map_port(Stage::Control, error))?
             .ok_or_else(|| {
                 semantic_error(
                     ErrorCode::NotInitialized,

@@ -74,7 +74,7 @@ fn fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .tempdir_in(fs::canonicalize(controlled).expect("canonical test parent"))
         .expect("private APFS fixture");
     let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let data_root = bootstrap.clone();
     let source = temp.path().join("source");
     fs::create_dir(&source).expect("source directory");
     fs::write(source.join("tracked.txt"), b"fixture\n").expect("source content");
@@ -100,15 +100,10 @@ fn json(bootstrap: &Path, args: Vec<OsString>) -> (i32, Value) {
 }
 
 fn initialize(bootstrap: &Path, data_root: &Path) {
+    assert_eq!(bootstrap, data_root);
     let (code, result) = json(
         bootstrap,
-        vec![
-            "thinws".into(),
-            "--json".into(),
-            "init".into(),
-            "--data-root".into(),
-            data_root.as_os_str().to_owned(),
-        ],
+        vec!["thinws".into(), "--json".into(), "init".into()],
     );
     assert_eq!(code, 0, "{result}");
 }
@@ -331,8 +326,8 @@ fn path_is_a_single_ordinary_path_line_and_rejects_json() {
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["error"]["code"], "E_USAGE");
 
-    let lock_file = data_root.join("metadata/lifecycle.lock");
-    fs::rename(&lock_file, data_root.join("metadata/old-lifecycle.lock"))
+    let lock_file = data_root.join("lifecycle.lock");
+    fs::rename(&lock_file, data_root.join("old-lifecycle.lock"))
         .expect("remove active lock entry from controlled fixture");
     symlink(temp.path(), &lock_file).expect("replace lock entry with an invalid symlink");
     let (code, stdout, stderr) = execute(
@@ -553,12 +548,12 @@ fn path_and_status_refuse_symlink_replacement_and_missing_names() {
 }
 
 #[test]
-fn path_and_status_classify_a_missing_registered_data_root() {
+fn path_and_status_report_uninitialized_when_control_root_is_absent() {
     let (temp, bootstrap, data_root, source) = fixture();
     initialize(&bootstrap, &data_root);
     create(&bootstrap, &source, "lost-root");
-    fs::rename(&data_root, temp.path().join("data-root-moved"))
-        .expect("move registered data root without replacing it");
+    fs::rename(&data_root, temp.path().join("control-root-moved"))
+        .expect("move registered control root without replacing it");
 
     let (code, error) = json(
         &bootstrap,
@@ -570,8 +565,8 @@ fn path_and_status_classify_a_missing_registered_data_root() {
             "lost-root".into(),
         ],
     );
-    assert_eq!(code, 32, "{error}");
-    assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+    assert_eq!(code, 10, "{error}");
+    assert_eq!(error["error"]["code"], "E_NOT_INITIALIZED");
     let (code, stdout, stderr) = execute(
         &bootstrap,
         vec![
@@ -581,7 +576,7 @@ fn path_and_status_classify_a_missing_registered_data_root() {
             "lost-root".into(),
         ],
     );
-    assert_eq!(code, 32, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(code, 10, "{}", String::from_utf8_lossy(&stderr));
     assert!(stdout.is_empty());
 }
 
@@ -603,8 +598,8 @@ fn path_and_status_classify_a_missing_metadata_directory_as_layout_failure() {
             "lost-metadata".into(),
         ],
     );
-    assert_eq!(code, 33, "{status}");
-    assert_eq!(status["error"]["code"], "E_DATA_ROOT_LAYOUT");
+    assert_eq!(code, 39, "{status}");
+    assert_eq!(status["error"]["code"], "E_CONTROL_LAYOUT");
     let (code, stdout, stderr) = execute(
         &bootstrap,
         vec![
@@ -614,7 +609,7 @@ fn path_and_status_classify_a_missing_metadata_directory_as_layout_failure() {
             "lost-metadata".into(),
         ],
     );
-    assert_eq!(code, 33, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(code, 39, "{}", String::from_utf8_lossy(&stderr));
     assert!(stdout.is_empty());
 }
 
@@ -708,8 +703,8 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     assert!(stdout.is_empty());
     assert!(String::from_utf8_lossy(&stderr).contains("E_WORKSPACE_NOT_READY"));
 
-    let lock_file = data_root.join("metadata/lifecycle.lock");
-    fs::rename(&lock_file, data_root.join("metadata/old-lifecycle.lock"))
+    let lock_file = data_root.join("lifecycle.lock");
+    fs::rename(&lock_file, data_root.join("old-lifecycle.lock"))
         .expect("remove active lock entry from controlled fixture");
     symlink(temp.path(), &lock_file).expect("replace lock entry with an invalid symlink");
     let (code, status) = json(
@@ -747,10 +742,14 @@ fn creating_without_receipt_stays_diagnostic_and_is_not_a_usable_path() {
     );
     assert_eq!(code, 0, "{doctor}");
     let instance_id = doctor["data"]["instance_id"].as_str().unwrap();
-    let volume_id = doctor["data"]["volume_id"].as_str().unwrap();
     let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40";
     let target = data_root.join("workspaces").join(workspace_id).join("root");
     let connection = Connection::open(data_root.join("metadata/state.db")).unwrap();
+    let volume_id: String = connection
+        .query_row("SELECT control_volume_id FROM installation", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
     connection
         .execute(
             "INSERT INTO workspaces (

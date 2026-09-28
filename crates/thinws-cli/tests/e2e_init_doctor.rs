@@ -38,13 +38,11 @@ fn execute(bootstrap: &Path, arguments: Vec<OsString>) -> (i32, Vec<u8>, Vec<u8>
     (status, stdout, stderr)
 }
 
-fn init_args(data_root: &Path) -> Vec<OsString> {
+fn init_args() -> Vec<OsString> {
     vec![
         OsString::from("thinws"),
         OsString::from("--json"),
         OsString::from("init"),
-        OsString::from("--data-root"),
-        data_root.as_os_str().to_owned(),
     ]
 }
 
@@ -59,16 +57,16 @@ fn doctor_args() -> Vec<OsString> {
 #[test]
 fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() {
     let temp = apfs_tempdir("thinws-p1-03-e2e-");
-    let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data-root");
+    let bootstrap = temp.path().join(".thinws");
+    let data_root = bootstrap.clone();
 
-    let (status, stdout, stderr) = execute(&bootstrap, init_args(&data_root));
+    let (status, stdout, stderr) = execute(&bootstrap, init_args());
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&stderr));
     assert!(stderr.is_empty());
     let initialized: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(initialized["data"]["result"], "initialized");
     assert_eq!(
-        initialized["data"]["data_root_hex"],
+        initialized["data"]["control_root_hex"],
         data_root
             .as_os_str()
             .as_bytes()
@@ -77,7 +75,7 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
             .collect::<String>()
     );
 
-    let (status, stdout, stderr) = execute(&bootstrap, init_args(&data_root));
+    let (status, stdout, stderr) = execute(&bootstrap, init_args());
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&stderr));
     let repeated: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(repeated["data"]["result"], "already-initialized");
@@ -105,8 +103,8 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
     }
     for file in [
         bootstrap.join("config.toml"),
-        bootstrap.join("init.lock"),
-        data_root.join(".thinws-root.toml"),
+        bootstrap.join("lifecycle.lock"),
+        data_root.join(".thinws-control.toml"),
         data_root.join("metadata/state.db"),
     ] {
         assert_eq!(
@@ -119,7 +117,7 @@ fn concrete_init_is_idempotent_and_doctor_reports_the_ready_apfs_installation() 
 }
 
 #[test]
-fn doctor_before_initialization_and_conflicting_reinit_keep_their_public_boundaries() {
+fn doctor_before_initialization_and_repeated_init_keep_their_public_boundaries() {
     let temp = apfs_tempdir("thinws-p1-03-boundaries-");
     let bootstrap = temp.path().join("bootstrap");
 
@@ -130,51 +128,40 @@ fn doctor_before_initialization_and_conflicting_reinit_keep_their_public_boundar
     assert_eq!(uninitialized["error"]["code"], "E_NOT_INITIALIZED");
     assert!(!bootstrap.exists());
 
-    let registered = temp.path().join("registered");
-    assert_eq!(execute(&bootstrap, init_args(&registered)).0, 0);
-
-    let conflicting = temp.path().join("must-not-be-touched");
-    let (status, stdout, stderr) = execute(&bootstrap, init_args(&conflicting));
-    assert_eq!(status, 16);
+    assert_eq!(execute(&bootstrap, init_args()).0, 0);
+    let (status, stdout, stderr) = execute(&bootstrap, init_args());
+    assert_eq!(status, 0);
     assert!(stderr.is_empty());
-    let conflict: Value = serde_json::from_slice(&stdout).unwrap();
-    assert_eq!(conflict["error"]["code"], "E_DATA_ROOT_CHANGE_UNSUPPORTED");
-    assert!(!conflicting.exists());
+    let result: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(result["data"]["result"], "already-initialized");
 }
 
 #[test]
-fn nonempty_unowned_root_and_missing_registered_root_use_distinct_public_errors() {
+fn nonempty_unowned_control_root_preserves_user_content() {
     let temp = apfs_tempdir("thinws-p1-03-errors-");
-    let bootstrap = temp.path().join("bootstrap-nonempty");
-    let nonempty = temp.path().join("nonempty");
-    private_dir(&nonempty);
-    fs::write(nonempty.join("user-file"), b"preserve").unwrap();
+    let control_root = temp.path().join(".thinws");
+    private_dir(&control_root);
+    fs::write(control_root.join("user-file"), b"preserve").unwrap();
 
-    let (status, stdout, _) = execute(&bootstrap, init_args(&nonempty));
+    let (status, stdout, _) = execute(&control_root, init_args());
     assert_eq!(status, 36);
     let error: Value = serde_json::from_slice(&stdout).unwrap();
-    assert_eq!(error["error"]["code"], "E_DATA_ROOT_NOT_EMPTY");
-    assert_eq!(fs::read(nonempty.join("user-file")).unwrap(), b"preserve");
-
-    let bootstrap = temp.path().join("bootstrap-missing");
-    let data_root = temp.path().join("registered");
-    assert_eq!(execute(&bootstrap, init_args(&data_root)).0, 0);
-    let displaced = temp.path().join("displaced-registered");
-    fs::rename(&data_root, &displaced).unwrap();
-
-    let (status, stdout, _) = execute(&bootstrap, doctor_args());
-    assert_eq!(status, 32);
-    let error: Value = serde_json::from_slice(&stdout).unwrap();
-    assert_eq!(error["error"]["code"], "E_DATA_ROOT_UNAVAILABLE");
+    assert_eq!(error["error"]["code"], "E_CONTROL_NOT_EMPTY");
+    assert_eq!(
+        fs::read(control_root.join("user-file")).unwrap(),
+        b"preserve"
+    );
+    assert!(!control_root.join("config.toml").exists());
+    assert!(!control_root.join(".thinws-control.toml").exists());
 }
 
 #[test]
 fn doctor_reports_controlled_directory_type_and_symlink_changes_as_layout_errors() {
     for replacement in ["file", "symlink", "permissions"] {
         let temp = apfs_tempdir("thinws-p1-03-layout-errors-");
-        let bootstrap = temp.path().join("bootstrap");
-        let data_root = temp.path().join("registered");
-        assert_eq!(execute(&bootstrap, init_args(&data_root)).0, 0);
+        let bootstrap = temp.path().join(".thinws");
+        let data_root = bootstrap.clone();
+        assert_eq!(execute(&bootstrap, init_args()).0, 0);
 
         let logs = data_root.join("logs");
         fs::remove_dir(&logs).unwrap();
@@ -190,11 +177,11 @@ fn doctor_reports_controlled_directory_type_and_symlink_changes_as_layout_errors
         }
 
         let (status, stdout, stderr) = execute(&bootstrap, doctor_args());
-        assert_eq!(status, 33, "replacement={replacement}");
+        assert_eq!(status, 39, "replacement={replacement}");
         assert!(stderr.is_empty());
         let error: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(
-            error["error"]["code"], "E_DATA_ROOT_LAYOUT",
+            error["error"]["code"], "E_CONTROL_LAYOUT",
             "replacement={replacement}"
         );
     }
@@ -204,25 +191,25 @@ fn doctor_reports_controlled_directory_type_and_symlink_changes_as_layout_errors
 fn doctor_reports_bootstrap_and_root_marker_symlinks_as_layout_errors() {
     for document in ["config", "marker"] {
         let temp = apfs_tempdir("thinws-p1-03-document-links-");
-        let bootstrap = temp.path().join("bootstrap");
-        let data_root = temp.path().join("registered");
-        assert_eq!(execute(&bootstrap, init_args(&data_root)).0, 0);
+        let bootstrap = temp.path().join(".thinws");
+        let data_root = bootstrap.clone();
+        assert_eq!(execute(&bootstrap, init_args()).0, 0);
 
         let document_path = if document == "config" {
             bootstrap.join("config.toml")
         } else {
-            data_root.join(".thinws-root.toml")
+            data_root.join(".thinws-control.toml")
         };
         let displaced = document_path.with_extension("displaced");
         fs::rename(&document_path, &displaced).unwrap();
         symlink(&displaced, &document_path).unwrap();
 
         let (status, stdout, stderr) = execute(&bootstrap, doctor_args());
-        assert_eq!(status, 33, "document={document}");
+        assert_eq!(status, 39, "document={document}");
         assert!(stderr.is_empty());
         let error: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(
-            error["error"]["code"], "E_DATA_ROOT_LAYOUT",
+            error["error"]["code"], "E_CONTROL_LAYOUT",
             "document={document}"
         );
     }

@@ -36,59 +36,55 @@ fn absolute(path: &Path) -> AbsolutePath {
 }
 
 #[test]
-fn lock_scopes_are_independent_timeout_is_bounded_and_release_allows_reacquire() {
+fn one_lifecycle_file_serializes_init_and_workspace_mutations() {
     let temp = controlled_tempdir();
-    let bootstrap = temp.path().join("bootstrap");
-    let data_root = temp.path().join("data");
-    private_dir(&bootstrap);
-    private_dir(&data_root);
-    private_dir(&data_root.join("metadata"));
-    let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+    let control_root = temp.path().join(".thinws");
+    private_dir(&control_root);
+    let adapter = MacOsHostAdapter::new(&control_root).unwrap();
 
     let bootstrap_guard = adapter
         .acquire_bootstrap(Duration::from_millis(100))
         .unwrap();
     assert_eq!(bootstrap_guard.scope(), LifecycleScope::Bootstrap);
-    let diagnostic_before = fs::read(bootstrap.join("init.lock")).unwrap();
+    let diagnostic_before = fs::read(control_root.join("lifecycle.lock")).unwrap();
     let started = Instant::now();
     let error = adapter
-        .acquire_bootstrap(Duration::from_millis(40))
+        .acquire_data_root(&absolute(&control_root), Duration::from_millis(40))
         .err()
-        .expect("same-scope contender must time out");
+        .expect("workspace mutation must contend with init");
     assert_eq!(error.kind(), PortErrorKind::Timeout);
     assert!(started.elapsed() >= Duration::from_millis(35));
     assert_eq!(
-        fs::read(bootstrap.join("init.lock")).unwrap(),
+        fs::read(control_root.join("lifecycle.lock")).unwrap(),
         diagnostic_before
     );
 
+    drop(bootstrap_guard);
     let data_guard = adapter
-        .acquire_data_root(&absolute(&data_root), Duration::from_millis(100))
+        .acquire_data_root(&absolute(&control_root), Duration::from_millis(100))
         .unwrap();
     assert_eq!(data_guard.scope(), LifecycleScope::DataRoot);
     data_guard.revalidate().unwrap();
     drop(data_guard);
-    drop(bootstrap_guard);
     adapter
         .acquire_bootstrap(Duration::from_millis(100))
         .unwrap();
+    assert!(!control_root.join("init.lock").exists());
+    assert!(!control_root.join("metadata/lifecycle.lock").exists());
 }
 
 #[test]
-fn concurrent_first_data_root_lock_open_serializes_without_spurious_not_found() {
+fn concurrent_first_lifecycle_lock_open_serializes_without_spurious_not_found() {
     for _ in 0..12 {
         let temp = controlled_tempdir();
-        let bootstrap = temp.path().join("bootstrap");
-        let data_root = temp.path().join("data");
-        private_dir(&bootstrap);
-        private_dir(&data_root);
-        private_dir(&data_root.join("metadata"));
-        let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
+        let control_root = temp.path().join(".thinws");
+        private_dir(&control_root);
+        let adapter = MacOsHostAdapter::new(&control_root).unwrap();
         let barrier = Arc::new(Barrier::new(3));
         let mut threads = Vec::new();
         for _ in 0..2 {
             let adapter = adapter.clone();
-            let data_root = absolute(&data_root);
+            let data_root = absolute(&control_root);
             let barrier = barrier.clone();
             threads.push(thread::spawn(move || {
                 barrier.wait();
@@ -102,7 +98,7 @@ fn concurrent_first_data_root_lock_open_serializes_without_spurious_not_found() 
         for thread in threads {
             thread.join().unwrap();
         }
-        assert!(data_root.join("metadata/lifecycle.lock").exists());
+        assert!(control_root.join("lifecycle.lock").exists());
     }
 }
 
@@ -114,7 +110,7 @@ fn lock_symlink_and_post_acquisition_replacement_are_rejected() {
     let victim = temp.path().join("victim");
     fs::write(&victim, b"victim").unwrap();
     fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
-    symlink(&victim, bootstrap.join("init.lock")).unwrap();
+    symlink(&victim, bootstrap.join("lifecycle.lock")).unwrap();
     let adapter = MacOsHostAdapter::new(&bootstrap).unwrap();
     assert!(
         adapter
@@ -122,21 +118,21 @@ fn lock_symlink_and_post_acquisition_replacement_are_rejected() {
             .is_err()
     );
     assert_eq!(fs::read(&victim).unwrap(), b"victim");
-    fs::remove_file(bootstrap.join("init.lock")).unwrap();
+    fs::remove_file(bootstrap.join("lifecycle.lock")).unwrap();
 
-    private_dir(&bootstrap.join("init.lock"));
+    private_dir(&bootstrap.join("lifecycle.lock"));
     assert!(
         adapter
             .acquire_bootstrap(Duration::from_millis(20))
             .is_err()
     );
-    fs::remove_dir(bootstrap.join("init.lock")).unwrap();
+    fs::remove_dir(bootstrap.join("lifecycle.lock")).unwrap();
 
     let guard = adapter
         .acquire_bootstrap(Duration::from_millis(100))
         .unwrap();
     fs::rename(
-        bootstrap.join("init.lock"),
+        bootstrap.join("lifecycle.lock"),
         bootstrap.join("displaced.lock"),
     )
     .unwrap();
@@ -144,7 +140,7 @@ fn lock_symlink_and_post_acquisition_replacement_are_rejected() {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(bootstrap.join("init.lock"))
+        .open(bootstrap.join("lifecycle.lock"))
         .unwrap();
     replacement.sync_all().unwrap();
     assert_eq!(

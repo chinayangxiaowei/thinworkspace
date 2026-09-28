@@ -306,23 +306,23 @@ where
     pub fn init(&self, request: InitRequest) -> Result<InitOutcome, UseCaseError> {
         self.bootstrap
             .prepare_bootstrap()
-            .map_err(|error| map_port(Stage::Bootstrap, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let lock = self
             .bootstrap
             .acquire_bootstrap(self.lock_timeout)
-            .map_err(|error| map_port(Stage::Lock, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let current = self
             .bootstrap
             .read_config()
-            .map_err(|error| map_port(Stage::Bootstrap, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         lock.revalidate()
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
 
         if let Some(identity) = current {
             if identity.data_root() != request.data_root() {
                 return Err(semantic_error(
-                    ErrorCode::DataRootChangeUnsupported,
-                    "changing the initialized data root is unsupported",
+                    ErrorCode::ControlLayout,
+                    "registered control root does not match the fixed location",
                 ));
             }
             let snapshot = self.inspect_existing(&identity, request.now())?;
@@ -335,7 +335,7 @@ where
         let prepared = self
             .bootstrap
             .prepare_data_root(request.data_root())
-            .map_err(|error| map_port(Stage::PrepareDataRoot, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let identity = InstallationIdentity::new(
             InstanceId::new(),
             prepared.data_root().clone(),
@@ -344,11 +344,11 @@ where
         let proof = self
             .bootstrap
             .create_initializing(&lock, prepared, &identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let layout = self
             .bootstrap
             .initialize_layout(&lock, &proof)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let expected = InstallationRecord::new(identity.clone(), request.now());
         let installation = self
             .metadata
@@ -356,20 +356,20 @@ where
             .map_err(|error| map_port(Stage::Metadata, error))?;
         layout
             .revalidate()
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         let ready = self
             .bootstrap
             .publish_ready(&lock, proof)
-            .map_err(|error| map_port(Stage::Publish, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         if ready.state() != RootMarkerState::Ready || ready.identity() != installation.identity() {
             return Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::ControlLayout,
                 "published root marker does not match metadata",
             ));
         }
         self.bootstrap
             .publish_config(&lock, installation.identity())
-            .map_err(|error| map_port(Stage::Publish, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         Ok(InitOutcome {
             result: InitResult::Initialized,
             installation,
@@ -394,7 +394,7 @@ where
         let identity = self
             .bootstrap
             .read_config()
-            .map_err(|error| map_port(Stage::Bootstrap, error))?
+            .map_err(|error| map_port(Stage::Control, error))?
             .ok_or_else(|| {
                 semantic_error(
                     ErrorCode::NotInitialized,
@@ -413,7 +413,7 @@ where
         let layout = self
             .bootstrap
             .validate_layout(identity)
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(identity)?;
         let expected = InstallationRecord::new(identity.clone(), placeholder_time);
         let snapshot = self
@@ -422,7 +422,7 @@ where
             .map_err(|error| map_port(Stage::Metadata, error))?;
         layout
             .revalidate()
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(identity)?;
         Ok(snapshot)
     }
@@ -431,7 +431,7 @@ where
         let marker = self
             .bootstrap
             .read_root_marker(identity.data_root())
-            .map_err(|error| map_port(Stage::Layout, error))?;
+            .map_err(|error| map_port(Stage::Control, error))?;
         match marker {
             Some(marker)
                 if marker.state() == RootMarkerState::Ready && marker.identity() == identity =>
@@ -439,7 +439,7 @@ where
                 Ok(())
             }
             _ => Err(semantic_error(
-                ErrorCode::DataRootLayout,
+                ErrorCode::ControlLayout,
                 "data-root marker is missing, incomplete, or inconsistent",
             )),
         }
@@ -466,30 +466,41 @@ fn _workspace_state_is_incomplete(state: WorkspaceState) -> bool {
 
 #[derive(Clone, Copy)]
 enum Stage {
-    Bootstrap,
+    Control,
     Lock,
-    PrepareDataRoot,
     Layout,
     Source,
     Metadata,
-    Publish,
 }
 
 fn map_port(stage: Stage, error: PortError) -> UseCaseError {
     let code = match error.kind() {
         PortErrorKind::Timeout => ErrorCode::LockTimeout,
         PortErrorKind::CapabilityUnavailable => ErrorCode::CapabilityUnavailable,
-        PortErrorKind::NotEmpty => ErrorCode::DataRootNotEmpty,
+        PortErrorKind::NotEmpty if matches!(stage, Stage::Control) => ErrorCode::ControlNotEmpty,
         PortErrorKind::Unavailable
             if matches!(stage, Stage::Source)
                 || error.materialization_path_role() == Some(MaterializationPathRole::Source) =>
         {
             ErrorCode::Filesystem
         }
+        PortErrorKind::Unavailable if matches!(stage, Stage::Control) => {
+            ErrorCode::ControlUnavailable
+        }
         PortErrorKind::Unavailable => ErrorCode::DataRootUnavailable,
+        PortErrorKind::InvalidLayout if matches!(stage, Stage::Control) => ErrorCode::ControlLayout,
+        PortErrorKind::InvalidLayout if matches!(stage, Stage::Metadata) => ErrorCode::Metadata,
         PortErrorKind::InvalidLayout => ErrorCode::DataRootLayout,
         PortErrorKind::Io => ErrorCode::Filesystem,
         _ if matches!(stage, Stage::Metadata) => ErrorCode::Metadata,
+        PortErrorKind::Conflict
+        | PortErrorKind::InvalidData
+        | PortErrorKind::UnsupportedVersion
+        | PortErrorKind::NotFound
+            if matches!(stage, Stage::Control) =>
+        {
+            ErrorCode::ControlLayout
+        }
         PortErrorKind::Conflict
         | PortErrorKind::InvalidData
         | PortErrorKind::UnsupportedVersion
@@ -498,25 +509,14 @@ fn map_port(stage: Stage, error: PortError) -> UseCaseError {
         {
             ErrorCode::DataRootLayout
         }
-        PortErrorKind::Conflict | PortErrorKind::InvalidData if matches!(stage, Stage::Publish) => {
-            ErrorCode::DataRootLayout
-        }
-        PortErrorKind::InvalidData | PortErrorKind::UnsupportedVersion
-            if matches!(stage, Stage::Bootstrap) =>
-        {
-            ErrorCode::DataRootLayout
-        }
-        PortErrorKind::InvalidData | PortErrorKind::Conflict
-            if matches!(stage, Stage::PrepareDataRoot) =>
-        {
-            ErrorCode::DataRootLayout
-        }
         _ => ErrorCode::Filesystem,
     };
     let message = match code {
         ErrorCode::LockTimeout => "lifecycle lock wait timed out",
         ErrorCode::CapabilityUnavailable => "required platform capability is unavailable",
-        ErrorCode::DataRootNotEmpty => "data root is not empty",
+        ErrorCode::ControlNotEmpty => "control directory is not empty",
+        ErrorCode::ControlUnavailable => "fixed control directory is unavailable",
+        ErrorCode::ControlLayout => "control directory identity or layout is invalid",
         ErrorCode::DataRootUnavailable => "registered data root is unavailable",
         ErrorCode::DataRootLayout => "data-root identity or layout is invalid",
         ErrorCode::Metadata => "metadata database validation failed",
@@ -565,9 +565,9 @@ mod probe_error_tests {
     fn stage_guards_keep_unrelated_port_failures_out_of_layout_errors() {
         for (index, (stage, kind, expected)) in [
             (
-                Stage::Publish,
+                Stage::Control,
                 PortErrorKind::Conflict,
-                ErrorCode::DataRootLayout,
+                ErrorCode::ControlLayout,
             ),
             (
                 Stage::Source,
@@ -580,13 +580,18 @@ mod probe_error_tests {
                 ErrorCode::Filesystem,
             ),
             (
-                Stage::PrepareDataRoot,
+                Stage::Control,
                 PortErrorKind::InvalidData,
-                ErrorCode::DataRootLayout,
+                ErrorCode::ControlLayout,
             ),
             (
                 Stage::Source,
                 PortErrorKind::InvalidData,
+                ErrorCode::Filesystem,
+            ),
+            (
+                Stage::Layout,
+                PortErrorKind::NotEmpty,
                 ErrorCode::Filesystem,
             ),
         ]
@@ -614,10 +619,22 @@ mod probe_error_tests {
                 "required platform capability is unavailable",
             ),
             (
-                Stage::PrepareDataRoot,
+                Stage::Control,
                 PortErrorKind::NotEmpty,
-                ErrorCode::DataRootNotEmpty,
-                "data root is not empty",
+                ErrorCode::ControlNotEmpty,
+                "control directory is not empty",
+            ),
+            (
+                Stage::Control,
+                PortErrorKind::Unavailable,
+                ErrorCode::ControlUnavailable,
+                "fixed control directory is unavailable",
+            ),
+            (
+                Stage::Control,
+                PortErrorKind::InvalidLayout,
+                ErrorCode::ControlLayout,
+                "control directory identity or layout is invalid",
             ),
             (
                 Stage::Layout,

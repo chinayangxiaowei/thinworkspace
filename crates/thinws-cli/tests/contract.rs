@@ -353,6 +353,8 @@ fn all_public_errors_keep_their_frozen_exit_statuses_and_envelope() {
         ("E_DATA_ROOT_LAYOUT", 33),
         ("E_METADATA", 35),
         ("E_DATA_ROOT_NOT_EMPTY", 36),
+        ("E_TARGET_MISSING", 37),
+        ("E_TARGET_IDENTITY", 38),
         ("E_WORKSPACE_INCOMPLETE", 40),
         ("E_LOCK_TIMEOUT", 41),
     ] {

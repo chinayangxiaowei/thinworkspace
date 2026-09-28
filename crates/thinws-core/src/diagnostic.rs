@@ -50,6 +50,10 @@ pub enum ErrorCode {
     Metadata,
     /// A non-empty data root has no valid ThinWorkspace ownership marker.
     DataRootNotEmpty,
+    /// The registered Workspace target is absent at every proven location.
+    TargetMissing,
+    /// The registered target exists but does not match durable ownership evidence.
+    TargetIdentity,
     /// Workspace creation or cleanup is incomplete.
     WorkspaceIncomplete,
     /// A lifecycle lock was not acquired within the public timeout.
@@ -58,7 +62,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every currently assigned public error code in documented order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 21] = [
         Self::Usage,
         Self::NotInitialized,
         Self::CapabilityUnavailable,
@@ -76,6 +80,8 @@ impl ErrorCode {
         Self::DataRootLayout,
         Self::Metadata,
         Self::DataRootNotEmpty,
+        Self::TargetMissing,
+        Self::TargetIdentity,
         Self::WorkspaceIncomplete,
         Self::LockTimeout,
     ];
@@ -101,6 +107,8 @@ impl ErrorCode {
             Self::DataRootLayout => "E_DATA_ROOT_LAYOUT",
             Self::Metadata => "E_METADATA",
             Self::DataRootNotEmpty => "E_DATA_ROOT_NOT_EMPTY",
+            Self::TargetMissing => "E_TARGET_MISSING",
+            Self::TargetIdentity => "E_TARGET_IDENTITY",
             Self::WorkspaceIncomplete => "E_WORKSPACE_INCOMPLETE",
             Self::LockTimeout => "E_LOCK_TIMEOUT",
         }

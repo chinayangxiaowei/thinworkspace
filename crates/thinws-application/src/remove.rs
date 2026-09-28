@@ -9,7 +9,8 @@ use thinws_core::{
 };
 use thinws_ports::{
     BootstrapStore, GitInspection, GitInspector, LifecycleLock, LifecycleLockGuard,
-    MetadataStoreFactory, ProcessProbe, RemovalLogEvent, RemovalLogRecord, WorkspaceRemoval,
+    MetadataStoreFactory, PortError, PortErrorKind, ProcessProbe, RemovalLogEvent,
+    RemovalLogRecord, WorkspaceRemoval,
 };
 
 use crate::{Stage, ThinWorkspaceService, UseCaseError, map_port, semantic_error};
@@ -300,13 +301,13 @@ where
         let operation_id = OperationId::new();
         let preflight =
             (|| -> Result<(Option<GitInspection>, Option<ProcessUse>), UseCaseError> {
-                let container = self
+                let _container = self
                     .bootstrap
                     .inspect_removal_container(&lock, &layout, id)
-                    .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
+                    .map_err(|error| map_target_port(id, error))?
+                    .ok_or_else(|| missing_target(id))?;
                 let inspection = if state == WorkspaceState::Ready
                     && request.mode == RemovalMode::Normal
-                    && container.is_some()
                 {
                     let path = self
                         .bootstrap
@@ -330,17 +331,13 @@ where
                 let container = self
                     .bootstrap
                     .inspect_removal_container(&lock, &layout, id)
+                    .map_err(|error| map_target_port(id, error))?
+                    .ok_or_else(|| missing_target(id))?;
+                let process_use = process
+                    .inspect_workspace(&container)
+                    .map(|observation| observation.use_state)
                     .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))?;
-                let process_use = container
-                    .as_ref()
-                    .map(|path| {
-                        process
-                            .inspect_workspace(path)
-                            .map(|observation| observation.use_state)
-                            .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))
-                    })
-                    .transpose()?;
-                Ok((inspection, process_use))
+                Ok((inspection, Some(process_use)))
             })();
         let (inspection, process_use) = match preflight {
             Ok(facts) => facts,
@@ -457,7 +454,7 @@ where
         let removal = self
             .bootstrap
             .remove_workspace(&lock, &layout, id)
-            .map_err(|error| map_port(Stage::Layout, error).with_workspace_id(id))
+            .map_err(|error| map_target_port(id, error))
             .and_then(|outcome| {
                 match self
                     .bootstrap
@@ -515,6 +512,38 @@ where
             log_path,
             warning,
         })
+    }
+}
+
+fn missing_target(id: WorkspaceId) -> UseCaseError {
+    semantic_error(
+        ErrorCode::TargetMissing,
+        "registered Workspace target is missing; association is retained",
+    )
+    .with_workspace_id(id)
+}
+
+fn missing_target_with_source(id: WorkspaceId, source: PortError) -> UseCaseError {
+    let mut failure = missing_target(id);
+    failure.source = Some(Box::new(source));
+    failure
+}
+
+fn map_target_port(id: WorkspaceId, error: PortError) -> UseCaseError {
+    match error.kind() {
+        PortErrorKind::NotFound | PortErrorKind::Unavailable => {
+            missing_target_with_source(id, error)
+        }
+        PortErrorKind::InvalidLayout | PortErrorKind::InvalidData | PortErrorKind::Conflict => {
+            let mut failure = semantic_error(
+                ErrorCode::TargetIdentity,
+                "registered Workspace target identity does not match; association is retained",
+            )
+            .with_workspace_id(id);
+            failure.source = Some(Box::new(error));
+            failure
+        }
+        _ => map_port(Stage::Layout, error).with_workspace_id(id),
     }
 }
 

@@ -110,6 +110,8 @@ fn error_codes_preserve_the_frozen_symbolic_names() {
         (ErrorCode::DataRootLayout, "E_DATA_ROOT_LAYOUT"),
         (ErrorCode::Metadata, "E_METADATA"),
         (ErrorCode::DataRootNotEmpty, "E_DATA_ROOT_NOT_EMPTY"),
+        (ErrorCode::TargetMissing, "E_TARGET_MISSING"),
+        (ErrorCode::TargetIdentity, "E_TARGET_IDENTITY"),
         (ErrorCode::WorkspaceIncomplete, "E_WORKSPACE_INCOMPLETE"),
         (ErrorCode::LockTimeout, "E_LOCK_TIMEOUT"),
     ];

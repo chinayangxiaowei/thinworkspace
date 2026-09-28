@@ -355,8 +355,11 @@ fn p1_12_removes_only_a_proven_container_and_preserves_external_symlink_target()
             .exists()
     );
     assert_eq!(
-        adapter.remove_workspace(&lock, &layout, id).unwrap(),
-        WorkspaceRemoval::AlreadyAbsent
+        adapter
+            .remove_workspace(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::NotFound
     );
 }
 
@@ -457,14 +460,17 @@ fn p1_12_rejects_missing_proof_or_unrecognized_container_entry() {
 }
 
 #[test]
-fn p1_12_finishes_proven_container_after_root_was_already_removed() {
+fn missing_registered_root_does_not_release_its_owned_container() {
     let (temp, adapter, layout, lock, id, container) = removal_fixture();
     fs::remove_dir(container.join("root")).unwrap();
     assert_eq!(
-        adapter.remove_workspace(&lock, &layout, id).unwrap(),
-        WorkspaceRemoval::Removed { root_entries: 0 }
+        adapter
+            .remove_workspace(&lock, &layout, id)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::NotFound
     );
-    assert!(!container.exists());
+    assert!(container.exists());
     assert!(
         temp.path()
             .join("data/metadata")

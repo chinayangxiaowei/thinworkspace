@@ -1238,6 +1238,8 @@ fn render_error(
                         | "E_GIT_CHECK_INCOMPLETE"
                         | "E_WORKSPACE_BUSY"
                         | "E_WORKSPACE_INCOMPLETE"
+                        | "E_TARGET_MISSING"
+                        | "E_TARGET_IDENTITY"
                 ) {
                     writeln!(stderr, "No files were removed.")
                 } else {
@@ -1280,6 +1282,8 @@ fn exit_status(code: &str) -> i32 {
         ("E_DATA_ROOT_LAYOUT", 33),
         ("E_METADATA", 35),
         ("E_DATA_ROOT_NOT_EMPTY", 36),
+        ("E_TARGET_MISSING", 37),
+        ("E_TARGET_IDENTITY", 38),
         ("E_WORKSPACE_INCOMPLETE", 40),
         ("E_LOCK_TIMEOUT", 41),
     ])

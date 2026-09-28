@@ -53,7 +53,7 @@ pub enum PublishResult {
 /// Result of an explicitly authorized, ownership-checked Workspace cleanup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceRemoval {
-    /// The ID-derived container was already absent; no path was deleted.
+    /// A previously tombstoned Workspace was selected again; no path was deleted.
     AlreadyAbsent,
     /// The controlled container was removed after deleting this many entries inside root.
     Removed {
@@ -254,8 +254,8 @@ pub trait BootstrapStore {
 
     /// Removes one proven-owned Workspace container after Application has persisted
     /// its cleanup intent and authorized the destructive operation. Missing
-    /// containers are reported without deleting any path; existing containers
-    /// require the creation-time ownership proof even for explicit force.
+    /// containers fail without deleting any path or authorizing a tombstone;
+    /// existing containers require creation-time ownership proof even for force.
     fn remove_workspace(
         &self,
         lock: &Self::LockGuard,

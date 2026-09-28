@@ -656,7 +656,12 @@ impl BootstrapStore for MacOsHostAdapter {
         let source = open_optional_private_child(workspaces, OsStr::new(&name))?;
         let isolated = open_optional_private_child(trash, OsStr::new(&isolated_name))?;
         let container = match (source, isolated) {
-            (None, None) => return Ok(WorkspaceRemoval::AlreadyAbsent),
+            (None, None) => {
+                return Err(PortError::new(
+                    PortErrorKind::NotFound,
+                    "registered Workspace target is missing",
+                ));
+            }
             (Some(_), Some(_)) => {
                 return Err(PortError::new(
                     PortErrorKind::InvalidLayout,
@@ -1083,12 +1088,16 @@ fn validate_removal_layout(
 ) -> Result<(Option<ValidatedDirectory>, Option<ValidatedDirectory>), PortError> {
     let ownership = require_removal_ownership(layout, workspace_id, container)?;
     let state = open_optional_private_child(container, OsStr::new(".state"))?;
-    let root = open_optional_owned_child(container, OsStr::new("root"))?;
-    if let Some(root) = &root
-        && (!ownership
-            .root
-            .permits_current(historical_directory_identity(root)?)
-            || volume_id_for_directory(root)? != layout.volume_id)
+    let root = open_optional_owned_child(container, OsStr::new("root"))?.ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::NotFound,
+            "registered Workspace root is missing",
+        )
+    })?;
+    if !ownership
+        .root
+        .permits_current(historical_directory_identity(&root)?)
+        || volume_id_for_directory(&root)? != layout.volume_id
     {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
@@ -1108,7 +1117,7 @@ fn validate_removal_layout(
         require_only_entries(state, &["incomplete"])?;
         let _ = read_private_file(&state.fd, OsStr::new("incomplete"))?;
     }
-    Ok((state, root))
+    Ok((state, Some(root)))
 }
 
 fn open_optional_private_child(

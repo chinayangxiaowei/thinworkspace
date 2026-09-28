@@ -290,6 +290,50 @@ fn p1_12_repeated_exact_id_returns_tombstone_without_reselecting_a_name() {
 }
 
 #[test]
+fn missing_registered_target_keeps_the_active_record_even_with_force() {
+    let (temp, service, id) = ready_fixture();
+    fs::remove_dir_all(target(&temp, id)).unwrap();
+
+    for force in [false, true] {
+        let error = service
+            .remove(
+                RemoveRequest::try_from_raw("remove-case", force, 1_700_000_000_002).unwrap(),
+                &NoRepositories,
+                &NoExternalUse,
+            )
+            .unwrap_err();
+        assert_eq!(error.diagnostic().code().as_str(), "E_TARGET_MISSING");
+        let active = service.list_workspaces().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].record().reservation().workspace_id(), id);
+        assert_eq!(active[0].record().state(), WorkspaceState::Ready);
+    }
+    let events = log_events(&temp);
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event["event"] == "failed"));
+}
+
+#[test]
+fn missing_registered_root_inside_old_container_keeps_the_active_record() {
+    let (temp, service, id) = ready_fixture();
+    let container = target(&temp, id);
+    fs::remove_dir_all(container.join("root")).unwrap();
+
+    let error = service
+        .remove(
+            RemoveRequest::try_from_raw("remove-case", true, 1_700_000_000_002).unwrap(),
+            &NoRepositories,
+            &NoExternalUse,
+        )
+        .unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::TargetMissing);
+    assert!(container.exists());
+    let active = service.list_workspaces().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].record().reservation().workspace_id(), id);
+}
+
+#[test]
 fn p1_12_complete_discovery_with_unknown_repository_is_not_logged_as_a_complete_check() {
     let (temp, service, id) = ready_fixture();
     let unknown = FixedGit(GitInspection::new(
@@ -467,7 +511,7 @@ fn p1_12_root_replacement_before_delete_fails_and_logs_without_touching_external
             },
         )
         .unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code().as_str(), "E_TARGET_IDENTITY");
     assert_eq!(
         fs::read(external.join("precious.txt")).unwrap(),
         b"untouched"
@@ -487,9 +531,10 @@ fn p1_12_root_replacement_before_delete_fails_and_logs_without_touching_external
             &NoRepositories,
             &NoExternalUse,
         )
-        .unwrap();
-    assert_eq!(retried.result(), RemoveResult::Removed);
-    assert!(!container.exists());
+        .unwrap_err();
+    assert_eq!(retried.diagnostic().code(), ErrorCode::TargetMissing);
+    assert!(container.exists());
+    assert_eq!(service.list_workspaces().unwrap().len(), 1);
     assert_eq!(
         fs::read(external.join("precious.txt")).unwrap(),
         b"untouched"
@@ -545,7 +590,7 @@ fn p1_12_unproven_root_refuses_force_and_persists_a_failed_preflight_event() {
             &NoExternalUse,
         )
         .unwrap_err();
-    assert_eq!(error.diagnostic().code(), ErrorCode::DataRootLayout);
+    assert_eq!(error.diagnostic().code().as_str(), "E_TARGET_IDENTITY");
     assert_eq!(
         fs::read(external.join("precious.txt")).unwrap(),
         b"untouched"
@@ -554,7 +599,7 @@ fn p1_12_unproven_root_refuses_force_and_persists_a_failed_preflight_event() {
     let events = log_events(&temp);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event"], "failed");
-    assert_eq!(events[0]["error_code"], "E_DATA_ROOT_LAYOUT");
+    assert_eq!(events[0]["error_code"], "E_TARGET_IDENTITY");
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::fs::File;
+use std::os::unix::ffi::OsStrExt;
 
 use rustix::fs::{AtFlags, RenameFlags};
 
@@ -151,11 +152,13 @@ fn require_prepared_historical_ownership(
     container: &ValidatedDirectory,
     root: &ValidatedDirectory,
 ) -> Result<(), PortError> {
-    if !ownership
-        .container
-        .permits_current(historical_directory_identity(container)?)
+    if ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
+        || ownership.isolated_path.is_some()
         || !ownership
-            .root
+            .parent
+            .permits_current(historical_directory_identity(container)?)
+        || !ownership
+            .target
             .permits_current(historical_directory_identity(root)?)
     {
         Err(PortError::new(
@@ -429,15 +432,21 @@ impl BootstrapStore for MacOsHostAdapter {
             create_private_file(&state, OsStr::new("incomplete"))?;
         let root = create_private_child_directory(&container, OsStr::new("root"))?;
         require_empty_directory(&root)?;
+        let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
+            PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
+                .with_source(error)
+        })?;
         let ownership = WorkspaceOwnership {
             instance_id: layout.instance_id,
             workspace_id,
             volume_id: layout.volume_id,
-            container: historical_directory_identity(&container)?,
-            root: historical_directory_identity(&root)?,
+            target_path: target_root.clone(),
+            parent: historical_directory_identity(&container)?,
+            target: historical_directory_identity(&root)?,
+            isolated_path: None,
         };
         let ownership_metadata = duplicate_validated_directory(&layout.controlled_directories[0])?;
-        let ownership_bytes = encode_workspace_ownership(ownership).map_err(document_error)?;
+        let ownership_bytes = encode_workspace_ownership(&ownership).map_err(document_error)?;
         let name = ownership_name(workspace_id);
         let (ownership_file, ownership_identity) = match PrivateTemp::create(
             &ownership_metadata.fd,
@@ -455,10 +464,6 @@ impl BootstrapStore for MacOsHostAdapter {
             }
             Err(NoReplaceError::Other(error)) => return Err(error),
         };
-        let target_root = crate::filesystem::absolute_from_path(&root.path).map_err(|error| {
-            PortError::new(PortErrorKind::InvalidData, "derive Workspace target path")
-                .with_source(error)
-        })?;
         let prepared = MacOsPreparedWorkspace {
             container,
             state,
@@ -1026,11 +1031,13 @@ fn require_ready_ownership(
 ) -> Result<(), PortError> {
     if ownership.instance_id != instance_id
         || ownership.volume_id != volume_id
+        || ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
+        || ownership.isolated_path.is_some()
         || !ownership
-            .container
+            .parent
             .permits_current(historical_directory_identity(container)?)
         || !ownership
-            .root
+            .target
             .permits_current(historical_directory_identity(root)?)
     {
         Err(PortError::new(
@@ -1051,11 +1058,13 @@ fn require_space_scan_ownership(
 ) -> Result<(), PortError> {
     if ownership.instance_id != instance_id
         || ownership.volume_id != volume_id
+        || ownership.target_path.as_bytes() != root.path.as_os_str().as_bytes()
+        || ownership.isolated_path.is_some()
         || !ownership
-            .container
+            .parent
             .permits_current(historical_directory_identity(container)?)
         || !ownership
-            .root
+            .target
             .permits_current(historical_directory_identity(root)?)
         || volume_id_for_directory(root)? != volume_id
     {
@@ -1077,7 +1086,7 @@ fn validate_removal_ownership(
     if ownership.instance_id != instance_id
         || ownership.volume_id != volume_id
         || !ownership
-            .container
+            .parent
             .permits_current(historical_directory_identity(container)?)
         || volume_id_for_directory(container)? != volume_id
     {
@@ -1104,7 +1113,7 @@ fn validate_removal_layout(
         )
     })?;
     if !ownership
-        .root
+        .target
         .permits_current(historical_directory_identity(&root)?)
         || volume_id_for_directory(&root)? != layout.volume_id
     {
@@ -1296,8 +1305,10 @@ mod tests {
             instance_id: InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
             workspace_id: WorkspaceId::from_str("ws_01890a5d-ac96-774b-bd5b-55c7b8d09f40").unwrap(),
             volume_id: volume_id_for_directory(&container).unwrap(),
-            container: historical_directory_identity(&container).unwrap(),
-            root: historical_directory_identity(&root).unwrap(),
+            target_path: crate::filesystem::absolute_from_path(&root_path).unwrap(),
+            parent: historical_directory_identity(&container).unwrap(),
+            target: historical_directory_identity(&root).unwrap(),
+            isolated_path: None,
         };
         (temp, container, root, ownership)
     }
@@ -1308,18 +1319,28 @@ mod tests {
         require_prepared_historical_ownership(&ownership, &container, &root).unwrap();
         for changed in [
             WorkspaceOwnership {
-                container: HistoricalDirectoryIdentity {
-                    inode: ownership.container.inode + 1,
-                    ..ownership.container
+                parent: HistoricalDirectoryIdentity {
+                    inode: ownership.parent.inode + 1,
+                    ..ownership.parent
                 },
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                root: HistoricalDirectoryIdentity {
-                    inode: ownership.root.inode + 1,
-                    ..ownership.root
+                target: HistoricalDirectoryIdentity {
+                    inode: ownership.target.inode + 1,
+                    ..ownership.target
                 },
-                ..ownership
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                isolated_path: Some(
+                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
+                ),
+                ..ownership.clone()
             },
         ] {
             let error =
@@ -1348,25 +1369,35 @@ mod tests {
         for changed in [
             WorkspaceOwnership {
                 instance_id: other_instance,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
                 volume_id: other_volume,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                container: HistoricalDirectoryIdentity {
-                    inode: ownership.container.inode + 1,
-                    ..ownership.container
+                parent: HistoricalDirectoryIdentity {
+                    inode: ownership.parent.inode + 1,
+                    ..ownership.parent
                 },
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                root: HistoricalDirectoryIdentity {
-                    inode: ownership.root.inode + 1,
-                    ..ownership.root
+                target: HistoricalDirectoryIdentity {
+                    inode: ownership.target.inode + 1,
+                    ..ownership.target
                 },
-                ..ownership
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                isolated_path: Some(
+                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
+                ),
+                ..ownership.clone()
             },
         ] {
             let error = require_ready_ownership(
@@ -1401,25 +1432,35 @@ mod tests {
         for changed in [
             WorkspaceOwnership {
                 instance_id: other_instance,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
                 volume_id: other_volume,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                container: HistoricalDirectoryIdentity {
-                    inode: ownership.container.inode + 1,
-                    ..ownership.container
+                parent: HistoricalDirectoryIdentity {
+                    inode: ownership.parent.inode + 1,
+                    ..ownership.parent
                 },
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                root: HistoricalDirectoryIdentity {
-                    inode: ownership.root.inode + 1,
-                    ..ownership.root
+                target: HistoricalDirectoryIdentity {
+                    inode: ownership.target.inode + 1,
+                    ..ownership.target
                 },
-                ..ownership
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                target_path: AbsolutePath::try_from_bytes(b"/tmp/another-target".to_vec()).unwrap(),
+                ..ownership.clone()
+            },
+            WorkspaceOwnership {
+                isolated_path: Some(
+                    AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-other".to_vec()).unwrap(),
+                ),
+                ..ownership.clone()
             },
         ] {
             let error = require_space_scan_ownership(
@@ -1436,7 +1477,7 @@ mod tests {
                 "Ready Workspace space-scan ownership changed"
             );
         }
-        let mut matching_foreign_claim = ownership;
+        let mut matching_foreign_claim = ownership.clone();
         matching_foreign_claim.volume_id = other_volume;
         let error = require_space_scan_ownership(
             &matching_foreign_claim,
@@ -1467,18 +1508,18 @@ mod tests {
         for changed in [
             WorkspaceOwnership {
                 instance_id: other_instance,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
                 volume_id: other_volume,
-                ..ownership
+                ..ownership.clone()
             },
             WorkspaceOwnership {
-                container: HistoricalDirectoryIdentity {
-                    inode: ownership.container.inode + 1,
-                    ..ownership.container
+                parent: HistoricalDirectoryIdentity {
+                    inode: ownership.parent.inode + 1,
+                    ..ownership.parent
                 },
-                ..ownership
+                ..ownership.clone()
             },
         ] {
             let error = validate_removal_ownership(

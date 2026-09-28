@@ -65,21 +65,26 @@ struct OwnershipDocument {
     instance_id: String,
     workspace_id: String,
     volume_id: String,
-    container_inode: u64,
-    container_birth_seconds: i64,
-    container_birth_nanoseconds: u32,
-    root_inode: u64,
-    root_birth_seconds: i64,
-    root_birth_nanoseconds: u32,
+    target_path_hex: String,
+    target_parent_inode: u64,
+    target_parent_birth_seconds: i64,
+    target_parent_birth_nanoseconds: u32,
+    target_inode: u64,
+    target_birth_seconds: i64,
+    target_birth_nanoseconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    isolated_path_hex: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceOwnership {
     pub(crate) instance_id: InstanceId,
     pub(crate) workspace_id: WorkspaceId,
     pub(crate) volume_id: VolumeId,
-    pub(crate) container: HistoricalDirectoryIdentity,
-    pub(crate) root: HistoricalDirectoryIdentity,
+    pub(crate) target_path: AbsolutePath,
+    pub(crate) parent: HistoricalDirectoryIdentity,
+    pub(crate) target: HistoricalDirectoryIdentity,
+    pub(crate) isolated_path: Option<AbsolutePath>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -144,19 +149,24 @@ pub(crate) fn encode_marker(marker: &RootMarker) -> Result<Vec<u8>, DocumentErro
 }
 
 pub(crate) fn encode_workspace_ownership(
-    ownership: WorkspaceOwnership,
+    ownership: &WorkspaceOwnership,
 ) -> Result<Vec<u8>, DocumentError> {
     encode_toml(&OwnershipDocument {
         schema_version: DOCUMENT_SCHEMA_VERSION,
         instance_id: ownership.instance_id.to_string(),
         workspace_id: ownership.workspace_id.to_string(),
         volume_id: ownership.volume_id.to_string(),
-        container_inode: ownership.container.inode,
-        container_birth_seconds: ownership.container.birth_seconds,
-        container_birth_nanoseconds: ownership.container.birth_nanoseconds,
-        root_inode: ownership.root.inode,
-        root_birth_seconds: ownership.root.birth_seconds,
-        root_birth_nanoseconds: ownership.root.birth_nanoseconds,
+        target_path_hex: encode_hex(ownership.target_path.as_bytes()),
+        target_parent_inode: ownership.parent.inode,
+        target_parent_birth_seconds: ownership.parent.birth_seconds,
+        target_parent_birth_nanoseconds: ownership.parent.birth_nanoseconds,
+        target_inode: ownership.target.inode,
+        target_birth_seconds: ownership.target.birth_seconds,
+        target_birth_nanoseconds: ownership.target.birth_nanoseconds,
+        isolated_path_hex: ownership
+            .isolated_path
+            .as_ref()
+            .map(|path| encode_hex(path.as_bytes())),
     })
 }
 
@@ -167,15 +177,30 @@ pub(crate) fn decode_workspace_ownership(
     if document.schema_version != DOCUMENT_SCHEMA_VERSION {
         return Err(DocumentError::UnsupportedVersion);
     }
-    if document.container_birth_nanoseconds >= 1_000_000_000
-        || document.root_birth_nanoseconds >= 1_000_000_000
-        || document.container_inode == 0
-        || document.root_inode == 0
-        || document.container_birth_seconds < 0
-        || document.root_birth_seconds < 0
+    if document.target_parent_birth_nanoseconds >= 1_000_000_000
+        || document.target_birth_nanoseconds >= 1_000_000_000
+        || document.target_parent_inode == 0
+        || document.target_inode == 0
+        || document.target_parent_birth_seconds < 0
+        || document.target_birth_seconds < 0
     {
         return Err(DocumentError::InvalidIdentity);
     }
+    let target_path = AbsolutePath::try_from_bytes(decode_hex(&document.target_path_hex)?)
+        .map_err(|_| DocumentError::InvalidIdentity)?;
+    let target_parent = parent_path_bytes(&target_path).ok_or(DocumentError::InvalidIdentity)?;
+    let isolated_path = document
+        .isolated_path_hex
+        .as_deref()
+        .map(|hex| {
+            let path = AbsolutePath::try_from_bytes(decode_hex(hex)?)
+                .map_err(|_| DocumentError::InvalidIdentity)?;
+            if path == target_path || parent_path_bytes(&path) != Some(target_parent) {
+                return Err(DocumentError::InvalidIdentity);
+            }
+            Ok(path)
+        })
+        .transpose()?;
     Ok(WorkspaceOwnership {
         instance_id: InstanceId::from_str(&document.instance_id)
             .map_err(|_| DocumentError::InvalidIdentity)?,
@@ -183,16 +208,34 @@ pub(crate) fn decode_workspace_ownership(
             .map_err(|_| DocumentError::InvalidIdentity)?,
         volume_id: VolumeId::from_str(&document.volume_id)
             .map_err(|_| DocumentError::InvalidIdentity)?,
-        container: HistoricalDirectoryIdentity {
-            inode: document.container_inode,
-            birth_seconds: document.container_birth_seconds,
-            birth_nanoseconds: document.container_birth_nanoseconds,
+        target_path,
+        parent: HistoricalDirectoryIdentity {
+            inode: document.target_parent_inode,
+            birth_seconds: document.target_parent_birth_seconds,
+            birth_nanoseconds: document.target_parent_birth_nanoseconds,
         },
-        root: HistoricalDirectoryIdentity {
-            inode: document.root_inode,
-            birth_seconds: document.root_birth_seconds,
-            birth_nanoseconds: document.root_birth_nanoseconds,
+        target: HistoricalDirectoryIdentity {
+            inode: document.target_inode,
+            birth_seconds: document.target_birth_seconds,
+            birth_nanoseconds: document.target_birth_nanoseconds,
         },
+        isolated_path,
+    })
+}
+
+fn parent_path_bytes(path: &AbsolutePath) -> Option<&[u8]> {
+    let bytes = path.as_bytes();
+    if bytes == b"/" {
+        return None;
+    }
+    let last_slash = bytes
+        .iter()
+        .rposition(|byte| *byte == b'/')
+        .expect("validated absolute path has a separator");
+    Some(if last_slash == 0 {
+        b"/"
+    } else {
+        &bytes[..last_slash]
     })
 }
 
@@ -237,7 +280,7 @@ mod ownership_fuzz_seed_tests {
             include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
         let ownership = decode_workspace_ownership(valid).unwrap();
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(ownership).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&ownership).unwrap()),
             Ok(ownership)
         );
 
@@ -256,17 +299,17 @@ mod ownership_fuzz_seed_tests {
             include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
         let ownership = decode_workspace_ownership(valid).unwrap();
 
-        let mut invalid_container = ownership;
-        invalid_container.container.birth_seconds = -1;
+        let mut invalid_parent = ownership.clone();
+        invalid_parent.parent.birth_seconds = -1;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(invalid_container).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&invalid_parent).unwrap()),
             Err(DocumentError::InvalidIdentity)
         );
 
         let mut invalid_root = ownership;
-        invalid_root.root.birth_seconds = -1;
+        invalid_root.target.birth_seconds = -1;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(invalid_root).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&invalid_root).unwrap()),
             Err(DocumentError::InvalidIdentity)
         );
     }
@@ -277,17 +320,17 @@ mod ownership_fuzz_seed_tests {
             include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
         let ownership = decode_workspace_ownership(valid).unwrap();
 
-        let mut invalid_container = ownership;
-        invalid_container.container.inode = 0;
+        let mut invalid_parent = ownership.clone();
+        invalid_parent.parent.inode = 0;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(invalid_container).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&invalid_parent).unwrap()),
             Err(DocumentError::InvalidIdentity)
         );
 
         let mut invalid_root = ownership;
-        invalid_root.root.inode = 0;
+        invalid_root.target.inode = 0;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(invalid_root).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&invalid_root).unwrap()),
             Err(DocumentError::InvalidIdentity)
         );
     }
@@ -298,17 +341,17 @@ mod ownership_fuzz_seed_tests {
             include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
         let ownership = decode_workspace_ownership(valid).unwrap();
 
-        let mut zero_container = ownership;
-        zero_container.container.birth_seconds = 0;
+        let mut zero_parent = ownership.clone();
+        zero_parent.parent.birth_seconds = 0;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(zero_container).unwrap()),
-            Ok(zero_container)
+            decode_workspace_ownership(&encode_workspace_ownership(&zero_parent).unwrap()),
+            Ok(zero_parent)
         );
 
         let mut zero_root = ownership;
-        zero_root.root.birth_seconds = 0;
+        zero_root.target.birth_seconds = 0;
         assert_eq!(
-            decode_workspace_ownership(&encode_workspace_ownership(zero_root).unwrap()),
+            decode_workspace_ownership(&encode_workspace_ownership(&zero_root).unwrap()),
             Ok(zero_root)
         );
     }
@@ -381,5 +424,68 @@ mod tests {
             encode_config(&identity_with_path_length(exact_path_length + 1)).unwrap_err(),
             DocumentError::TooLarge
         );
+    }
+
+    #[test]
+    fn v2_ownership_records_the_exact_target_and_parent_identity() {
+        let valid =
+            include_bytes!("../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership");
+        let ownership = decode_workspace_ownership(valid).unwrap();
+        let encoded = encode_workspace_ownership(&ownership).unwrap();
+        let text = std::str::from_utf8(&encoded).unwrap();
+        assert!(text.contains("target_path_hex = "), "{text}");
+        assert!(text.contains("target_parent_inode = "), "{text}");
+        assert!(!text.contains("container_inode = "), "{text}");
+        assert_eq!(ownership.target_path.as_bytes(), b"/tmp/clone");
+        assert_eq!(ownership.parent.inode, 17);
+        assert_eq!(ownership.target.inode, 23);
+        assert_eq!(ownership.isolated_path, None);
+    }
+
+    #[test]
+    fn v2_ownership_rejects_old_fields_and_unrelated_isolation_paths() {
+        let valid = std::str::from_utf8(include_bytes!(
+            "../../../fuzz/corpus/thinws_bootstrap_document/valid-ownership"
+        ))
+        .unwrap();
+        for invalid in [
+            valid.replace("target_path_hex", "data_root_hex"),
+            valid.replace("target_parent_inode", "container_inode"),
+            valid.replace("target_path_hex = \"2f746d702f636c6f6e65\"\n", ""),
+            valid.replace(
+                "target_path_hex = \"2f746d702f636c6f6e65\"",
+                "target_path_hex = \"2f\"",
+            ),
+        ] {
+            assert!(decode_workspace_ownership(invalid.as_bytes()).is_err());
+        }
+
+        let ownership = decode_workspace_ownership(valid.as_bytes()).unwrap();
+        let mut isolated = ownership.clone();
+        isolated.isolated_path =
+            Some(AbsolutePath::try_from_bytes(b"/tmp/.thinws-remove-workspace".to_vec()).unwrap());
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&isolated).unwrap()),
+            Ok(isolated.clone())
+        );
+        isolated.isolated_path = Some(
+            AbsolutePath::try_from_bytes(b"/outside/.thinws-remove-workspace".to_vec()).unwrap(),
+        );
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&isolated).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+    }
+
+    #[test]
+    fn canonical_target_parent_handles_root_and_nested_paths() {
+        for (path, expected) in [
+            ("/", None),
+            ("/clone", Some(b"/".as_slice())),
+            ("/tmp/clone", Some(b"/tmp".as_slice())),
+        ] {
+            let path = AbsolutePath::try_from_bytes(path.as_bytes().to_vec()).unwrap();
+            assert_eq!(parent_path_bytes(&path), expected);
+        }
     }
 }

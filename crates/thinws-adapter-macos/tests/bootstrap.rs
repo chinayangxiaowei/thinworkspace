@@ -268,6 +268,26 @@ fn p1_09_workspace_container_is_private_incomplete_and_identity_bound() {
             & 0o7777,
         0o600
     );
+    let ownership_text = String::from_utf8(
+        fs::read(
+            data_root
+                .join("metadata")
+                .join(format!("ownership-{id}.toml")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let expected_target_hex = container
+        .join("root")
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(ownership_text.contains(&format!("target_path_hex = \"{expected_target_hex}\"")));
+    assert!(ownership_text.contains("target_parent_inode = "));
+    assert!(ownership_text.contains("target_inode = "));
+    assert!(!ownership_text.contains("container_inode = "));
     assert_eq!(fs::read_dir(container.join("root")).unwrap().count(), 0);
     assert!(adapter.prepare_workspace(&lock, &layout, id).is_err());
     fs::set_permissions(container.join("root"), fs::Permissions::from_mode(0o750)).unwrap();

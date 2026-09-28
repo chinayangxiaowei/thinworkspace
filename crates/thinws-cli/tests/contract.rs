@@ -531,6 +531,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 "state",
                 "source",
                 "source_hex",
+                "target",
+                "target_hex",
                 "path",
                 "path_hex",
                 "last_error_code",
@@ -602,6 +604,8 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                         "state",
                         "source",
                         "source_hex",
+                        "target",
+                        "target_hex",
                         "last_error_code",
                         "materialization",
                     ],
@@ -799,6 +803,14 @@ fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
     assert_eq!(listed["data"]["command"], "workspace list");
     assert_eq!(listed["data"]["workspaces"][0]["name"], "one");
     assert_eq!(
+        listed["data"]["workspaces"][0]["target"],
+        "/Volumes/data/clone"
+    );
+    assert_eq!(
+        listed["data"]["workspaces"][0]["target_hex"],
+        "2f566f6c756d65732f646174612f636c6f6e65"
+    );
+    assert_eq!(
         listed["data"]["workspaces"][0]["materialization"]["actual_mode"],
         "cow-clone"
     );
@@ -826,6 +838,11 @@ fn workspace_query_commands_preserve_path_stdout_and_json_shapes() {
     let status: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(status["data"]["command"], "workspace status");
     assert_eq!(status["data"]["state"], "ready");
+    assert_eq!(status["data"]["target"], "/Volumes/data/clone");
+    assert_eq!(
+        status["data"]["target_hex"],
+        "2f566f6c756d65732f646174612f636c6f6e65"
+    );
     assert_eq!(status["data"]["git"]["scan_complete"], true);
     assert_eq!(status["data"]["git"]["state"], "clean");
     assert_eq!(status["data"]["space"]["state"], "complete");

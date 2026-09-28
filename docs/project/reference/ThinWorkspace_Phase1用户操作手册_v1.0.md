@@ -87,7 +87,7 @@ doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`hos
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh
 ```
 
-source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在，且与 source 位于同一 APFS Volume；`~/.thinws` 可以在其他卷。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。目标路径也不能与其他活跃 Workspace 的目标相同。
+source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在，且与 source 位于同一 APFS Volume；`~/.thinws` 可以在其他卷。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。新 target 不能与任一活跃 Workspace 的 target 相同或相互包含，APFS 大小写/Unicode 别名也按实际目录身份判断；否则删除外层副本会误删内层副本。预览和正式创建都拒绝此冲突。
 
 目标输出示例（时间仅为示意，不是性能承诺）：
 
@@ -210,7 +210,7 @@ thinws workspace remove auth-refresh --force
 
 force 明确授权丢弃副本内容，绕过 tracked dirty 和 Git 检查不完整；不要求填写理由、提供 commit、联网或取得主管在线批准。无额外交互确认，脚本中的显式 flag 就是清理意图。
 
-force 不绕过实例/目标归属、卷身份、路径安全、目标存在性和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。登记 target 存在但归属证据缺失、损坏或目录被替换时必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。删除中若 target 已移动到同一目标父目录下的受控隔离位置，只有仍能证明它与登记 target 是同一目录时才可继续。原位置和已登记隔离位置均不存在时，即使 `--force` 也返回 E_TARGET_MISSING，保留登记、名称与诊断信息，不删除任何路径。正常成功时删除整个已登记 target 及对应隔离残留；`~/.thinws` 内日志保留。
+force 不绕过实例/目标归属、卷身份、路径安全、目标存在性和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。登记 target 存在但归属证据缺失、损坏或目录被替换时必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。删除中若 target 已移动到同一目标父目录下的受控隔离位置，只有仍能证明它与登记 target 是同一目录时才可继续。预检时原位置和已登记隔离位置均不存在，即使 `--force` 也返回 E_TARGET_MISSING，保留登记、名称与诊断信息，本次预检不会启动删除；删除已开始后目标消失的边界见下文。正常成功时删除整个已登记 target 及对应隔离残留；`~/.thinws` 内日志保留。
 
 ```text
 Workspace removed
@@ -226,6 +226,8 @@ Delivery verification: not performed
 ### 6.3 日志与结果边界
 
 检查异常、普通拒绝和显式 force 写入 `~/.thinws/logs/operations.jsonl`。预检流程正常返回检查结果后，Git 或进程占用保护策略拒绝清理（包括 force 仍不能绕过的已确认占用）时记录 `refused`；目标缺失、归属或路径等预检本身失败，以及非 Ready 工作区未使用 force 时记录 `failed`。这些结果都不宣称删除已开始；允许执行时记录 `started` 和结果。删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
+
+`E_TARGET_MISSING` 或 `E_TARGET_IDENTITY` 只保证关联不被解除，不能仅凭错误码推断本次操作完全没有删除文件：错误也可能发生在删除已开始、部分内容已清理之后。检查日志中的 `started`/`failed` 和目标目录实际状态，再决定是否重试；CLI 不对这两个错误码输出“没有文件被删除”的保证。
 
 没有独立审计服务、提交证明数据库或防篡改承诺。日志字段在开发规范中维护，不在本手册重复。
 
@@ -389,7 +391,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 | 39 | E_CONTROL_LAYOUT | 控制目录身份、权限或受控布局不合法 |
 | 40 | E_WORKSPACE_INCOMPLETE | 工作区创建或清理未完成；只允许显式强制清理受控残留 |
 | 41 | E_LOCK_TIMEOUT | 生命周期锁等待超过 5 秒，未开始修改目标 |
-| 42 | E_TARGET_CONFLICT | 目标路径已由其他活跃 Workspace 登记 |
+| 42 | E_TARGET_CONFLICT | 目标路径与其他活跃 Workspace 的 target 相同或相互包含 |
 | 43 | E_TARGET_EXISTS | 未登记但目标末级已存在，禁止覆盖 |
 
 旧 Repository/Base/分支保护相关编号 13、14、17、18、19、24，旧 data root 切换编号 16，以及旧执行包装编号 34 保留不再分配，不重新赋义。工具自身的退出码不受本表管理。

@@ -649,6 +649,14 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     assert_eq!(code, 0, "{listing}");
     assert_eq!(listing["data"]["workspaces"][0]["state"], "error");
     assert_eq!(
+        listing["data"]["workspaces"][0]["target"],
+        created["data"]["path"]
+    );
+    assert_eq!(
+        listing["data"]["workspaces"][0]["target_hex"],
+        created["data"]["path_hex"]
+    );
+    assert_eq!(
         listing["data"]["workspaces"][0]["materialization"]["actual_mode"],
         "cow-clone"
     );
@@ -666,6 +674,9 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     );
     assert_eq!(code, 0, "{status}");
     assert_eq!(status["data"]["state"], "error");
+    assert_eq!(status["data"]["target"], created["data"]["path"]);
+    assert_eq!(status["data"]["target_hex"], created["data"]["path_hex"]);
+    assert_eq!(status["data"]["path"], Value::Null);
     assert_eq!(status["data"]["git"]["state"], "unknown");
     assert_eq!(status["data"]["space"]["state"], "unknown");
     assert_eq!(status["data"]["space"]["logical_bytes"], Value::Null);
@@ -733,6 +744,33 @@ fn non_ready_status_is_diagnostic_and_path_is_rejected() {
     );
     assert_eq!(code, 21, "{}", String::from_utf8_lossy(&stderr));
     assert!(stdout.is_empty());
+}
+
+#[test]
+fn list_keeps_the_registered_target_when_the_directory_is_missing() {
+    let (temp, bootstrap, data_root, source) = fixture();
+    initialize(&bootstrap, &data_root);
+    let created = create(&bootstrap, &source, "missing-target-list");
+    let target = PathBuf::from(created["data"]["path"].as_str().unwrap());
+    let moved = temp.path().join("target-moved-outside-registration");
+    fs::rename(&target, &moved).unwrap();
+
+    let (code, listed) = json(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{listed}");
+    let workspace = &listed["data"]["workspaces"][0];
+    assert_eq!(workspace["target"], created["data"]["path"]);
+    assert_eq!(workspace["target_hex"], created["data"]["path_hex"]);
+    assert!(workspace.get("path").is_none());
+    assert!(!target.exists());
+    assert!(moved.exists());
 }
 
 #[test]

@@ -15,7 +15,7 @@
 ## 决策
 
 1. macOS 用户的固定控制目录为 `~/.thinws/`。实例配置、SQLite、生命周期锁、日志和 Workspace 持久归属证据均位于其中；目录、文件及路径组件必须按既有 no-follow、属主和私有权限边界验证。首版控制目录本身也须位于 APFS 卷，但它与某次 source/target 可以是不同的 APFS 卷。`init` 不接受 data root 参数；控制目录所在卷不决定 Workspace 可创建的卷。
-2. `workspace create` 必须接收用户指定的**最终 target 绝对目录路径**。目标末级在创建前必须不存在，不能覆盖已有空目录；来源、目标及控制目录不得相等或相互包含。创建记录以 WorkspaceId、名称和完整 target 路径关联；名称及 target 均唯一，不从统一 data root 推导目标。
+2. `workspace create` 必须接收用户指定的**最终 target 绝对目录路径**。目标末级在创建前必须不存在，不能覆盖已有空目录；来源、目标及控制目录不得相等或相互包含。任意两个活跃 Workspace 的 target 也不得相等或相互包含，包含 APFS 大小写/Unicode 别名指向同一目录的情形；否则清理父 Workspace 会误删子 Workspace。创建预览与正式创建均须拒绝冲突，正式创建在 lifecycle lock 内重验。创建记录以 WorkspaceId、名称和完整 target 路径关联；名称及 target 均唯一，不从统一 data root 推导目标。
 3. macOS 首版仍要求本次 source 与 target parent 位于同一 APFS Volume，且实际 clone 前重验卷与路径身份。`--allow-copy` 只允许该路径组合中明确的同卷 Full Copy 降级，不是跨卷开关。控制目录可以在另一个卷。APFS Volume UUID 而非磁盘名、路径前缀或 container ID 是同卷判断依据。
 4. 目标卷在成功完成后不保留平台配置、数据库、锁、日志或归属文件；最终 target 是可直接使用的普通克隆目录。为保证同卷 clone、原子发布或隔离删除，操作期间可在 target parent 下使用仅属于本次操作的私有暂存/隔离项。它们须有 WorkspaceId 及持久身份关联；中断残留不自动扫描或回收，不得按名称猜测归属。
 5. 使用单一 `~/.thinws` SQLite 状态与一把本机 lifecycle lock 协调所有卷上的创建、删除和名称/target 唯一性。数据库先记录非 Ready 过渡状态；target 创建后的卷、父目录和 target 自身历史身份须在外部物化前持久化为归属证据。创建与删除都不依赖文件系统和 SQLite 之间不存在的原子事务，也不宣称中断后自动续做。
@@ -41,6 +41,6 @@
 
 - 新 `init` 仅建立和校验固定控制目录；旧配置、旧 data root 字节保持不变。
 - 两个不同 APFS 卷各自的 source/target 同卷组合均能创建，并且控制目录可位于第三个卷；source/target 异卷明确拒绝，`--allow-copy` 不绕过。
-- 任意目标已有、源/目标包含、符号链接、父目录或卷被替换均在写入或删除前安全失败。
+- 任意目标已有、源/目标或两个活跃 target 包含、符号链接、父目录或卷被替换均在写入或删除前安全失败。
 - `remove` 在 target 缺失、外置卷离线、身份不符时保留名称、登记和旧数据，即使有 `--force`；仅在目标归属可证且实际清理完成时收口。
 - 创建/删除各故障点、真实 APFS、CLI/JSON、SQLite 约束、变异与模糊测试按受影响范围重证；旧候选证据不能替代。

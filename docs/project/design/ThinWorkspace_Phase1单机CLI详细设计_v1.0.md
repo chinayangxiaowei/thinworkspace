@@ -66,7 +66,7 @@ doctor 使用相同校验的产品状态只读路径和 SQLite read-only 打开�
 
 ### 3.3 布局与源目录
 
-最终 target 是用户提供的绝对路径，而不是从控制目录或 WorkspaceId 推导。控制目录保存 WorkspaceId、名称、source、target、目标卷和创建时持久归属证据；target 卷成功状态只保留普通克隆目录，不写 `.state`、日志或标记文件。源目录是只读输入，必须与 target parent 同一 APFS Volume；源、target 和控制目录的包含关系须在写入前拒绝。根和路径组件不接受未验证链接，遍历边界以物化设计为准。若需要同卷暂存或隔离，位置由 target parent 和类型 ID 推导，成功后清除；中断残留不自动回收。
+最终 target 是用户提供的绝对路径，而不是从控制目录或 WorkspaceId 推导。控制目录保存 WorkspaceId、名称、source、target、目标卷和创建时持久归属证据；target 卷成功状态只保留普通克隆目录，不写 `.state`、日志或标记文件。源目录是只读输入，必须与 target parent 同一 APFS Volume；源、target 和控制目录的包含关系，以及新 target 与任一活跃 target 的包含关系，须在写入前拒绝。同卷活跃 target 还须以当前 no-follow 目录身份检查 APFS 路径别名，不能只比字符串；不同卷上离线的 Workspace 不阻止当前卷创建。根和路径组件不接受未验证链接，遍历边界以物化设计为准。若需要同卷暂存或隔离，位置由 target parent 和类型 ID 推导，成功后清除；中断残留不自动回收。
 
 `.git` 不是平台保留项，它仅是被复制的目录内容。用户可直接修改 target 内文件，但手工移动整个 target 后，平台不得仅凭同名路径继续认领或删除。
 
@@ -76,7 +76,7 @@ InstanceId、WorkspaceId 是强类型 ID。日志关联用的 OperationId 不表
 
 SQLite 维护版本、活跃 Workspace、最终物化 Receipt 及最小删除 tombstone：
 
-- 活跃名称、用户指定的完整 target 唯一；ID、状态、关系及 target 归属由数据库约束；
+- 活跃名称、用户指定的完整 target 唯一；ID、状态、关系及 target 归属由数据库约束；活跃 target 的包含关系由 Application 在创建时检查，不冒称 SQLite 唯一约束能阻止目录嵌套；
 - 未完成状态不能因目录存在或进程重启而自动转为 Ready；
 - 只有确认登记 target 实际存在且归属可证、完成物理清理后，才能在同一事务删除活跃记录并写 tombstone；target 缺失不能收口；
 - 不在数据库事务中等待文件物化、Git 检查或子进程。

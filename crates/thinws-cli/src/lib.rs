@@ -133,7 +133,7 @@ pub struct WorkspaceView {
     pub state: String,
     /// Lossless canonical source path bytes.
     pub source: Vec<u8>,
-    /// Lossless ID-derived target path bytes, which may not be usable when non-Ready.
+    /// Lossless registered target path bytes, which may not be usable when non-Ready.
     pub path: Vec<u8>,
     /// Stable last error code for an Error record.
     pub last_error_code: Option<String>,
@@ -1137,6 +1137,8 @@ fn workspace_json(view: &WorkspaceView) -> Value {
         "state": view.state,
         "source": String::from_utf8_lossy(&view.source),
         "source_hex": hex(&view.source),
+        "target": String::from_utf8_lossy(&view.path),
+        "target_hex": hex(&view.path),
         "path": ready_path,
         "path_hex": ready_path_hex,
         "last_error_code": view.last_error_code,
@@ -1236,8 +1238,6 @@ fn render_error(
                         | "E_GIT_CHECK_INCOMPLETE"
                         | "E_WORKSPACE_BUSY"
                         | "E_WORKSPACE_INCOMPLETE"
-                        | "E_TARGET_MISSING"
-                        | "E_TARGET_IDENTITY"
                 ) {
                     writeln!(stderr, "No files were removed.")
                 } else {
@@ -1447,6 +1447,31 @@ mod tests {
             envelope["error"]["context"]["process_use"],
             "scan-incomplete"
         );
+    }
+
+    #[test]
+    fn target_failures_do_not_claim_no_files_were_removed() {
+        for (code, expected_status) in [("E_TARGET_MISSING", 37), ("E_TARGET_IDENTITY", 38)] {
+            let error = ErrorView {
+                code: code.to_owned(),
+                message: "Workspace target changed during removal".to_owned(),
+                context: Map::new(),
+                remediation: None,
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                render_error(&error, false, &mut stdout, &mut stderr),
+                expected_status
+            );
+            assert!(stdout.is_empty());
+            let human = String::from_utf8(stderr).unwrap();
+            assert!(human.contains(code));
+            assert!(
+                !human.contains("No files were removed."),
+                "{code} cannot imply that removal never started: {human}"
+            );
+        }
     }
 
     #[test]

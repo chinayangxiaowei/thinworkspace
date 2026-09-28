@@ -136,6 +136,69 @@ fn real_cli_preview_create_and_idempotence_keep_the_source_untouched() {
 }
 
 #[test]
+fn real_cli_rejects_a_target_inside_an_active_workspace() {
+    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-09-cli-tests");
+    fs::create_dir_all(&controlled).unwrap();
+    let temp = Builder::new()
+        .prefix("cli-nested-target-")
+        .tempdir_in(fs::canonicalize(controlled).unwrap())
+        .unwrap();
+    let bootstrap = temp.path().join("bootstrap");
+    let source = temp.path().join("source");
+    let parent_target = temp.path().join("parent-target");
+    let child_target = parent_target.join("child-target");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("sentinel.txt"), b"source remains").unwrap();
+    init(&bootstrap, &bootstrap);
+
+    let (code, parent) = execute(
+        &bootstrap,
+        create_args(&source, &parent_target, "parent", &[]),
+    );
+    assert_eq!(code, 0, "{parent}");
+
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let (code, conflict) = execute(
+            &bootstrap,
+            create_args(&source, &child_target, "child", extra),
+        );
+        assert_eq!(code, 42, "{conflict}");
+        assert_eq!(conflict["error"]["code"], "E_TARGET_CONFLICT");
+        assert!(!child_target.exists());
+    }
+    let aliased_parent = temp.path().join("PARENT-TARGET");
+    if aliased_parent.is_dir() {
+        // Case-insensitive APFS resolves this alternate spelling to the same
+        // registered target. The identity guard must still reject the child.
+        let alias_child = aliased_parent.join("alias-child");
+        for extra in [&["--dry-run"][..], &[][..]] {
+            let (code, conflict) = execute(
+                &bootstrap,
+                create_args(&source, &alias_child, "alias-child", extra),
+            );
+            assert_eq!(code, 42, "{conflict}");
+            assert_eq!(conflict["error"]["code"], "E_TARGET_CONFLICT");
+            assert!(!alias_child.exists());
+        }
+    }
+    let (code, listed) = execute(
+        &bootstrap,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{listed}");
+    assert_eq!(listed["data"]["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read(parent_target.join("sentinel.txt")).unwrap(),
+        b"source remains"
+    );
+}
+
+#[test]
 #[ignore = "requires THINWS_P1_CROSS_VOLUME_ROOT on an APFS volume distinct from system temp"]
 fn real_cli_rejects_cross_volume_even_with_allow_copy() {
     let cross_root = std::env::var_os("THINWS_P1_CROSS_VOLUME_ROOT")

@@ -218,13 +218,24 @@ where
             .validate_layout(&identity)
             .map_err(|error| map_port(Stage::Control, error))?;
         self.require_ready_marker(&identity)?;
-        self.metadata
+        let snapshot = self
+            .metadata
             .inspect(
                 &layout,
                 &InstallationRecord::new(identity.clone(), request.now()),
                 self.sqlite_timeout,
             )
             .map_err(|error| map_port(Stage::Metadata, error))?;
+        if snapshot
+            .workspaces()
+            .iter()
+            .any(|record| paths_overlap(record.reservation().target_path(), request.target()))
+        {
+            return Err(semantic_error(
+                ErrorCode::TargetConflict,
+                "Workspace target overlaps an active Workspace target",
+            ));
+        }
         let source = self
             .bootstrap
             .inspect_path(request.source())
@@ -260,6 +271,12 @@ where
             ));
         }
         let plan = select_plan(&report, request.allow_full_copy())?;
+        require_no_active_target_alias(
+            &self.bootstrap,
+            report.target_root(),
+            plan.target_volume_id(),
+            snapshot.workspaces(),
+        )?;
         layout
             .revalidate()
             .map_err(|error| map_port(Stage::Layout, error))?;
@@ -385,11 +402,11 @@ where
         }
         if active
             .iter()
-            .any(|record| record.reservation().target_path() == request.target())
+            .any(|record| paths_overlap(record.reservation().target_path(), request.target()))
         {
             return Err(semantic_error(
                 ErrorCode::TargetConflict,
-                "Workspace target belongs to another active Workspace",
+                "Workspace target overlaps an active Workspace target",
             ));
         }
 
@@ -423,13 +440,19 @@ where
             .map_err(|error| map_port(Stage::Layout, error))?;
         require_existing_source(preliminary.source())?;
         require_missing_target(preliminary.target_root(), &target_parent)?;
-        if target_enters_control_root(preliminary.target_root(), &data_root_report) {
+        if target_enters_existing_root(preliminary.target_root(), &data_root_report) {
             return Err(semantic_error(
                 ErrorCode::TargetLayout,
                 "target overlaps the control root",
             ));
         }
         let preliminary_plan = select_plan(&preliminary, request.allow_full_copy())?;
+        require_no_active_target_alias(
+            &self.bootstrap,
+            preliminary.target_root(),
+            preliminary_plan.target_volume_id(),
+            &active,
+        )?;
         let target = request.target().clone();
         let reservation = WorkspaceReservation::new(
             workspace_id,
@@ -660,6 +683,35 @@ fn select_plan(
     }
 }
 
+fn require_no_active_target_alias(
+    probe: &impl PlatformProbe,
+    target: &PathCapabilityReport,
+    target_volume_id: VolumeId,
+    active: &[WorkspaceRecord],
+) -> Result<(), UseCaseError> {
+    for record in active {
+        let registered = record.reservation();
+        if registered.target_volume_id() != target_volume_id {
+            // A different APFS volume cannot own this target's existing parent.
+            // In particular, an offline target on another volume must not block
+            // creation on the available volume.
+            continue;
+        }
+        let existing = probe
+            .inspect_path(registered.target_path())
+            .map_err(|error| map_port(Stage::Layout, error))?;
+        if existing.resolution() == PathResolution::ExistingDirectory
+            && target_enters_existing_root(target, &existing)
+        {
+            return Err(semantic_error(
+                ErrorCode::TargetConflict,
+                "Workspace target enters an active Workspace target",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn paths_overlap(left: &AbsolutePath, right: &AbsolutePath) -> bool {
     fn contains(parent: &[u8], child: &[u8]) -> bool {
         parent == b"/"
@@ -734,16 +786,16 @@ fn materialization_overlaps_control(
     target: &PathCapabilityReport,
     control: &PathCapabilityReport,
 ) -> bool {
-    paths_overlap_with_identity(source, control) || target_enters_control_root(target, control)
+    paths_overlap_with_identity(source, control) || target_enters_existing_root(target, control)
 }
 
-fn target_enters_control_root(
+fn target_enters_existing_root(
     target: &PathCapabilityReport,
-    control: &PathCapabilityReport,
+    existing: &PathCapabilityReport,
 ) -> bool {
     // The target can be missing while its parent is an APFS case/Unicode alias
-    // of the control root. Comparing only path spelling misses that boundary.
-    let control_identity = control
+    // of an existing control or Workspace root. Spelling alone misses that edge.
+    let existing_identity = existing
         .ancestry()
         .last()
         .expect("a path report has a nonempty ancestry")
@@ -751,7 +803,7 @@ fn target_enters_control_root(
     target
         .ancestry()
         .iter()
-        .any(|entry| entry.identity() == control_identity)
+        .any(|entry| entry.identity() == existing_identity)
 }
 
 fn matches_reserved_volumes(
@@ -1034,6 +1086,100 @@ mod tests {
             &control_target,
             &control
         ));
+    }
+
+    #[test]
+    fn existing_workspace_identity_detects_an_apfs_spelling_alias() {
+        fn absolute(path: &Path) -> AbsolutePath {
+            AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+        }
+
+        let temp = Builder::new()
+            .prefix("create-active-alias-")
+            .tempdir()
+            .unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let active_path = root.join("active");
+        fs::create_dir(&active_path).unwrap();
+        fs::create_dir(root.join("control")).unwrap();
+        let adapter = MacOsHostAdapter::new(root.join("control")).unwrap();
+        let active = adapter.inspect_path(&absolute(&active_path)).unwrap();
+        let child = adapter
+            .inspect_path(&absolute(&active_path.join("child")))
+            .unwrap();
+        // Model an APFS case/Unicode alias: the caller's spelling differs,
+        // while no-follow ancestry still identifies the same parent object.
+        let alias = PathCapabilityReport::new(
+            absolute(&root.join("alias/child")),
+            child.resolution(),
+            child.nearest_existing_ancestor().clone(),
+            child.missing_components().to_vec(),
+            child.ancestry().to_vec(),
+            child.filesystem().clone(),
+            child.mount(),
+            child.readability(),
+            child.writability(),
+            child.apfs_clone(),
+        )
+        .unwrap();
+        assert!(!paths_overlap(
+            alias.requested_path(),
+            active.requested_path()
+        ));
+        assert!(target_enters_existing_root(&alias, &active));
+
+        let volume = match active.filesystem().volume_id() {
+            Evidence::Known(volume) => *volume,
+            other => panic!("real APFS path needs a known volume: {other:?}"),
+        };
+        let now = UnixMillis::new(1).unwrap();
+        let reservation = WorkspaceReservation::new(
+            WorkspaceId::new(),
+            InstanceId::new(),
+            WorkspaceName::from_str("active").unwrap(),
+            absolute(&root.join("source")),
+            absolute(&active_path),
+            volume,
+            volume,
+            false,
+            now,
+        );
+        let active_record =
+            WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
+        assert_eq!(
+            require_no_active_target_alias(&adapter, &alias, volume, &[active_record])
+                .unwrap_err()
+                .diagnostic()
+                .code(),
+            ErrorCode::TargetConflict
+        );
+    }
+
+    #[test]
+    fn an_offline_target_on_another_volume_does_not_block_creation() {
+        let temp = Builder::new()
+            .prefix("create-other-volume-")
+            .tempdir()
+            .unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let adapter = MacOsHostAdapter::new(root.join("control")).unwrap();
+        let candidate = missing_target_report("/available/clone", "/available", &["clone"]);
+        let available = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let unavailable = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440001").unwrap();
+        let now = UnixMillis::new(1).unwrap();
+        let reservation = WorkspaceReservation::new(
+            WorkspaceId::new(),
+            InstanceId::new(),
+            WorkspaceName::from_str("offline").unwrap(),
+            path("/offline/source"),
+            path("/offline/target"),
+            unavailable,
+            unavailable,
+            false,
+            now,
+        );
+        let active = WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
+        assert!(require_no_active_target_alias(&adapter, &candidate, available, &[active]).is_ok());
     }
 
     #[test]

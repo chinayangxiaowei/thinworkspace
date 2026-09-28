@@ -818,6 +818,14 @@ Release 黑盒多卷与离线删除复验：控制目录在上述专用 APFS 镜
 
 Release CoW 性能基线（同日、本机非并发 I/O）：运行 `PYTHONDONTWRITEBYTECODE=1 python3 tools/p1_perf_baseline.py --binary target/release/thinws --volume-root /Volumes/data --output target/p1-layout-perf-baseline.json`，在 UUID `1A42C888-32E3-489C-9BFA-67FD640A94E8` 的 APFS 卷上用 264 文件、约 65 MiB 逻辑数据做 3×10 次显式 target 创建，30/30 均返回 `cow-clone/confirmed` 且 target 精确匹配；中位 331.245 ms、p95 358.285 ms。输出在忽略的 `target/`，一次性 fixture 已自动清理；容量差只作参考，不将该数据表述为跨设备性能保证。
 
+本地独立审核（GPT-6 Astra / `xhigh`，只读，候选 `deb879bb8d014c73691edbc5e10a11ad0e4f7aea`）提出三项需修正问题：创建允许嵌套在已有活动 target 内，查询 JSON 丢失登记 target，以及 target 在部分删除后变化时错误地声称未删除任何文件。主 Agent 分别增加了先 RED 后 GREEN 的真实 CLI/契约/单元回归，并在创建预览与正式创建中拒绝活动 target 的路径包含关系和同卷 APFS 身份别名；不同卷上离线的已登记 target 不阻塞当前卷创建。初次全仓普通测试发现固定 JSON 字段集合漏更新，修正夹具后 `cargo test --quiet --locked --workspace --all-targets`、严格 Clippy 均退出 0。审核后修订仍未完成变异、Release 复验及再次独立审核，不把旧审核结论当作通过。
+
+审核后差异相对 `deb879bb8d014c73691edbc5e10a11ad0e4f7aea` 以零上下文枚举受影响生产变异 **16 项**（Application 创建/目标身份 12、CLI JSON/错误渲染 4）；本轮只跑这 16 项及六包反向依赖测试，不重跑未受影响的 330 项。执行负责人为主 Agent，平台 macOS/APFS，`-j 2 --jobserver-tasks 4 --timeout 180 --gitignore true`，结果目录 `target/p1-layout-review-fix-mutants/mutants.out/`。参考此前 37 项约 3 分 22 秒及基线构建开销，首次主动查看暂定启动后约 8 分钟；运行期间不修改生产或测试候选，不短间隔轮询。终态和范围对账待补。
+
+该批实际于 **21:02:43–21:05:32 UTC** 完成，约 2 分 49 秒；按预计窗口首次读取时已终态。执行器 exit 0、**14 caught＋2 unviable、0 missed/timeout**，未变异基线通过；`outcomes.json` SHA-256 为 `460b150d5ba0a3db0d9b7ab401afd8c0d06da9c6aaba55a0643516deb691a562`。审核后差异的 16 项逐项闭合，不将此前 330 项自动视作重跑；最终候选仍须 Release 复验与规定模型再次审核。
+
+审核修订 Release 复验：`cargo build --locked --release --workspace` 退出 0，新 `target/release/thinws` SHA-256 为 `2c087cb20a2e712a85edad1a2605793c3c75d139e287ce606daf8b1def0f54d5`。本机以隔离 HOME 模拟 GitHub Actions 环境运行 `tools/ci_release_binary_e2e.py`，init/create/path/remove 的 CoW 黑盒链路退出 0；这不是线上 CI。Release 下 CLI contract、e2e_create、e2e_query 三个测试套件分别 17、7、14 项通过，另有 2 项需专用异卷环境而 ignored；包括新嵌套 target 拒绝和登记 target JSON 字段。脚本的一次性 `/private/tmp/thinws-release-e2e-7bd9tou0` 夹具经无符号链接核对后已按确切路径删除。最终 fmt、严格 Clippy、全 workspace 普通测试、差异检查、`cargo deny --locked check` 和缓存 `cargo audit --no-fetch` 均退出 0；deny 仍有既有未命中 allowance/exception 警告，audit 仅使用本地 advisory 库。Skill 创建器自带验证脚本因本机 Python 环境缺少 PyYAML 未执行成功；已用 Ruby YAML 解析核对 frontmatter，且手动通读窄幅修改，未把该替代检查写成脚本通过。既有真实多卷/APFS、长预算 fuzz 与性能证据未因本次仅涉及创建冲突和 CLI 展示的修订失效；规定模型的修订后只读审核尚待完成。
+
 ---
 
 ## 五、依赖摘要

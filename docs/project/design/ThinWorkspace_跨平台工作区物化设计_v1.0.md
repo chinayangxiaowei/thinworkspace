@@ -50,9 +50,9 @@ trait PlatformProbe {
 - 对特定后端的 `supported | unsupported | unknown` 事实；
 - 无法得出结论的结构化原因。
 
-`inspect_materialization_paths` 接收实际原始 source 目录、target root（不存在时为最近已存在 parent）、staging、trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
+`inspect_materialization_paths` 接收实际原始 source 目录、用户指定的最终 target（不存在时为最近已存在 parent）、同卷临时 staging/trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
 
-组合 Probe 在任一路径探测失败时，结构化 Port 错误必须标明失败的 `source | target root | staging | trash` 角色，不携带原始路径字节。Application 据此区分来源不可访问与受控数据根不可访问；即使前一次单路径探测成功、两次探测间权限变化，也不能将来源失败误报为数据根不可用。
+组合 Probe 在任一路径探测失败时，结构化 Port 错误必须标明失败的 `source | target root | staging | trash` 角色，不携带原始路径字节。Application 据此区分来源不可访问与目标不可访问；即使前一次单路径探测成功、两次探测间权限变化，也不能将来源失败误报为目标不可用。
 
 Probe 不返回 `use_full_copy=true` 之类产品决策。
 
@@ -71,15 +71,15 @@ trait WorkspaceMaterializer {
 
 Materializer 从原始目录物化计划指定的文件项；它不调用 Git、不按 `.gitignore` 或 Git 跟踪状态过滤、不识别开发语言，也不制定构建目录或缓存策略。目标必须不存在或是本操作已验证的空目录；没有预建 `.git` 控制项。来源 `.git` 与其他名称同样处理，不保留 Git 特判。
 
-`MaterializationFailure` 必须同时保留结构化失败分类和本次尝试的 partial receipt；即使写入前失败，partial receipt 也要明确记录没有创建对象及回滚无需执行，不能把部分外部状态藏进普通字符串错误。清理副本 `root/` 及其容器需要创建时的持久归属证明、data-root 锁和 WorkspaceId，故由现有 `BootstrapStore` Adapter 在 Application 授权后执行，不在物化 Port 增加以裸路径为删除权的接口；清理边界以[《Phase 1 单机 CLI 详细设计》](ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)为准。
+`MaterializationFailure` 必须同时保留结构化失败分类和本次尝试的 partial receipt；即使写入前失败，partial receipt 也要明确记录没有创建对象及回滚无需执行，不能把部分外部状态藏进普通字符串错误。清理最终 target 需要创建时存于 `~/.thinws` 的持久归属证明、lifecycle lock 和 WorkspaceId，故由现有 `BootstrapStore` Adapter 在 Application 授权后执行，不在物化 Port 增加以裸路径为删除权的接口；清理边界以[《Phase 1 单机 CLI 详细设计》](ThinWorkspace_Phase1单机CLI详细设计_v1.0.md)为准。
 
 ### 3.3 Phase 1 实现边界
 
 Core 拥有支持性、请求/有效/实际模式、fallback、执行结果、CoW、回滚、路径身份摘要、Plan 和 Receipt 等跨平台值；Ports 只声明上述两个边界及其结构化失败；macOS Adapter 拥有目录 FD、errno 和系统调用细节。生产 Adapter 不依赖 `experiments/p0/` crate，P0 实验只能作为待重新审核的算法和测试输入。
 
-P1-06 只在 `WorkspaceMaterializer` 落地 `kind/materialize`，交付 APFS 路径 Probe、共同数据模型和 `ApfsCloneMaterializer`。Probe 必须能观察不存在目标的最近存在父目录，供后续 dry-run 使用；真正执行 P1-06 时，target root 必须已经由调用者在受控 Workspace 容器中建立为空目录并绑定到 Plan，Materializer 不创建任意目标根或 Workspace 容器。P1-06 只执行 `cow-clone`，不实现 Full Copy 或 fallback；P1-07 依赖 P1-06，在同一 Port 上增加 Full Copy 和获准降级，不能修改 APFS 已冻结的成功、失败或回滚语义。P1-09 才负责 lifecycle lock、Creating/Ready/Error 持久化和公开 `workspace create`，不得提前塞进 Adapter。
+P1-06 只在 `WorkspaceMaterializer` 落地 `kind/materialize`，交付 APFS 路径 Probe、共同数据模型和 `ApfsCloneMaterializer`。Probe 必须能观察不存在目标的最近存在父目录，供 dry-run 使用；真正执行时，用户指定的 target 必须已经由调用者在已验证 parent 下建立为空目录、持久记录历史归属并绑定到 Plan，Materializer 不自行认领任意目标根。首个物化切片只执行 `cow-clone`，不实现 Full Copy 或 fallback；后续在同一 Port 上增加 Full Copy 和获准降级，不修改 APFS 已冻结的成功、失败或回滚语义。Application 负责 lifecycle lock、Creating/Ready/Error 持久化和公开 `workspace create`，不得塞进 Adapter。
 
-Port 按有真实调用者的任务增量开放，不在 P1-06 填占位方法：P1-12 在已有 `BootstrapStore` 增加按 WorkspaceId 与持锁布局证据清理的方法，不增加 Port 数量。P1-13 的当前空间统计复用 `BootstrapStore` 已验证的受控根和历史归属证明，不把裸 `WorkspacePath` 交给物化 Port 重新扫描，也不新建平行 Port；具体空间语义由 Phase 1 单机 CLI 详细设计维护。
+Port 按有真实调用者的任务增量开放；已有 `BootstrapStore` 按 WorkspaceId、登记 target 和持锁归属证据清理，不增加 Port 数量。当前空间统计复用已验证的 target 和历史归属证明，不把裸 `WorkspacePath` 交给物化 Port 重新扫描，也不新建平行 Port；具体空间语义由 Phase 1 单机 CLI 详细设计维护。
 
 执行输入由 source、target、staging、trash 四个规范绝对路径和冻结 Plan 组成。Plan 必须绑定这四类路径的身份/Volume 证据摘要、请求与有效模式、选中 Adapter 和 fallback policy；Adapter 在任何写入前重新 Probe 并逐项核对，不能接受调用者只填一个 Volume ID。成功 Receipt 必须来自执行后的源/目标清单核对，并记录普通文件数、实际成功 clone 数、已创建对象、源/目标卷、CoW、回滚、耗时与可用空间估算；空树或仅目录/链接树的成功 Receipt 仍为 `cow=not-used`。失败 Receipt 保留按创建顺序登记的对象、失败点、执行后源/目标观察和回滚结果；不能只返回“复制失败”。
 
@@ -159,7 +159,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 
 - 路径组件没有被符号链接替换；
 - 目录身份、Volume ID 和挂载属性未变；
-- 源与 data root 不相等且互不包含；目标仍不存在或是本操作已验证的空目录；
+- 源、target 与 `~/.thinws` 控制目录不相等且互不包含；目标仍不存在或是本操作已验证、持久记录归属的空目录；
 - 写入性和剩余空间未出现已知阻断条件。
 
 重验失败必须以结构化的 plan-stale/路径变化事实返回 Application；本次创建按状态机以非 Ready 失败结束，用户重新发起创建时才重新 Probe/Plan，不带着过期 Plan 自动重试。仅 §7.2 中已获准、克隆不支持且回滚确认后的 Full Copy 降级，允许在同一次请求内重新 Probe/Plan。Adapter 在逐项遍历和发布等关键边界仍须使用 no-follow 身份检查，不能把入口重验当成整个执行期间的永久保证。
@@ -186,7 +186,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 Core 再依当前产品阶段和用户显式政策决定是否执行
 ```
 
-Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS data root，全部受控子树及本次外部 source 必须位于初始化时记录的同一 Volume；`--allow-copy` 只允许在该布局内把 CoW 不支持降级为 Full Copy，不是跨卷开关。外部 source 可以与 data root 同卷但不得互相包含。
+Phase 1 产品政策比 Full Copy 的底层能力更严：本次 source、最终 target 与同卷临时 staging/trash 必须位于同一 APFS Volume；固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 只允许该路径组合内把 CoW 不支持降级为 Full Copy，不是跨卷开关。source 与 target 不得互相包含。
 
 ---
 
@@ -200,11 +200,11 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：只接受单一 APFS d
 - 普通文件从已验证的 source parent dirfd 以 `openat(..., O_NOFOLLOW)` 打开源文件，使用 `fstat` 核对类型、身份与源清单证据；持有源文件 FD，调用 `fclonefileat(source_fd, staging_dirfd, staged_name, CLONE_NOFOLLOW_ANY)`，再按下述身份固定与发布规则写入 target，并在调用后重新核对源身份和最终 manifest。源文件 FD 固定本次克隆对象，避免检查与克隆使用不同路径对象；
 - symlink 使用 `readlinkat/symlinkat` 在 staging 复制 link text 后发布，不跟随目标。link text 可以指向树外，但平台不得在物化和删除中解引用它。
 
-对于 `mkdirat`、`symlinkat`、`fclonefileat` 这类成功时不返回新对象 FD 的调用，不得在公开 target 名称上创建后再从该名称首次认领身份。Phase 1 先在实例私有 staging 中以独占名称创建并固定类型/身份，再用同卷、不覆盖目标的 rename 发布；发布前登记已知身份，发布后核对 target 名称与该身份。目标名称在发布后被替换时必须失败，不写入、接管或回滚删除替换对象。创建失败或发布失败须清理可证明归属的 staging 项；清理无法确认时报告失败，不触发 Full Copy 降级。普通 Full Copy 文件可直接以独占新建并持有的 FD 固定身份。
+对于 `mkdirat`、`symlinkat`、`fclonefileat` 这类成功时不返回新对象 FD 的调用，不得在公开 target 名称上创建后再从该名称首次认领身份。Phase 1 先在已验证 target parent 下本次操作的私有 staging 中以独占名称创建并固定类型/身份，再用同卷、不覆盖目标的 rename 发布；发布前登记已知身份，发布后核对 target 名称与该身份。目标名称在发布后被替换时必须失败，不写入、接管或回滚删除替换对象。创建失败或发布失败须清理可证明归属的 staging 项；清理无法确认时报告失败，不触发 Full Copy 降级。普通 Full Copy 文件可直接以独占新建并持有的 FD 固定身份。
 
 失败 Receipt 的 `created` 与 `rollback` 只描述 target root；独占 rename 返回失败时未发布的对象不得冒充 target 已创建项。若 staging 项的清理无法确认，另以 `unconfirmed_staging` 记录相对 staging root 的名称、类型和已知或未知身份，结果为 partial，即使 target 未修改且 target 回滚为 `not-needed` 也如此。该字段表示清理未获确认，不凭名称存在与否推断可自动回收；存在此证据时禁止启动 Full Copy 降级。成功 `fclonefileat` 调用在系统调用返回成功时计数，后续身份核验、发布或清理失败不得把该事实从失败 Receipt 中抹去；计数不等于最终 CoW 成功声明。
 
-上述 staging 身份固定依赖实例的私有 data root 和 staging 目录在操作期间没有外部写者；它不把 `0700` 或不可预测名称宣称为对同 UID 恶意进程的隔离。工作区不是 Sandbox，同 UID 主动篡改实例内部 staging 不在 Phase 1 保证范围；公开 target 名称的并发替换仍须按身份失败。进程中断可能留下未发布 staging 项，不自动续做或以未知身份清理。
+上述 staging 身份固定依赖已验证 target parent 下的私有 staging 目录在操作期间没有外部写者；它不把 `0700` 或不可预测名称宣称为对同 UID 恶意进程的隔离。工作区不是 Sandbox，同 UID 主动篡改本次 staging 不在 Phase 1 保证范围；公开 target 名称的并发替换仍须按身份失败。进程中断可能留下未发布 staging 项，不自动续做或以未知身份清理。
 
 只有至少一个普通文件实际执行克隆、每个应克隆普通文件的真实 `fclonefileat` 调用都成功且最终树校验通过，Receipt 才能记录 `cow=confirmed`。空树或仅含目录/链接的树可以创建成功，但 CoW 记为 `not-used`，不能以空集合证明块共享。
 
@@ -217,7 +217,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | Probe 已证明同卷 clone unsupported，且用户传入 `--allow-copy` | 可直接生成 Full Copy 有效计划；`failed_attempts` 为空，Receipt 保留预检降级原因 |
 | 能力为 supported/unknown，真实 clone 成功 | 记录 CoW confirmed |
 | 真实 clone 以“同卷不支持”失败，且允许 Full Copy | 先依 partial receipt 回滚并确认清理，再重新 Probe/Plan；不得留下 Clone/Copy 混合树 |
-| `EXDEV`/卷身份变化 | 数据根布局错误，不降级 |
+| `EXDEV`/卷身份变化 | source/target/临时目录布局错误，不降级 |
 | `ENOSPC` | 空间失败，不降级 |
 | 回滚无法确认 | 保留非 Ready 状态与 partial receipt，报告失败，不启动第二后端；后续仅允许用户显式清理受控目录 |
 
@@ -251,5 +251,5 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 - 路径和符号链接的模糊测试；
 - 降级、删除和安全判断的变异测试。
 - 非 Git 目录、原样 `.git`、未跟踪/ignored 路径均被物化；不存在 Git 预建控制项或内容过滤；
-- 本节保真范围、源活跃修改拒绝、源与 data root 包含关系、源消失后的副本使用、单侧写入隔离；
+- 本节保真范围、源活跃修改拒绝、源/target/控制目录包含关系、源消失后的副本使用、单侧写入隔离；
 - 获准清理包含副本内部 Git 数据但不触达外部指针/符号链接目标。

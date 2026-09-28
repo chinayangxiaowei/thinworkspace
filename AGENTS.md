@@ -48,7 +48,7 @@
 | 项目品牌、仓库名和技术命名空间 | [仓库入口](README.md) | 决定 `ThinWorkspace`、`thinworkspace` 和 `thinws` 的用途 |
 | 产品范围、阶段、架构方向和能力边界 | [产品与架构演进方案 v2.1](docs/project/architecture/ThinWorkspace_产品与架构演进方案_v2.1.md) | 决定做什么、何时做以及如何演进 |
 | Phase 1 数据布局、只读 Git 检查、状态机和失败边界 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
-| Phase 1 bootstrap/root marker、SQLite schema 和双 scope 锁协议 | [ADR-0004](docs/project/architecture/adr/ADR-0004_Phase1持久化Schema与双Scope锁.md) | 决定持久文件、表/约束/迁移和 lifecycle lock 的精确契约 |
+| Phase 1 控制目录、显式 target、持久归属和删除存在性 | [ADR-0006](docs/project/architecture/adr/ADR-0006_Phase1用户控制目录与显式目标路径.md) | 决定新布局与旧版不兼容的边界；ADR-0004 仅为历史材料 |
 | Phase 1 GC 范围 | [ADR-0005](docs/project/architecture/adr/ADR-0005_Phase1暂不实现GC.md) | 决定首版不发布 GC；保留当前空间统计与显式 Workspace 清理 |
 | 工作区物化、能力检测、跨卷和 Adapter 语义 | [跨平台工作区物化设计](docs/project/design/ThinWorkspace_跨平台工作区物化设计_v1.0.md) | 决定 Probe/Plan/Receipt 和平台实现契约 |
 | Rust、crate、Adapter、依赖和测试工具 | [技术栈](docs/project/reference/技术栈.md) | 决定使用什么技术以及依赖边界 |
@@ -109,7 +109,7 @@
 | 阶段、范围、架构或阶段能力 | 架构方案相关完整章节和阶段能力边界表 |
 | CLI 命令、参数、输出、JSON、错误码 | 用户操作手册对应章节；开发规范的 CLI 与兼容章节 |
 | Workspace 创建、删除、未完成状态或空间统计 | Phase 1 详细设计的状态机、查询、未完成状态与空间统计章节；开发规范相关章节 |
-| init、bootstrap config、data root 身份、SQLite schema 或 lifecycle lock | Phase 1 详细设计的实例/data root、持久化与并发章节；ADR-0004；技术栈的 SQLite 与本机锁章节 |
+| init、`~/.thinws` 控制目录、SQLite schema、归属证据或 lifecycle lock | Phase 1 详细设计的实例、持久化与并发章节；ADR-0006；技术栈的 SQLite 与本机锁章节 |
 | APFS、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的 macOS/APFS 选型章节 |
 | Git、子仓库、branch、worktree 或旧 Base 路线 | Phase 1 详细设计的只读 Git 检查章节、ADR-0002；技术栈和开发规范相关章节；交付追加任务流程 §13.1 |
 | 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/失败边界章节；开发规范 §13；任务流程 §13.1 |
@@ -152,8 +152,8 @@
 
 - 不得静默降级、把预检当成执行成功、把目录存在当成 Ready，或在无法证明安全时覆盖/删除/迁移数据。
 - 文件物化必须遵循《跨平台工作区物化设计》的 Probe/Plan/Revalidate/Execute/Receipt 契约；Adapter 只报告事实，降级政策由 Core/Application 决定。
-- 受控对象必须由类型 ID 和已验证根目录推导；禁止任意 Workspace 路径、路径逃逸、跟随未验证符号链接，或用 shell/glob/未验证环境变量选择删除目标。
-- 文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有非 Ready 过渡状态，完整物化后才记录最终 Receipt。P0/P1 不实现中断操作重放、自动续做或 `doctor --repair`；未完成目录仅由用户重新显式授权清理整个受控工作区。Git 检查只读，不自动修改来源或副本的 Git 元数据。
+- 创建 target 由用户显式传入并严格验证；后续受控对象必须由类型 ID、持久登记的 target 和创建时归属证据定位。禁止以本次命令的裸路径授权删除、路径逃逸、跟随未验证符号链接，或用 shell/glob/未验证环境变量选择删除目标。target 缺失或身份不符时，即使 `--force` 也保留登记。
+- 文件系统和 SQLite 不存在跨系统事务；生命周期写入必须有非 Ready 过渡状态，完整物化后才记录最终 Receipt。P0/P1 不实现中断操作重放、自动续做或 `doctor --repair`；未完成目录仅由用户重新显式授权清理归属可证且仍存在的整个工作区。缺失 target 不自动解除登记。Git 检查只读，不自动修改来源或副本的 Git 元数据。
 - 平台内部 Git 与子进程使用 argv 调用，不通过 shell 拼接；工作区不是 Sandbox，不得宣称用户直接运行的命令受安全隔离。
 - 清理成功或强制清理日志不能作为任务完成证明；主管 Agent 按《任务流程》核验实际 commit，不在产品实现中增加交付证明机制。
 - 不记录密钥、完整环境、完整 argv、源码正文或未脱敏凭据 URL。

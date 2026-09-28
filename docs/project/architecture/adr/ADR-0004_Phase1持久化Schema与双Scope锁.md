@@ -1,6 +1,6 @@
 # ADR-0004：Phase 1 持久化 Schema 与双 Scope 锁
 
-**状态：Accepted｜日期：2026-09-23｜适用范围：Phase 1 / P1-02 起**
+**状态：Superseded by [ADR-0006](ADR-0006_Phase1用户控制目录与显式目标路径.md)｜日期：2026-09-23｜历史适用范围：旧 Phase 1 候选**
 
 ## 一、职责
 

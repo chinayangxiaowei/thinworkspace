@@ -755,7 +755,7 @@ fn creating_without_receipt_stays_diagnostic_and_is_not_a_usable_path() {
         .execute(
             "INSERT INTO workspaces (
                 workspace_id, instance_id, name, source_path, target_path,
-                source_volume_id, data_volume_id, allow_full_copy,
+                source_volume_id, target_volume_id, allow_full_copy,
                 state, last_error_code, created_at_unix_ms, updated_at_unix_ms
              ) VALUES (?1, ?2, 'unfinished', ?3, ?4, ?5, ?5, 0,
                        'creating', NULL, ?6, ?6)",

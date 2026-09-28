@@ -110,7 +110,7 @@ pub struct WorkspaceReservation {
     source_path: AbsolutePath,
     target_path: AbsolutePath,
     source_volume_id: VolumeId,
-    data_volume_id: VolumeId,
+    target_volume_id: VolumeId,
     allow_full_copy: bool,
     created_at: UnixMillis,
 }
@@ -126,7 +126,7 @@ impl WorkspaceReservation {
         source_path: AbsolutePath,
         target_path: AbsolutePath,
         source_volume_id: VolumeId,
-        data_volume_id: VolumeId,
+        target_volume_id: VolumeId,
         allow_full_copy: bool,
         created_at: UnixMillis,
     ) -> Self {
@@ -137,7 +137,7 @@ impl WorkspaceReservation {
             source_path,
             target_path,
             source_volume_id,
-            data_volume_id,
+            target_volume_id,
             allow_full_copy,
             created_at,
         }
@@ -163,7 +163,7 @@ impl WorkspaceReservation {
     pub const fn source_path(&self) -> &AbsolutePath {
         &self.source_path
     }
-    /// Returns the unique controlled target path.
+    /// Returns the user-selected target path.
     #[must_use]
     pub const fn target_path(&self) -> &AbsolutePath {
         &self.target_path
@@ -173,10 +173,10 @@ impl WorkspaceReservation {
     pub const fn source_volume_id(&self) -> VolumeId {
         self.source_volume_id
     }
-    /// Returns the registered data-root volume.
+    /// Returns the target volume observed at reservation time.
     #[must_use]
-    pub const fn data_volume_id(&self) -> VolumeId {
-        self.data_volume_id
+    pub const fn target_volume_id(&self) -> VolumeId {
+        self.target_volume_id
     }
     /// Returns whether explicit full-copy fallback was authorized.
     #[must_use]

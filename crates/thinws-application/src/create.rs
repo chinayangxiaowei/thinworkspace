@@ -702,7 +702,7 @@ fn matches_reserved_volumes(
     target: VolumeId,
     reservation: &WorkspaceReservation,
 ) -> bool {
-    source == reservation.source_volume_id() && target == reservation.data_volume_id()
+    source == reservation.source_volume_id() && target == reservation.target_volume_id()
 }
 
 fn derived_path(root: &AbsolutePath, components: &[&[u8]]) -> Result<AbsolutePath, UseCaseError> {

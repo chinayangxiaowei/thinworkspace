@@ -384,13 +384,101 @@ fn reservation(index: usize, name: &str, target: &str) -> WorkspaceReservation {
     reservation_with_identity(index, name, target, INSTANCE_ID, VOLUME_ID, VOLUME_ID)
 }
 
+#[test]
+fn p1_17_workspace_volume_is_independent_of_control_volume() {
+    let temp = controlled_tempdir();
+    let database = temp.path().join("separate-control-volume.db");
+    let mut store = open(&database);
+    let workspace = reservation_with_identity(
+        0,
+        "other-apfs-volume",
+        "/Volumes/other/workspace",
+        INSTANCE_ID,
+        OTHER_VOLUME_ID,
+        OTHER_VOLUME_ID,
+    );
+
+    let reserved = store.reserve_workspace(&workspace).unwrap();
+    assert_eq!(reserved.reservation(), &workspace);
+    assert_eq!(
+        store.workspace(workspace.workspace_id()).unwrap(),
+        Some(reserved)
+    );
+
+    let volume = VolumeId::from_str(OTHER_VOLUME_ID).unwrap();
+    let report = materialization_report(
+        volume,
+        "/Volumes/data/source-0",
+        "/Volumes/other/workspace",
+        SupportState::Supported,
+        Vec::new(),
+        10,
+    );
+    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let digest = TreeDigest::new([4; 32]);
+    let receipt = MaterializationReceipt::successful_apfs_clone(
+        &plan,
+        1,
+        1,
+        Vec::new(),
+        digest,
+        digest,
+        4,
+        17,
+        Some(17),
+    )
+    .unwrap();
+    store
+        .complete_materialization(
+            workspace.workspace_id(),
+            &plan,
+            &receipt,
+            UnixMillis::new(workspace.created_at().get() + 1).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .final_materialization(workspace.workspace_id())
+            .unwrap()
+            .unwrap()
+            .cow(),
+        CowEvidence::Confirmed
+    );
+
+    let raw = Connection::open(&database).unwrap();
+    let columns = raw
+        .prepare("PRAGMA table_info(workspaces)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.iter().any(|name| name == "target_volume_id"));
+    assert!(!columns.iter().any(|name| name == "data_volume_id"));
+    assert_eq!(SCHEMA_VERSION, 2);
+
+    let snapshot = SqliteMetadataStoreFactory
+        .inspect(
+            &TestLayout::new(&database),
+            &installation(),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+    assert_eq!(snapshot.workspaces().len(), 1);
+    assert!(
+        snapshot
+            .final_materialization(workspace.workspace_id())
+            .is_some()
+    );
+}
+
 fn reservation_with_identity(
     index: usize,
     name: &str,
     target: &str,
     instance_id: &str,
     source_volume_id: &str,
-    data_volume_id: &str,
+    target_volume_id: &str,
 ) -> WorkspaceReservation {
     WorkspaceReservation::new(
         WorkspaceId::from_str(WORKSPACE_IDS[index]).unwrap(),
@@ -399,7 +487,7 @@ fn reservation_with_identity(
         AbsolutePath::try_from_bytes(format!("/Volumes/data/source-{index}").into_bytes()).unwrap(),
         AbsolutePath::try_from_bytes(target.as_bytes().to_vec()).unwrap(),
         VolumeId::from_str(source_volume_id).unwrap(),
-        VolumeId::from_str(data_volume_id).unwrap(),
+        VolumeId::from_str(target_volume_id).unwrap(),
         index.is_multiple_of(2),
         UnixMillis::new(1_700_000_000_100 + index as i64).unwrap(),
     )
@@ -1090,6 +1178,24 @@ fn foreign_future_unowned_and_identity_conflicting_databases_are_not_taken_over(
     assert_eq!(error.kind(), PortErrorKind::InvalidData);
     assert_eq!(error.operation(), "validate metadata schema version");
 
+    let legacy_path = temp.path().join("actual-v1.db");
+    let legacy = Connection::open(&legacy_path).unwrap();
+    legacy
+        .execute_batch("CREATE TABLE installation(data_root BLOB NOT NULL);")
+        .unwrap();
+    legacy
+        .pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    legacy.pragma_update(None, "user_version", 1).unwrap();
+    drop(legacy);
+    let legacy_before = fs::read(&legacy_path).unwrap();
+    let legacy_error =
+        SqliteMetadataStore::open(&legacy_path, &installation(), Duration::from_millis(10))
+            .err()
+            .expect("v1 database must not be migrated or read as v2");
+    assert_eq!(legacy_error.kind(), PortErrorKind::InvalidData);
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_before);
+
     let identity_path = temp.path().join("identity.db");
     drop(open(&identity_path));
     let conflicting = InstallationRecord::new(
@@ -1350,7 +1456,7 @@ fn store_transitions_preserve_unfinished_state_and_tombstone_identity() {
         alpha.source_path().clone(),
         AbsolutePath::try_from_bytes(b"/Volumes/data/thinws/workspaces/reused".to_vec()).unwrap(),
         alpha.source_volume_id(),
-        alpha.data_volume_id(),
+        alpha.target_volume_id(),
         alpha.allow_full_copy(),
         UnixMillis::new(1_700_000_000_400).unwrap(),
     );
@@ -1493,7 +1599,7 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
     let temp = controlled_tempdir();
     let identity_checks = Connection::open(temp.path().join("identity-checks.db")).unwrap();
     identity_checks
-        .execute_batch(include_str!("../src/schema_v1.sql"))
+        .execute_batch(include_str!("../src/schema_v2.sql"))
         .unwrap();
     for table in [
         "installation",
@@ -1679,11 +1785,11 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
             .execute(
                 "INSERT OR REPLACE INTO workspaces (
                     workspace_id, instance_id, name, source_path, target_path,
-                    source_volume_id, data_volume_id, allow_full_copy, state,
+                    source_volume_id, target_volume_id, allow_full_copy, state,
                     last_error_code, created_at_unix_ms, updated_at_unix_ms
                  ) SELECT
                     workspace_id, instance_id, name, source_path, target_path,
-                    source_volume_id, data_volume_id, allow_full_copy, 'creating',
+                    source_volume_id, target_volume_id, allow_full_copy, 'creating',
                     NULL, created_at_unix_ms, updated_at_unix_ms + 1
                  FROM workspaces WHERE workspace_id=?1",
                 [value.workspace_id().to_string()],
@@ -1781,7 +1887,7 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
 
     let insert_sql = "INSERT INTO workspaces (
         workspace_id, instance_id, name, source_path, target_path,
-        source_volume_id, data_volume_id, allow_full_copy, state,
+        source_volume_id, target_volume_id, allow_full_copy, state,
         last_error_code, created_at_unix_ms, updated_at_unix_ms
     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 0, ?7, ?8, 20, 20)";
     let valid_id = WORKSPACE_IDS[3];
@@ -1817,13 +1923,6 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
         (
             valid_id.to_owned(),
             "valid".to_owned(),
-            OTHER_VOLUME_ID.to_owned(),
-            "creating",
-            None,
-        ),
-        (
-            valid_id.to_owned(),
-            "valid".to_owned(),
             VOLUME_ID.to_owned(),
             "error",
             None,
@@ -1851,9 +1950,30 @@ fn schema_rejects_nul_error_mismatch_illegal_edges_and_unprotected_deletes() {
                         code
                     ],
                 )
-                .is_err()
+                .is_err(),
+            "unexpectedly accepted workspace_id={workspace_id:?}, name={name:?}, volume={volume:?}, state={state:?}, code={code:?}"
         );
     }
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO workspaces (
+                    workspace_id, instance_id, name, source_path, target_path,
+                    source_volume_id, target_volume_id, allow_full_copy, state,
+                    last_error_code, created_at_unix_ms, updated_at_unix_ms
+                 ) VALUES (?1, ?2, 'different-volumes', ?3, ?4, ?5, ?6, 0,
+                           'creating', NULL, 20, 20)",
+                params![
+                    valid_id,
+                    INSTANCE_ID,
+                    b"/source",
+                    b"/target-unique",
+                    VOLUME_ID,
+                    OTHER_VOLUME_ID,
+                ],
+            )
+            .is_err()
+    );
     assert!(
         connection
             .execute(

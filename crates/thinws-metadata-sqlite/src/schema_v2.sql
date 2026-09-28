@@ -13,17 +13,17 @@ CREATE TABLE installation (
             AND length(replace(instance_id, '-', '')) = 32
             AND replace(instance_id, '-', '') NOT GLOB '*[^0-9a-f]*'
         ),
-    data_root BLOB NOT NULL UNIQUE CHECK (length(data_root) > 0),
-    volume_id TEXT NOT NULL
+    control_root BLOB NOT NULL UNIQUE CHECK (length(control_root) > 0),
+    control_volume_id TEXT NOT NULL
         CHECK (
-            length(volume_id) = 36
-            AND substr(volume_id, 9, 1) = '-'
-            AND substr(volume_id, 14, 1) = '-'
-            AND substr(volume_id, 19, 1) = '-'
-            AND substr(volume_id, 24, 1) = '-'
-            AND instr(volume_id, char(0)) = 0
-            AND length(replace(volume_id, '-', '')) = 32
-            AND replace(volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+            length(control_volume_id) = 36
+            AND substr(control_volume_id, 9, 1) = '-'
+            AND substr(control_volume_id, 14, 1) = '-'
+            AND substr(control_volume_id, 19, 1) = '-'
+            AND substr(control_volume_id, 24, 1) = '-'
+            AND instr(control_volume_id, char(0)) = 0
+            AND length(replace(control_volume_id, '-', '')) = 32
+            AND replace(control_volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
         ),
     created_at_unix_ms INTEGER NOT NULL CHECK (created_at_unix_ms >= 0)
 ) STRICT, WITHOUT ROWID;
@@ -55,8 +55,28 @@ CREATE TABLE workspaces (
         ),
     source_path BLOB NOT NULL CHECK (length(source_path) > 0),
     target_path BLOB NOT NULL UNIQUE CHECK (length(target_path) > 0),
-    source_volume_id TEXT NOT NULL,
-    data_volume_id TEXT NOT NULL,
+    source_volume_id TEXT NOT NULL
+        CHECK (
+            length(source_volume_id) = 36
+            AND substr(source_volume_id, 9, 1) = '-'
+            AND substr(source_volume_id, 14, 1) = '-'
+            AND substr(source_volume_id, 19, 1) = '-'
+            AND substr(source_volume_id, 24, 1) = '-'
+            AND instr(source_volume_id, char(0)) = 0
+            AND length(replace(source_volume_id, '-', '')) = 32
+            AND replace(source_volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+        ),
+    target_volume_id TEXT NOT NULL
+        CHECK (
+            length(target_volume_id) = 36
+            AND substr(target_volume_id, 9, 1) = '-'
+            AND substr(target_volume_id, 14, 1) = '-'
+            AND substr(target_volume_id, 19, 1) = '-'
+            AND substr(target_volume_id, 24, 1) = '-'
+            AND instr(target_volume_id, char(0)) = 0
+            AND length(replace(target_volume_id, '-', '')) = 32
+            AND replace(target_volume_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+        ),
     allow_full_copy INTEGER NOT NULL CHECK (allow_full_copy IN (0, 1)),
     state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'deleting', 'error')),
     last_error_code TEXT,
@@ -126,9 +146,8 @@ BEGIN
     SELECT CASE WHEN NOT EXISTS (
         SELECT 1 FROM installation
         WHERE instance_id = NEW.instance_id
-          AND volume_id = NEW.source_volume_id
-          AND volume_id = NEW.data_volume_id
-    ) THEN RAISE(ABORT, 'workspace installation or volume mismatch') END;
+    ) OR NEW.source_volume_id <> NEW.target_volume_id
+    THEN RAISE(ABORT, 'workspace installation or volume mismatch') END;
     SELECT CASE WHEN EXISTS (
         SELECT 1 FROM deletion_tombstones WHERE workspace_id = NEW.workspace_id
     ) THEN RAISE(ABORT, 'workspace ID is tombstoned') END;
@@ -142,7 +161,7 @@ WHEN OLD.workspace_id IS NOT NEW.workspace_id
   OR OLD.source_path IS NOT NEW.source_path
   OR OLD.target_path IS NOT NEW.target_path
   OR OLD.source_volume_id IS NOT NEW.source_volume_id
-  OR OLD.data_volume_id IS NOT NEW.data_volume_id
+  OR OLD.target_volume_id IS NOT NEW.target_volume_id
   OR OLD.allow_full_copy IS NOT NEW.allow_full_copy
   OR OLD.created_at_unix_ms IS NOT NEW.created_at_unix_ms
 BEGIN

@@ -29,9 +29,9 @@ use thinws_ports::{
 /// SQLite application ID for ASCII `THWS`.
 pub const APPLICATION_ID: i32 = 1_414_027_091;
 /// Current durable metadata schema version.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
-const SCHEMA_V1: &str = include_str!("schema_v1.sql");
+const SCHEMA_V2: &str = include_str!("schema_v2.sql");
 const DATABASE_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_CREATE)
     .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
@@ -109,7 +109,7 @@ impl<L: DataRootLayoutEvidence> MetadataStoreFactory<L> for SqliteMetadataStoreF
             let summary = read_final_materialization(
                 &transaction,
                 workspace_id,
-                installation.identity().volume_id(),
+                workspace.reservation().target_volume_id(),
             )?;
             match summary {
                 Some(summary) => final_materializations.push((workspace_id, summary)),
@@ -156,7 +156,7 @@ impl<L: DataRootLayoutEvidence> MetadataStoreFactory<L> for SqliteMetadataStoreF
 }
 
 impl SqliteMetadataStore {
-    /// Opens or transactionally initializes a v1 database.
+    /// Opens or transactionally initializes a v2 database.
     ///
     /// `installation.created_at` is used only for a truly empty v0 database;
     /// reopening validates identity and returns the timestamp already stored.
@@ -221,7 +221,7 @@ fn open_or_initialize(
 
     let actual = if initialize {
         configure_connection(connection, busy_timeout)?;
-        migrate_v0(connection, installation, SCHEMA_V1)?;
+        initialize_empty_database(connection, installation, SCHEMA_V2)?;
         read_installation(connection)?
     } else {
         validate_existing_database(connection, installation)?;
@@ -272,7 +272,7 @@ fn validate_schema_catalog(connection: &Connection) -> Result<(), PortError> {
     let expected = Connection::open_in_memory()
         .map_err(|error| storage_error("open expected schema database", error))?;
     expected
-        .execute_batch(SCHEMA_V1)
+        .execute_batch(SCHEMA_V2)
         .map_err(|error| storage_error("build expected schema catalog", error))?;
     if schema_catalog(connection)? != schema_catalog(&expected)? {
         return Err(PortError::new(
@@ -315,15 +315,9 @@ impl MetadataStore for SqliteMetadataStore {
         &mut self,
         reservation: &WorkspaceReservation,
     ) -> Result<WorkspaceRecord, PortError> {
-        if (
-            reservation.instance_id(),
-            reservation.source_volume_id(),
-            reservation.data_volume_id(),
-        ) != (
-            self.installation.identity().instance_id(),
-            self.installation.identity().volume_id(),
-            self.installation.identity().volume_id(),
-        ) {
+        if reservation.instance_id() != self.installation.identity().instance_id()
+            || reservation.source_volume_id() != reservation.target_volume_id()
+        {
             return Err(PortError::conflict(
                 "reserve workspace",
                 PortConflict::InstallationIdentity,
@@ -333,7 +327,7 @@ impl MetadataStore for SqliteMetadataStore {
         let result = self.connection.execute(
             "INSERT INTO workspaces (
                 workspace_id, instance_id, name, source_path, target_path,
-                source_volume_id, data_volume_id, allow_full_copy, state,
+                source_volume_id, target_volume_id, allow_full_copy, state,
                 last_error_code, created_at_unix_ms, updated_at_unix_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'creating', NULL, ?9, ?9)",
             params![
@@ -343,7 +337,7 @@ impl MetadataStore for SqliteMetadataStore {
                 reservation.source_path().as_bytes(),
                 reservation.target_path().as_bytes(),
                 reservation.source_volume_id().to_string(),
-                reservation.data_volume_id().to_string(),
+                reservation.target_volume_id().to_string(),
                 i64::from(reservation.allow_full_copy()),
                 reservation.created_at().get(),
             ],
@@ -396,7 +390,7 @@ impl MetadataStore for SqliteMetadataStore {
             reservation.source_path(),
             reservation.target_path(),
             reservation.source_volume_id(),
-            reservation.data_volume_id(),
+            reservation.target_volume_id(),
         );
         let receipt_plan_evidence = (
             receipt.probe_evidence_digest(),
@@ -529,10 +523,13 @@ impl MetadataStore for SqliteMetadataStore {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Option<FinalMaterializationSummary>, PortError> {
+        let Some(workspace) = read_workspace(&self.connection, workspace_id)? else {
+            return Ok(None);
+        };
         read_final_materialization(
             &self.connection,
             workspace_id,
-            self.installation.identity().volume_id(),
+            workspace.reservation().target_volume_id(),
         )
     }
 
@@ -739,7 +736,7 @@ impl SqliteMetadataStore {
 }
 
 const WORKSPACE_COLUMNS: &str = "workspace_id, instance_id, name, source_path, target_path, \
-    source_volume_id, data_volume_id, allow_full_copy, state, last_error_code, \
+    source_volume_id, target_volume_id, allow_full_copy, state, last_error_code, \
     created_at_unix_ms, updated_at_unix_ms";
 
 struct RawWorkspace {
@@ -749,7 +746,7 @@ struct RawWorkspace {
     source_path: Vec<u8>,
     target_path: Vec<u8>,
     source_volume_id: String,
-    data_volume_id: String,
+    target_volume_id: String,
     allow_full_copy: i64,
     state: String,
     last_error_code: Option<String>,
@@ -766,7 +763,7 @@ impl RawWorkspace {
             source_path: row.get(3)?,
             target_path: row.get(4)?,
             source_volume_id: row.get(5)?,
-            data_volume_id: row.get(6)?,
+            target_volume_id: row.get(6)?,
             allow_full_copy: row.get(7)?,
             state: row.get(8)?,
             last_error_code: row.get(9)?,
@@ -789,8 +786,8 @@ impl RawWorkspace {
                 .map_err(|error| invalid_data("decode target path", error))?,
             VolumeId::from_str(&self.source_volume_id)
                 .map_err(|error| invalid_data("decode source volume", error))?,
-            VolumeId::from_str(&self.data_volume_id)
-                .map_err(|error| invalid_data("decode data volume", error))?,
+            VolumeId::from_str(&self.target_volume_id)
+                .map_err(|error| invalid_data("decode target volume", error))?,
             match self.allow_full_copy {
                 0 => false,
                 1 => true,
@@ -951,7 +948,7 @@ fn read_connection_settings(connection: &Connection) -> Result<ConnectionSetting
     })
 }
 
-fn migrate_v0(
+fn initialize_empty_database(
     connection: &mut Connection,
     installation: &InstallationRecord,
     schema: &str,
@@ -959,13 +956,13 @@ fn migrate_v0(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| storage_error("begin metadata migration", error))?;
-    apply_v1(&transaction, installation, schema)?;
+    apply_v2(&transaction, installation, schema)?;
     transaction
         .commit()
         .map_err(|error| storage_error("commit metadata migration", error))
 }
 
-fn apply_v1(
+fn apply_v2(
     transaction: &Transaction<'_>,
     installation: &InstallationRecord,
     schema: &str,
@@ -976,7 +973,7 @@ fn apply_v1(
     transaction
         .execute(
             "INSERT INTO installation (
-                singleton, instance_id, data_root, volume_id, created_at_unix_ms
+                singleton, instance_id, control_root, control_volume_id, created_at_unix_ms
              ) VALUES (1, ?1, ?2, ?3, ?4)",
             params![
                 installation.identity().instance_id().to_string(),
@@ -998,14 +995,14 @@ fn apply_v1(
 fn read_installation(connection: &Connection) -> Result<InstallationRecord, PortError> {
     let row: Option<(String, Vec<u8>, String, i64)> = connection
         .query_row(
-            "SELECT instance_id, data_root, volume_id, created_at_unix_ms
+            "SELECT instance_id, control_root, control_volume_id, created_at_unix_ms
              FROM installation WHERE singleton = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(|error| storage_error("read installation row", error))?;
-    let Some((instance_id, data_root, volume_id, created_at)) = row else {
+    let Some((instance_id, control_root, control_volume_id, created_at)) = row else {
         return Err(PortError::new(
             PortErrorKind::InvalidData,
             "read installation row",
@@ -1015,10 +1012,10 @@ fn read_installation(connection: &Connection) -> Result<InstallationRecord, Port
         InstallationIdentity::new(
             InstanceId::from_str(&instance_id)
                 .map_err(|error| invalid_data("decode installation ID", error))?,
-            AbsolutePath::try_from_bytes(data_root)
-                .map_err(|error| invalid_data("decode data-root path", error))?,
-            VolumeId::from_str(&volume_id)
-                .map_err(|error| invalid_data("decode installation volume", error))?,
+            AbsolutePath::try_from_bytes(control_root)
+                .map_err(|error| invalid_data("decode control-root path", error))?,
+            VolumeId::from_str(&control_volume_id)
+                .map_err(|error| invalid_data("decode control volume", error))?,
         ),
         UnixMillis::new(created_at)
             .map_err(|error| invalid_data("decode installation timestamp", error))?,
@@ -1098,7 +1095,7 @@ mod tests {
         );
         let broken = "CREATE TABLE partial(value INTEGER) STRICT; THIS IS NOT SQL;";
 
-        assert!(migrate_v0(&mut connection, &installation, broken).is_err());
+        assert!(initialize_empty_database(&mut connection, &installation, broken).is_err());
         assert_eq!(user_table_count(&connection).unwrap(), 0);
         assert_eq!(pragma_i32(&connection, "application_id").unwrap(), 0);
         assert_eq!(pragma_i32(&connection, "user_version").unwrap(), 0);

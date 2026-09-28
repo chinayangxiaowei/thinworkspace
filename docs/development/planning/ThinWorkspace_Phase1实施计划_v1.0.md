@@ -750,11 +750,11 @@ P1-15 技术候选收口（2026-09-27 UTC）：最终实现/测试提交为 `4e6
 
 | 任务 | 交付结果 | 依赖 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-17 固定控制目录与新 schema | `~/.thinws` 实例、配置/SQLite/单锁/日志/归属；不读取旧布局 | ADR-0006 | R4 | In Progress |
-| P1-18 显式 target 创建与 CoW | `--target` 精确路径、同卷探测/重验、目标父目录暂存、唯一性与 Ready 归属 | P1-17 | R4 | In Progress |
-| P1-19 查询与安全删除 | 任意已登记 target 的 Ready 核验、Git/空间查询、目标缺失或身份不符时关联保留，force 不绕过 | P1-18 | R4 | In Progress |
-| P1-20 CLI 与工具联动 | 手册参数、JSON/错误码、help、Skill、性能与 CI 工具同步 | P1-17–P1-19 | R3 | In Progress |
-| P1-21 新布局收口 | 受影响变异/fuzz、真实 APFS 多卷、Release 黑盒、供应链、独立本地审核与人工结构测试入口 | P1-17–P1-20 | R4 | In Progress |
+| P1-17 固定控制目录与新 schema | `~/.thinws` 实例、配置/SQLite/单锁/日志/归属；不读取旧布局 | ADR-0006 | R4 | Done |
+| P1-18 显式 target 创建与 CoW | `--target` 精确路径、同卷探测/重验、目标父目录暂存、唯一性与 Ready 归属 | P1-17 | R4 | Done |
+| P1-19 查询与安全删除 | 任意已登记 target 的 Ready 核验、Git/空间查询、目标缺失或身份不符时关联保留，force 不绕过 | P1-18 | R4 | Done |
+| P1-20 CLI 与工具联动 | 手册参数、JSON/错误码、help、Skill、性能与 CI 工具同步 | P1-17–P1-19 | R3 | Done |
+| P1-21 新布局收口 | 受影响变异/fuzz、真实 APFS 多卷、Release 黑盒、供应链、独立本地审核与人工结构测试入口 | P1-17–P1-20 | R4 | Done |
 
 本轮只在维护者指定的本地 checkout 实施、提交与审核，不创建线上 PR、不推送，也不使用子 Agent 开发。独立只读审核可使用 GPT-6 Astra / `xhigh`。用户已有旧控制目录、旧 data root 与已安装的旧 `thinws` 二进制不在清理或自动替换范围内。新 `init` 的测试须使用隔离 HOME，防止触碰真实 `~/.thinws`。
 
@@ -834,7 +834,9 @@ Release CoW 性能基线（同日、本机非并发 I/O）：运行 `PYTHONDONTW
 
 该 35 项实际于 **21:30:10–21:33:39 UTC** 完成约 3 分 29 秒，按预计窗口首次读取时已终态：执行器 exit 0、**30 caught＋5 unviable、0 missed/timeout**，未变异基线通过；`outcomes.json` SHA-256 `23771e11c4134ec4dabecb8b3dbe08a021d3202760235943441e023bac95d6a7`。再用当前完整零上下文差异重新枚举 333 项，逐一与此前八批及本轮三批的有效 caught/unviable 完整名称（含文件、行列、操作）求差，**333/333 有精确当前名称的正结果、0 缺口**。旧批次的 aborted/exit 2 和被修复的 missed 均保留原始记录，只采用其中仍有效的单项正结果；本轮两次独立批次并未重跑全 workspace 约三千项变异，也不是 Phase 1 人工放行。
 
-第二次审核修复的 Release 候选重新构建成功，`target/release/thinws` SHA-256 为 `f01b2748c7fb18429be70f9caa74e223a1f378c3aa4d96b348aaa61f4f32aa72`。首次 `cargo test --quiet --locked --release --workspace --all-targets` 在既有 `e2e_remove::real_cli_git_incomplete_refusal_exposes_the_specific_issue` 的第二次人类输出断言中偶发 exit 101：期望 25，实得 23；该用例单独运行通过，立即重跑相同全 workspace Release 命令退出 0，随后 Release `e2e_remove` 整个套件连续 10 次均退出 0。未找到稳定复现或与本轮创建路径变更的连接，保留首次失败记录与这项低频不确定性，不写成“从未失败”。新 Release 二进制在隔离 HOME、本机模拟 GitHub Actions 条件下通过 init/create/path/remove CoW 黑盒，非线上 CI；一次性 `/private/tmp/thinws-release-e2e-jr66vqhw` 夹具经确认无符号链接后按确切路径删除。最终 fmt、严格 Clippy、全 workspace Debug 测试、Release 全 workspace 重跑、crate 依赖方向及差异检查均退出 0；规定模型的最终精确提交审核仍待完成。
+第二次审核修复的 Release 候选重新构建成功，`target/release/thinws` SHA-256 为 `f01b2748c7fb18429be70f9caa74e223a1f378c3aa4d96b348aaa61f4f32aa72`。首次 `cargo test --quiet --locked --release --workspace --all-targets` 在既有 `e2e_remove::real_cli_git_incomplete_refusal_exposes_the_specific_issue` 的第二次人类输出断言中偶发 exit 101：期望 25，实得 23；该用例单独运行通过，立即重跑相同全 workspace Release 命令退出 0，随后 Release `e2e_remove` 整个套件连续 10 次均退出 0。未找到稳定复现或与本轮创建路径变更的连接，保留首次失败记录与这项低频不确定性，不写成“从未失败”。新 Release 二进制在隔离 HOME、本机模拟 GitHub Actions 条件下通过 init/create/path/remove CoW 黑盒，非线上 CI；一次性 `/private/tmp/thinws-release-e2e-jr66vqhw` 夹具经确认无符号链接后按确切路径删除。最终 fmt、严格 Clippy、全 workspace Debug 测试、Release 全 workspace 重跑、crate 依赖方向及差异检查均退出 0；规定模型的最终精确提交审核结果见下段。
+
+P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `2f8ad11204a8806c9a7880d97741f2efae1832c9`、完整范围 `7d74977..2f8ad11` 进行只读独立终审，结论 **Approve**，此前三项创建/查询/删除展示问题与两项新发现的隔离目录和 APFS 别名问题均已闭合，未发现新的阻断问题。审核者独立枚举当前完整新布局生产差异的 333 个互异变异名称，并对照本节十一批原始 caught/unviable 结果逐项求差，**333/333 匹配、0 缺口**；unviable 不冒称行为测试捕获。当前本地 `main` 已包含已审核提交，无线上 PR、push 或已安装旧二进制替换。本节记录的真实 APFS 多卷/离线删除、Release 黑盒、四项短预算 fuzz、供应链缓存核查与普通门禁组成 P1-21 的技术候选证据；首次 Release 偶发 23/25 差异原因未明，后续人工结构测试应留意，不因重复通过抹去。**P1-17–P1-21 的 Done 仅表示本轮新布局任务级技术交付及人工测试入口就绪，不表示 Phase 1 阶段放行**：阶段级全 workspace 变异、所有 fuzz target 的记录化长预算、线上 CI、在线最新 advisory 核查、正式签名/公证、维护者结构测试及人工签字尚未完成；不打 tag、不进入 Phase 2。
 
 ---
 

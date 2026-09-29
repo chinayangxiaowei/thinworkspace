@@ -105,7 +105,7 @@ impl LinuxHostAdapter {
     }
 }
 
-fn read_private_document(
+pub(crate) fn read_private_document(
     directory: &PrivateDirectory,
     name: &str,
 ) -> Result<Option<Vec<u8>>, PortError> {
@@ -193,7 +193,7 @@ fn read_private_document(
     Ok(Some(bytes))
 }
 
-fn document_error(error: DocumentError) -> PortError {
+pub(crate) fn document_error(error: DocumentError) -> PortError {
     let kind = if error == DocumentError::UnsupportedVersion {
         PortErrorKind::UnsupportedVersion
     } else {
@@ -202,7 +202,9 @@ fn document_error(error: DocumentError) -> PortError {
     PortError::new(kind, "decode Linux control document").with_source(error)
 }
 
-fn require_unclaimed_control_root(directory: &PrivateDirectory) -> Result<(), PortError> {
+pub(crate) fn require_unclaimed_control_root(
+    directory: &PrivateDirectory,
+) -> Result<(), PortError> {
     let mut entries = rustix::fs::Dir::read_from(&directory.fd).map_err(|error| {
         PortError::new(PortErrorKind::Io, "inspect unclaimed Linux control root").with_source(error)
     })?;

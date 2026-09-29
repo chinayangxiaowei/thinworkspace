@@ -27,6 +27,9 @@ mod document;
 mod layout;
 
 #[cfg(target_os = "linux")]
+mod publication;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]
@@ -34,3 +37,6 @@ pub use control::LinuxPreparedDataRoot;
 
 #[cfg(target_os = "linux")]
 pub use layout::LinuxDataRootLayout;
+
+#[cfg(target_os = "linux")]
+pub use publication::LinuxInitializingProof;

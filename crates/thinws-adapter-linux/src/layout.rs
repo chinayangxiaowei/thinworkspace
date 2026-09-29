@@ -51,6 +51,22 @@ impl DataRootLayoutEvidence for LinuxDataRootLayout {
     }
 }
 
+impl LinuxDataRootLayout {
+    pub(crate) fn matches_newly_created(
+        &self,
+        metadata: &PrivateDirectory,
+        logs: &PrivateDirectory,
+        database: &File,
+    ) -> Result<bool, PortError> {
+        let created = rustix::fs::fstat(database.as_fd()).map_err(|error| {
+            PortError::new(PortErrorKind::Io, "inspect created Linux database").with_source(error)
+        })?;
+        Ok(self.metadata.same_identity(metadata)
+            && self.logs.same_identity(logs)
+            && (created.st_dev, created.st_ino) == self.database_identity)
+    }
+}
+
 impl LinuxHostAdapter {
     /// Opens an existing private control layout without creating or repairing it.
     pub fn validate_layout(

@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thinws_core::{
     AbsolutePath, InstallationIdentity, InstanceId, RootMarker, RootMarkerState, VolumeId,
 };
@@ -28,7 +28,7 @@ impl fmt::Display for DocumentError {
 
 impl Error for DocumentError {}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigDocument {
     schema_version: u32,
@@ -37,7 +37,7 @@ struct ConfigDocument {
     control_volume_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct MarkerDocument {
     schema_version: u32,
@@ -47,7 +47,7 @@ struct MarkerDocument {
     state: MarkerState,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum MarkerState {
     Initializing,
@@ -79,6 +79,29 @@ pub(crate) fn decode_marker(bytes: &[u8]) -> Result<RootMarker, DocumentError> {
     Ok(RootMarker::new(identity, state))
 }
 
+pub(crate) fn encode_config(identity: &InstallationIdentity) -> Result<Vec<u8>, DocumentError> {
+    encode_toml(&ConfigDocument {
+        schema_version: DOCUMENT_SCHEMA_VERSION,
+        instance_id: identity.instance_id().to_string(),
+        control_root_hex: encode_hex(identity.data_root().as_bytes()),
+        control_volume_id: identity.volume_id().to_string(),
+    })
+}
+
+pub(crate) fn encode_marker(marker: &RootMarker) -> Result<Vec<u8>, DocumentError> {
+    let state = match marker.state() {
+        RootMarkerState::Initializing => MarkerState::Initializing,
+        RootMarkerState::Ready => MarkerState::Ready,
+    };
+    encode_toml(&MarkerDocument {
+        schema_version: DOCUMENT_SCHEMA_VERSION,
+        instance_id: marker.identity().instance_id().to_string(),
+        control_root_hex: encode_hex(marker.identity().data_root().as_bytes()),
+        control_volume_id: marker.identity().volume_id().to_string(),
+        state,
+    })
+}
+
 fn require_schema_version(version: u32) -> Result<(), DocumentError> {
     if version == DOCUMENT_SCHEMA_VERSION {
         Ok(())
@@ -93,6 +116,16 @@ fn decode_toml<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, Document
     }
     let text = std::str::from_utf8(bytes).map_err(|_| DocumentError::InvalidEncoding)?;
     toml::from_str(text).map_err(|_| DocumentError::InvalidToml)
+}
+
+fn encode_toml<T: Serialize>(document: &T) -> Result<Vec<u8>, DocumentError> {
+    let bytes = toml::to_string(document)
+        .map_err(|_| DocumentError::InvalidToml)?
+        .into_bytes();
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(DocumentError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 fn decode_identity(
@@ -131,6 +164,16 @@ fn hex_nibble(byte: u8) -> u8 {
     }
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -156,6 +199,10 @@ mod tests {
         let identity = identity();
         let encoded = config_bytes();
         assert_eq!(decode_config(&encoded), Ok(identity.clone()));
+        assert_eq!(
+            decode_config(&encode_config(&identity).unwrap()),
+            Ok(identity.clone())
+        );
         for (state, word) in [
             (RootMarkerState::Initializing, "initializing"),
             (RootMarkerState::Ready, "ready"),
@@ -166,6 +213,8 @@ mod tests {
                 decode_marker(&marker_bytes),
                 Ok(RootMarker::new(identity.clone(), state))
             );
+            let marker = RootMarker::new(identity.clone(), state);
+            assert_eq!(decode_marker(&encode_marker(&marker).unwrap()), Ok(marker));
         }
     }
 

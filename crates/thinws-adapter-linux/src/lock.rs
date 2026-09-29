@@ -100,6 +100,14 @@ impl PrivateDirectory {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+
+    pub(crate) fn relabel(&mut self, path: PathBuf) {
+        self.path = path;
+    }
 }
 
 /// Held Linux advisory lock; dropping it releases the kernel lock.
@@ -119,6 +127,12 @@ impl LifecycleLockGuard for LinuxLockGuard {
     fn revalidate(&self) -> Result<(), PortError> {
         revalidate_private_directory(&self.parent)?;
         validate_lock_file(&self.parent.fd, &self.file, self.identity)
+    }
+}
+
+impl LinuxLockGuard {
+    pub(crate) fn protects_directory(&self, directory: &PrivateDirectory) -> bool {
+        self.parent.path == directory.path && self.parent.identity == directory.identity
     }
 }
 

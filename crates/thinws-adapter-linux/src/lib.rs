@@ -42,6 +42,9 @@ mod materializer;
 mod workspace;
 
 #[cfg(target_os = "linux")]
+mod space;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]

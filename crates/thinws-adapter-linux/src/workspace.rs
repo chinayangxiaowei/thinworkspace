@@ -11,7 +11,7 @@ use thinws_core::{
 };
 use thinws_ports::{
     DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PlatformProbe, PortConflict,
-    PortError, PortErrorKind, PreparedWorkspaceEvidence,
+    PortError, PortErrorKind, PreparedWorkspaceEvidence, WorkspaceSpace,
 };
 
 use crate::control::{document_error, read_private_document};
@@ -424,6 +424,35 @@ impl LinuxHostAdapter {
         root.revalidate()?;
         layout.revalidate()?;
         Ok(reservation.target_path().clone())
+    }
+
+    /// Measures only an ownership-verified Ready target; an incomplete inner
+    /// scan is Unknown while invalid target ownership remains an error.
+    pub fn measure_ready_workspace_space(
+        &self,
+        layout: &LinuxDataRootLayout,
+        reservation: &WorkspaceReservation,
+    ) -> Result<WorkspaceSpace, PortError> {
+        let expected_path = self.validate_ready_workspace(layout, reservation)?;
+        let ownership = read_workspace_ownership(&layout.metadata, reservation.workspace_id())?;
+        let root =
+            open_target_directory(&PathBuf::from(OsStr::from_bytes(expected_path.as_bytes())))?;
+        if root.identity != ownership.target {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace target identity changed before space scan",
+            ));
+        }
+        require_btrfs_mount(&root, ownership.volume_id, ownership.mount_id)?;
+        let measurement = crate::space::measure_root(&root.fd, ownership.mount_id);
+        root.revalidate()?;
+        if self.validate_ready_workspace(layout, reservation)? != expected_path {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready Workspace changed during space scan",
+            ));
+        }
+        Ok(measurement)
     }
 }
 

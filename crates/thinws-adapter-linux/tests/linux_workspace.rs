@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use std::env;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use thinws_core::{
 };
 use thinws_ports::{
     LifecycleLock, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
-    PreparedWorkspaceEvidence, WorkspaceMaterializer,
+    PreparedWorkspaceEvidence, WorkspaceMaterializer, WorkspaceSpace,
 };
 
 fn absolute(path: &Path) -> AbsolutePath {
@@ -487,4 +488,84 @@ fn actual_btrfs_materialization_can_be_completed_and_reopened_as_an_ordinary_pat
     assert_eq!(std::fs::read(target.join("file")).unwrap(), b"source bytes");
     std::fs::write(target.join("file"), b"changed").unwrap();
     assert_eq!(std::fs::read(source.join("file")).unwrap(), b"source bytes");
+}
+
+#[test]
+fn ready_space_counts_files_links_and_unique_allocated_inodes_on_real_btrfs() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    let prepared = adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    adapter
+        .clear_workspace_incomplete(&lock, &layout, prepared)
+        .unwrap();
+    std::fs::write(target.join("file"), b"hello").unwrap();
+    std::fs::hard_link(target.join("file"), target.join("alias")).unwrap();
+    symlink("file", target.join("link")).unwrap();
+    std::fs::create_dir(target.join("nested")).unwrap();
+    std::fs::write(target.join("nested/other"), b"abc").unwrap();
+    let allocated = [
+        target.clone(),
+        target.join("file"),
+        target.join("link"),
+        target.join("nested"),
+        target.join("nested/other"),
+    ]
+    .iter()
+    .map(|path| std::fs::symlink_metadata(path).unwrap().blocks() * 512)
+    .sum();
+    assert_eq!(
+        adapter
+            .measure_ready_workspace_space(&layout, &registered)
+            .unwrap(),
+        WorkspaceSpace::Complete {
+            logical_bytes: 17,
+            allocated_bytes_estimate: allocated,
+        }
+    );
+    let _socket = UnixListener::bind(target.join("socket")).unwrap();
+    assert_eq!(
+        adapter
+            .measure_ready_workspace_space(&layout, &registered)
+            .unwrap(),
+        WorkspaceSpace::Unknown
+    );
+}
+
+#[test]
+fn invalid_ready_target_is_an_error_not_an_unknown_space_estimate() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    let prepared = adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    adapter
+        .clear_workspace_incomplete(&lock, &layout, prepared)
+        .unwrap();
+    std::fs::rename(&target, target_fixture.path().join("displaced")).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    assert_eq!(
+        adapter
+            .measure_ready_workspace_space(&layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
 }

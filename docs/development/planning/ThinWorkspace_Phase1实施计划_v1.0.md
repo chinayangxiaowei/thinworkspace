@@ -860,6 +860,8 @@ P1-L02/L04 交界实施记录（2026-09-29）：Linux Adapter 已增量加入显
 本次本地证据：Debian 11.7、ext4 控制测试根 `/home/yxw`、真实 Btrfs 测试根 `/media/yxw/thinws` 上，`cargo test -p thinws-adapter-linux --all-targets` 共 44 项通过；该包 `cargo clippy --all-targets --all-features -- -D warnings`、全仓 fmt、macOS 全仓普通测试与依赖方向检查通过。Linux `cargo check --workspace --all-targets` 仍因既有 macOS-only Adapter/P0 实验未条件编译而失败，CLI 尚不能在 Debian 构建；Linux VM 尚未安装 `cargo-mutants`，定向变异及本次归属解析 fuzz 未执行，故本记录不作为任务或小阶段放行。
 P1-L04 查询入口增量（2026-09-29）：已登记 Workspace 的创建收尾现在仅删除归属可证且为空的 staging/trash；Ready 路径查询只读比对 SQLite reservation 所持字段与版本 3 归属文档、Btrfs FSID/mount ID、父目录及 target 创建身份，并拒绝未清操作目录。真实 ext4 控制根＋Btrfs target 测试覆盖非空 staging/trash 拒绝、target 缺失/替换、父目录替换、登记卷不符及归属文档变动；另以真实 Btrfs `FICLONE` 完成“准备目录 → 物化 → 清理空操作目录 → 按登记重新查询”链路，副本改写不影响源。此处尚未接入 `BootstrapStore` trait 与 CLI；空间统计、删除、日志、完整门禁和黑盒命令仍待做，因此 L04 仅为 In Progress，不视为 L03 或 L04 收口。
 本次验证：Debian 11.7 的 `thinws-adapter-linux` 全目标 50 项测试与严格 Clippy、macOS 全 workspace 格式/严格 Clippy、依赖方向检查通过。macOS 全 workspace 普通测试首跑在未改动的 `real_cli_git_incomplete_refusal_exposes_the_specific_issue` 二次人工输出断言偶发得到 `E_WORKSPACE_BUSY`（退出码 23，预期 Git 检查不完整的 25）；该用例单独复跑以及全 workspace 第二次运行均通过。尚未定位该占用波动根因，不将首跑记为通过；Linux 定向变异/fuzz、Linux 全仓编译和 CLI 黑盒仍未完成。
+P1-L04 空间统计增量（2026-09-29）：在已验证 Ready target 后，Linux Adapter 以持有的根目录句柄做有界只读扫描，检查每项 mount ID 和目录项身份；特殊类型、越界或内部扫描不完整给 `unknown`，根归属失效仍为错误。真实 Btrfs 测试验证文件、硬链接、符号链接的逻辑/分配字节口径以及 socket 导致的 unknown。该方法仍待接入完整 `BootstrapStore` 与 CLI `status`，不构成 L04 收口。
+本次普通门禁：Debian 11.7、ext4 控制根与专用 Btrfs 测试根上，`cargo test -p thinws-adapter-linux --all-targets` 53 项全绿，Linux Adapter 严格 Clippy 通过；macOS 的全 workspace 普通测试、严格 Clippy、全仓 fmt 与依赖方向检查亦通过。本次未运行 Linux 定向变异或归属/扫描 fuzz；Linux 全仓及 CLI 仍受 macOS 专用 crate 无条件编译限制，未将单包通过冒称产品可用。
 
 ---
 

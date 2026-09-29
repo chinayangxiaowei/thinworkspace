@@ -13,7 +13,12 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, error::ErrorKind};
 use serde_json::{Map, Value, json};
 use thinws_adapter_git_cli::SystemGitInspector;
-use thinws_adapter_macos::{ApfsCloneMaterializer, FullCopyMaterializer, MacOsHostAdapter};
+#[cfg(target_os = "linux")]
+use thinws_adapter_linux::{BtrfsReflinkMaterializer, LinuxHostAdapter as NativeHostAdapter};
+#[cfg(target_os = "macos")]
+use thinws_adapter_macos::{
+    ApfsCloneMaterializer, FullCopyMaterializer, MacOsHostAdapter as NativeHostAdapter,
+};
 use thinws_application::{
     CowEvidence, CreateRequest, DiscoveryCompleteness, FallbackReason, GitInspectionIssue,
     GitQueryFailureKind, GitState, InitRequest, MaterializationMode, MaterializerKind,
@@ -82,9 +87,9 @@ pub struct CreatePreviewView {
     pub source: Vec<u8>,
     /// Lossless user-specified final target path.
     pub target: Vec<u8>,
-    /// Source APFS Volume UUID.
+    /// Source filesystem identity.
     pub source_volume_id: String,
-    /// Target APFS Volume UUID.
+    /// Target filesystem identity.
     pub target_volume_id: String,
     /// Mode currently selected without execution.
     pub effective_mode: String,
@@ -174,7 +179,7 @@ pub struct SpaceView {
     pub state: String,
     /// Current logical bytes, absent when not measured completely.
     pub logical_bytes: Option<u64>,
-    /// Filesystem-allocated byte estimate, not exclusive APFS usage.
+    /// Filesystem-allocated byte estimate, not exclusive physical usage.
     pub allocated_bytes_estimate: Option<u64>,
 }
 
@@ -251,7 +256,7 @@ pub trait Commands {
     fn remove(&self, target: String, force: bool, now_ms: i64) -> Result<RemoveView, ErrorView>;
 }
 
-/// Local composition root for the macOS/APFS Phase 1 command set.
+/// Local composition root for the current host's Phase 1 platform Adapter.
 pub struct LocalCommands {
     bootstrap_dir: Option<PathBuf>,
     lock_timeout: Duration,
@@ -277,14 +282,14 @@ impl LocalCommands {
         self
     }
 
-    fn adapter(&self) -> Result<MacOsHostAdapter, ErrorView> {
+    fn adapter(&self) -> Result<NativeHostAdapter, ErrorView> {
         let path = self.bootstrap_dir.as_ref().ok_or_else(|| ErrorView {
             code: "E_CONTROL_UNAVAILABLE".to_owned(),
             message: "the current user home directory is unavailable".to_owned(),
             context: Map::new(),
             remediation: None,
         })?;
-        MacOsHostAdapter::new(path).map_err(|_| ErrorView {
+        NativeHostAdapter::new(path).map_err(|_| ErrorView {
             code: "E_CONTROL_LAYOUT".to_owned(),
             message: "the ThinWorkspace control path is invalid".to_owned(),
             context: Map::new(),
@@ -370,10 +375,17 @@ impl Commands for LocalCommands {
                     .map(|reason| fallback_name(reason).to_owned()),
             }))
         } else {
+            #[cfg(target_os = "macos")]
             let clone = ApfsCloneMaterializer::new(adapter.clone());
+            #[cfg(target_os = "macos")]
             let copy = FullCopyMaterializer::new(adapter);
+            #[cfg(target_os = "macos")]
             let outcome = service
                 .create(request, &clone, &copy)
+                .map_err(use_case_error_view)?;
+            #[cfg(target_os = "linux")]
+            let outcome = service
+                .create_cow_only(request, &BtrfsReflinkMaterializer::new())
                 .map_err(use_case_error_view)?;
             let reservation = outcome.record().reservation();
             let facts = outcome.materialization();
@@ -719,7 +731,7 @@ enum Command {
 enum WorkspaceCommand {
     /// Mirrors one source directory into a new ordinary Workspace path.
     Create {
-        /// Canonical absolute source directory on an APFS volume.
+        /// Canonical absolute source directory on a supported filesystem.
         #[arg(long)]
         source: PathBuf,
         /// Canonical absolute final target directory; its last component must not exist.
@@ -728,7 +740,7 @@ enum WorkspaceCommand {
         /// Unique Workspace name.
         #[arg(long)]
         name: String,
-        /// Allow Full Copy only if APFS clone is proven unavailable.
+        /// Allow Full Copy only on platforms where that fallback is implemented.
         #[arg(long)]
         allow_copy: bool,
         /// Probe current facts without allocating an ID or writing product state.

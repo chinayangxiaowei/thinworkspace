@@ -13,8 +13,10 @@ thinws-ports = { path = "../thinws-ports" }
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
-thinws-adapter-macos = { path = "../thinws-adapter-macos" }
 thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+thinws-adapter-macos = { path = "../thinws-adapter-macos" }
 
 [lints]
 workspace = true

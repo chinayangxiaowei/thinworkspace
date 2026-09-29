@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;

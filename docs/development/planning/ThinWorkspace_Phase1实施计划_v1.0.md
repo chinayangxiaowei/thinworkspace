@@ -852,7 +852,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 | P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | In Progress |
 | P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | In Progress |
 | P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | In Progress |
-| P1-L05 CLI 装配与真实机验收 | Debian `thinws` 全命令可编译并完成 Btrfs 黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | Todo |
+| P1-L05 CLI 装配与真实机验收 | Debian `thinws` 全命令可编译并完成 Btrfs 黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Progress |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
@@ -864,6 +864,8 @@ P1-L04 空间统计增量（2026-09-29）：在已验证 Ready target 后，Linu
 本次普通门禁：Debian 11.7、ext4 控制根与专用 Btrfs 测试根上，`cargo test -p thinws-adapter-linux --all-targets` 53 项全绿，Linux Adapter 严格 Clippy 通过；macOS 的全 workspace 普通测试、严格 Clippy、全仓 fmt 与依赖方向检查亦通过。本次未运行 Linux 定向变异或归属/扫描 fuzz；Linux 全仓及 CLI 仍受 macOS 专用 crate 无条件编译限制，未将单包通过冒称产品可用。
 P1-L04 清理前置增量（2026-09-29）：Linux Adapter 已能在持锁状态下从持久归属证明定位原 target 或已登记的隔离目录；目标缺失、替换、双位置冲突及未登记隔离项均不授权删除。清理 JSONL 开始/结果事件现同步写入 ext4 控制目录，截断尾部先换行，日志链接拒绝；真实 Btrfs 集成测试与严格 Clippy 已覆盖这些入口。物理删除、完整 `BootstrapStore` trait 与 CLI 黑盒仍未完成，不将 P1-L04 标为 Done。此次定向变异与 fuzz 未执行，原因及收口要求仍按《任务流程》处理。
 P1-L04 物理清理增量（2026-09-29）：Linux Adapter 已接入既有 `BootstrapStore`；删除先清理归属可证的操作目录，再持久登记隔离路径、无覆盖重命名目标，最后从已验证目录 FD 做同挂载/no-follow 删除。真实 Btrfs 用例验证整目录删除不跟随外部符号链接、替换或缺失目标拒绝、隔离冲突拒绝，以及特殊文件导致的部分清理保留归属并允许新的显式调用继续。此为 Adapter 层能力，Application/CLI 黑盒及专项变异、fuzz 门禁尚待完成，不改变 P1-L04 的 In Progress 状态。
+
+P1-L05 CLI 增量（2026-09-29）：CLI 以目标平台依赖装配本机 Adapter；Linux 调用现有 Application 创建编排的 CoW-only 入口，不提供 Full Copy 执行器，Probe 对 Linux Full Copy 明确给出 unsupported。Debian 11.7 的 ext4 隔离控制根、真实 Btrfs 工作区上，包级 JSON/人类接口与实际二进制覆盖 init、doctor、dry-run、create、list、path、status、remove；`prl_fs` 来源即使带 `--allow-copy` 也拒绝。Git 已跟踪修改普通清理拒绝、显式强制清理留日志；登记 target 移走后强制清理仍返回 E_TARGET_MISSING 且保留登记；实际外部进程占用时强制清理返回 E_WORKSPACE_BUSY。Linux 产品包范围普通测试和严格 Clippy、macOS 全仓普通测试/严格 Clippy 均通过；Linux Release CLI 构建和 6 项真实 Btrfs Release E2E 通过。初次 `cargo deny check` 发现 Linux 两个仓库自有 crate 缺少本项目许可证例外，补精确例外后通过；离线 `cargo audit --no-fetch` 扫描本地 1261 条 advisory 通过。Debian 原样 `cargo check --workspace --all-targets` 仍被历史 macOS-only Adapter/P0 实验阻断，不作为 Linux 产品失败或全仓通过结论。受影响范围变异、fuzz 和阶段人工验收尚未完成，L01–L05 不标 Done。
 
 ---
 

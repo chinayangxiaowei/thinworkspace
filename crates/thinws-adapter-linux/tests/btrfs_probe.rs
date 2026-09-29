@@ -52,6 +52,7 @@ fn real_shared_source_is_not_a_btrfs_clone_candidate() {
         .inspect_materialization_paths(&request)
         .unwrap();
     assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
     assert_ne!(report.source().filesystem().type_name(), "btrfs");
 }
 
@@ -97,6 +98,7 @@ fn actual_btrfs_paths_have_one_known_mount_and_a_btrfs_candidate() {
     assert_eq!(report.source().writability(), SupportState::Supported);
     assert_eq!(report.cow_clone().kind(), MaterializerKind::BtrfsReflink);
     assert_ne!(report.cow_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
     let volume = report
         .source()
         .filesystem()

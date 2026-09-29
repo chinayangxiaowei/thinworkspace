@@ -295,10 +295,35 @@ where
         C: WorkspaceMaterializer,
         F: WorkspaceMaterializer,
     {
+        self.create_impl(request, clone_materializer, Some(copy_materializer))
+    }
+
+    /// Creates only with the selected CoW backend; a platform without a Full
+    /// Copy executor cannot silently take that fallback even when requested.
+    pub fn create_cow_only<C>(
+        &self,
+        request: CreateRequest,
+        clone_materializer: &C,
+    ) -> Result<CreateOutcome, UseCaseError>
+    where
+        C: WorkspaceMaterializer,
+    {
+        self.create_impl(request, clone_materializer, None)
+    }
+
+    fn create_impl<C>(
+        &self,
+        request: CreateRequest,
+        clone_materializer: &C,
+        copy_materializer: Option<&dyn WorkspaceMaterializer>,
+    ) -> Result<CreateOutcome, UseCaseError>
+    where
+        C: WorkspaceMaterializer,
+    {
         if !matches!(
             clone_materializer.kind(),
             MaterializerKind::ApfsFileClone | MaterializerKind::BtrfsReflink
-        ) || copy_materializer.kind() != MaterializerKind::FullCopy
+        ) || copy_materializer.is_some_and(|copy| copy.kind() != MaterializerKind::FullCopy)
         {
             return Err(semantic_error(
                 ErrorCode::CapabilityUnavailable,
@@ -488,7 +513,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn create_reserved<C, F>(
+    fn create_reserved<C>(
         &self,
         request: &CreateRequest,
         lock: &<B as BootstrapStore>::LockGuard,
@@ -497,11 +522,10 @@ where
         metadata: &mut dyn MetadataStore,
         reservation: &WorkspaceReservation,
         clone_materializer: &C,
-        copy_materializer: &F,
+        copy_materializer: Option<&dyn WorkspaceMaterializer>,
     ) -> Result<CreateOutcome, UseCaseError>
     where
         C: WorkspaceMaterializer,
-        F: WorkspaceMaterializer,
     {
         let prepared = self
             .bootstrap
@@ -565,6 +589,12 @@ where
             ));
         }
         let receipt = if plan.selected_adapter() == MaterializerKind::FullCopy {
+            let copy_materializer = copy_materializer.ok_or_else(|| {
+                semantic_error(
+                    ErrorCode::CapabilityUnavailable,
+                    "Full Copy executor is unavailable on this platform",
+                )
+            })?;
             copy_materializer
                 .materialize(&materialize, &plan)
                 .map_err(|failure| {
@@ -604,6 +634,13 @@ where
                         &fresh, &plan, &partial,
                     )
                     .map_err(|error| map_plan_error(error).with_partial_receipt(partial.clone()))?;
+                    let copy_materializer = copy_materializer.ok_or_else(|| {
+                        semantic_error(
+                            ErrorCode::CapabilityUnavailable,
+                            "Full Copy executor is unavailable on this platform",
+                        )
+                        .with_partial_receipt(partial.clone())
+                    })?;
                     copy_materializer
                         .materialize(&materialize, &plan)
                         .map_err(|failure| {
@@ -965,7 +1002,7 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::fs;
     use std::os::unix::ffi::OsStrExt;

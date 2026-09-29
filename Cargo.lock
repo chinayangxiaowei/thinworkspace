@@ -601,6 +601,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thinws-adapter-git-cli",
+ "thinws-adapter-linux",
  "thinws-adapter-macos",
  "thinws-application",
  "thinws-metadata-sqlite",

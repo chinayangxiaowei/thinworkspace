@@ -14,10 +14,15 @@ path = "src/main.rs"
 clap.workspace = true
 directories.workspace = true
 serde_json.workspace = true
-thinws-adapter-macos = { path = "../thinws-adapter-macos" }
 thinws-adapter-git-cli = { path = "../thinws-adapter-git-cli" }
 thinws-application = { path = "../thinws-application" }
 thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+thinws-adapter-macos = { path = "../thinws-adapter-macos" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+thinws-adapter-linux = { path = "../thinws-adapter-linux" }
 
 [dev-dependencies]
 rusqlite.workspace = true

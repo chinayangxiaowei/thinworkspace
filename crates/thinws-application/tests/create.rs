@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::error::Error;
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -244,6 +246,22 @@ fn p1_09_create_mirrors_a_plain_source_and_reuses_ready_workspace() {
         authorized.materialization().actual_mode(),
         MaterializationMode::CowClone,
         "--allow-copy must not force Full Copy when CoW works"
+    );
+
+    let cow_only = service
+        .create_cow_only(
+            make_request(
+                absolute(&source),
+                WorkspaceName::from_str("cow-only").unwrap(),
+                false,
+                UnixMillis::new(1_700_000_000_120).unwrap(),
+            ),
+            &clone,
+        )
+        .unwrap();
+    assert_eq!(
+        cow_only.materialization().actual_mode(),
+        MaterializationMode::CowClone
     );
 
     fs::rename(&source, temp.path().join("source-moved-away")).unwrap();

@@ -22,6 +22,11 @@ version = "=0.0.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [[licenses.exceptions]]
+name = "thinws-p0-linux-reflink"
+version = "=0.0.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
 name = "thinws-fuzz"
 version = "=0.0.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
@@ -33,6 +38,11 @@ allow = ["PolyForm-Noncommercial-1.0.0"]
 
 [[licenses.exceptions]]
 name = "thinws-adapter-macos"
+version = "=0.1.0"
+allow = ["PolyForm-Noncommercial-1.0.0"]
+
+[[licenses.exceptions]]
+name = "thinws-adapter-linux"
 version = "=0.1.0"
 allow = ["PolyForm-Noncommercial-1.0.0"]
 

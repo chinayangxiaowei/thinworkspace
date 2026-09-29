@@ -573,7 +573,7 @@ fn success_json_fixture_keys_match_the_public_command_matrix() {
                 assert_eq!(
                     data["host"],
                     json!({
-                        "platform": "macos",
+                        "platform": std::env::consts::OS,
                         "architecture": std::env::consts::ARCH,
                     })
                 );

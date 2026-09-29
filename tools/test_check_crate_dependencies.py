@@ -17,6 +17,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "directories",
                 "serde_json",
                 "thinws-adapter-git-cli",
+                "thinws-adapter-linux",
                 "thinws-adapter-macos",
                 "thinws-application",
                 "thinws-metadata-sqlite",

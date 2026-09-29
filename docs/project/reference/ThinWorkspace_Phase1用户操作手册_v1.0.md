@@ -34,11 +34,11 @@ thinws init
 thinws doctor
 ```
 
-首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；这是已有实验环境与后续资格目标，不代表新流程或所有旧 macOS 已验收。Git 仅用于按需检查，缺少 Git 不影响目录物化。
+macOS 首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；Linux 扩展正在 Debian 11.7、真实 Btrfs 上验证。两者的资格状态见第十二节，不因命令可编译而自动放行。Git 仅用于按需检查，缺少 Git 不影响目录物化。
 
 init 只建立固定的用户控制目录 `~/.thinws`；已完整初始化且身份一致时重复执行幂等。中断初始化留下的非空未归属控制目录不自动接管，需用户核对后在平台之外显式处理。没有 `--data-root`、reset 或 migrate。
 
-配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在本次运行识别的 home 目录下的 `~/.thinws`；首版要求该控制目录所在卷也是 APFS，但可以与 source/target 使用不同的 APFS 卷。没有 `--data-root` 或 ThinWorkspace 专用环境变量来另选控制目录。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。控制目录所在卷不决定工作区目标卷。
+配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在本次运行识别的 home 目录下的 `~/.thinws`。macOS 要求控制目录位于 APFS；Linux 要求位于可验证身份的本机文件系统，当前真实验收使用 ext4。控制目录可以与 source/target 在不同卷或文件系统，不决定工作区目标卷。没有 `--data-root` 或 ThinWorkspace 专用环境变量来另选控制目录。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。
 
 doctor 对 ThinWorkspace 产品状态只读，报告主机、控制目录、未完成工作区与 Git 检查是否可用。它不修改配置、控制目录归属标记、主数据库、schema 或 Workspace 记录；SQLite 读取 WAL 数据库时可能管理同目录的 `state.db-wal`/`state.db-shm` 协调文件，因此该承诺不是文件系统字节零变化。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 
@@ -87,7 +87,7 @@ doctor JSON 的 `data` 固定包含 `command="doctor"`、`status="ready"`、`hos
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh
 ```
 
-source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在，且与 source 位于同一 APFS Volume；`~/.thinws` 可以在其他卷。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。新 target 不能与任一活跃 Workspace 的 target 相同或相互包含，也不能进入它仍可能清理的受控暂存、回滚或隔离目录；APFS 大小写/Unicode 别名按实际目录身份判断。预览和正式创建都拒绝这些冲突，活跃 target 的别名归为 E_TARGET_CONFLICT，而普通未登记既有目录归为 E_TARGET_EXISTS。
+source 和 target 都使用本机绝对路径；target 是用户指定的最终目录，创建前其末级必须不存在，已存在的空目录也不会被覆盖。target 的父目录必须存在；macOS 要求与 source 位于同一 APFS Volume，Linux 当前仅支持与 source 位于同一 Btrfs 挂载，不能只凭两个路径都叫 Btrfs 判断。`~/.thinws` 可以在另一卷或文件系统。source、target 与控制目录不得相等或相互包含；不支持 URL、子挂载或路径组件的符号链接重定向。新 target 不能与任一活跃 Workspace 的 target 相同或相互包含，也不能进入它仍可能清理的受控暂存、回滚或隔离目录；macOS 的 APFS 大小写/Unicode 别名按实际目录身份判断。预览和正式创建都拒绝这些冲突，活跃 target 的别名归为 E_TARGET_CONFLICT，而普通未登记既有目录归为 E_TARGET_EXISTS。
 
 目标输出示例（时间仅为示意，不是性能承诺）：
 
@@ -107,7 +107,7 @@ Git setup:       not performed
 
 加 `--dry-run` 只展示当前 source/target 卷关系、精确目标路径、后端计划和降级原因，不分配 WorkspaceId、不预留名称或目标、不保留可执行 plan token。正式创建重新检测。预览不生成实际复制结果或 CoW 证明。重复创建已 Ready 的同名、同源、同 target 和同策略工作区时，人类输出的 Result 为 `already-ready`，JSON 的 result 同名。
 
-名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称和登记 target 的路径字节均全局唯一，创建时还按前述包含与 APFS 别名规则拒绝冲突；实际目录是用户指定的 target，不由 WorkspaceId 推导。`workspace path/status` 当前按名称查询；`workspace remove` 可用名称或完整 ID。Workspace ID 为 `ws_` 加标准小写 UUIDv7。若 `workspace remove` 的位置参数同时是某个活跃名称和另一个 Workspace 的完整 ID（含已删除 ID），命令拒绝而不猜测目标；可写 `name:<名称>` 或 `id:<完整 ID>` 明确指定。两种前缀只用于清理目标，不属于 Workspace 名称。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
+名称必填，长度 1–63，匹配 `^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$` 且不含连续 `..`；不自动归一化。活跃名称和登记 target 的路径字节均全局唯一，创建时还按前述包含与适用平台的路径别名规则拒绝冲突；实际目录是用户指定的 target，不由 WorkspaceId 推导。`workspace path/status` 当前按名称查询；`workspace remove` 可用名称或完整 ID。Workspace ID 为 `ws_` 加标准小写 UUIDv7。若 `workspace remove` 的位置参数同时是某个活跃名称和另一个 Workspace 的完整 ID（含已删除 ID），命令拒绝而不猜测目标；可写 `name:<名称>` 或 `id:<完整 ID>` 明确指定。两种前缀只用于清理目标，不属于 Workspace 名称。清理输出的 Operation ID 为 `op_` 加标准小写 UUIDv7，仅关联本次日志，不代表可恢复操作。示例缩写不是真实可执行 ID。
 
 相同名称、规范源路径、规范 target 路径和创建策略，若已有 Ready 记录且目标仍存在并归属匹配，则返回原副本，不重新复制，也不比较源是否已变。想复制当前源的新内容必须使用新名称及新目标；同名参数不同返回 E_NAME_CONFLICT，原记录未 Ready 返回 E_WORKSPACE_INCOMPLETE。来源随后消失不使这一幂等返回失效，但目标缺失或被替换不能返回成功。
 
@@ -129,13 +129,13 @@ Git setup:       not performed
 
 ### 4.3 CoW 与显式完整复制
 
-默认要求 CoW，不能静默改为完整复制。仅在同卷 clone 不支持时，可显式允许：
+默认要求 CoW，不能静默改为完整复制。macOS 仅在同卷 clone 已证实不支持时，可显式允许 Full Copy：
 
 ```bash
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh --allow-copy
 ```
 
-输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
+Linux/Btrfs 当前没有 Full Copy 后端：`--allow-copy` 不会把不支持的来源、目标或失败的 `FICLONE` 变成可复制；同挂载 CoW 可用时仍执行 reflink。输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
 
 `--allow-copy` 不是跨卷开关；跨卷、卷身份变化、空间不足或普通 I/O 错误不触发复制降级。这里的“回滚”只指创建命令仍在运行时，核对并撤离本次已登记的目标副本项，尽力恢复创建前的目标位置；它不修改来源，也不撤销 Ready 工作区后续的用户改动。无法确认目标已恢复时保留 Error，不发布混合或不完整目录；已隔离对象可能仍留在目标父目录下的私有临时位置，不因此自动删除。进程中断后不自动续做或恢复，见第九节。
 已预留 Workspace 后的创建失败在错误 `context.workspace_id` 中标明受控对象；若物化已产生失败回执，还给出 `materialization_attempt_count`、`rollback_incomplete` 和 `unconfirmed_staging` 摘要。摘要不表示已自动清理，也不把 partial receipt 写成成功的 final receipt。
@@ -150,7 +150,7 @@ thinws workspace status auth-refresh
 
 path 成功时 stdout 只有原始绝对路径字节和末尾换行，常见路径可用于 `cd "$(thinws workspace path auth-refresh)"`。文件名本身若含换行，不能按物理行数解析此输出；脚本可改用 `workspace status --json` 的无损 `path_hex` 处理。工具直接运行，不需要执行包装；终端、Agent 和工具自己管理环境、超时、输出和 Ctrl-C。
 
-list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和已有最终回执的实际物化模式；尚无成功回执时显示 `not-ready`，不为了列表自动扫描所有仓库。status 返回元数据及当前副本内主仓库/子仓库的按需 Git 检查结果，以及当前 Ready 副本的空间估算；不是创建时回执的字节数。人类输出使用 `Logical bytes` 和 `Allocated bytes (estimate)` 两行。逻辑字节计入普通文件和符号链接的当前大小；已分配字节估算来自文件系统报告，APFS 共享块可能重复计入，不代表删除后可释放的空间。非 Ready 或扫描不完整时空间数值为 unknown，不以部分统计结果冒充完整。用户同时写入时统计不是原子快照，需要稳定数值应暂停写入后复测。
+list 展示所有活跃 Workspace，按名称稳定排序，列出名称、ID、状态、源路径和已有最终回执的实际物化模式；尚无成功回执时显示 `not-ready`，不为了列表自动扫描所有仓库。status 返回元数据及当前副本内主仓库/子仓库的按需 Git 检查结果，以及当前 Ready 副本的空间估算；不是创建时回执的字节数。人类输出使用 `Logical bytes` 和 `Allocated bytes (estimate)` 两行。逻辑字节计入普通文件和符号链接的当前大小；已分配字节估算来自文件系统报告，CoW 共享块可能重复计入，不代表删除后可释放的空间。非 Ready 或扫描不完整时空间数值为 unknown，不以部分统计结果冒充完整。用户同时写入时统计不是原子快照，需要稳定数值应暂停写入后复测。
 
 Git 检查只关心当前 HEAD/index 已跟踪内容，包括暂存新增、修改、删除、重命名、模式、冲突及子模块引用变化。未跟踪文件和 ignored 文件不展示、不计数、不阻塞。子仓库只有未跟踪文件时不能使父仓库误报有已跟踪修改。已从版本控制移除的历史路径不按“曾经出现过”追溯。
 
@@ -268,7 +268,7 @@ thinws workspace remove auth-refresh
 
 `workspace status` 的 `space` 是当前副本内容的逻辑字节与已分配字节估算，不能用来推断删除后实际释放的空间。`workspace remove` 仅按第六节清理已登记、存在且归属可证的 target 及对应清理隔离位置；它不扫描其他 staging/trash、控制目录日志、源目录或外部缓存。
 
-首版没有 `thinws gc`、自动回收或 Base 缓存；`thinws gc` 返回 E_USAGE。失败或中断可能在目标父目录留下暂存/隔离项，`workspace remove --force` 也不因此取得删除无法证明归属的残留的权限。用户须在产品外自行核对并处置这些残留，平台不会猜测删除。APFS CoW 共享块使已分配字节估算不等于可释放的独占空间。
+首版没有 `thinws gc`、自动回收或 Base 缓存；`thinws gc` 返回 E_USAGE。失败或中断可能在目标父目录留下暂存/隔离项，`workspace remove --force` 也不因此取得删除无法证明归属的残留的权限。用户须在产品外自行核对并处置这些残留，平台不会猜测删除。CoW 共享块使已分配字节估算不等于可释放的独占空间。
 
 ## 九、中断与失败边界
 
@@ -298,9 +298,9 @@ thinws doctor
 
 不支持的子命令或旧参数统一 E_USAGE，不保留首发前旧 Git/Base CLI 的兼容入口。源码实验命令不是本产品契约。
 
-`workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex`（即指定 target）和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target/target_hex`、两端 Volume UUID 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。
+`workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex`（即指定 target）和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target/target_hex`、`source_volume_id`、`target_volume_id` 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。这里沿用字段名 `volume_id` 作为公开契约，值是平台文件系统身份，不表示 Linux 使用 APFS UUID。
 
-`materialization` 中的模式稳定值为 `cow-clone`、`full-copy`；`adapter` 稳定值为 `apfs-file-clone`、`full-copy`。成功回执的 `cow` 为 `confirmed` 或 `not-used`。`fallback.used=false` 时 `reason=null`；为 true 时，`reason=clone-unsupported-at-preflight` 表示预检确认 clone 不支持，`reason=clone-unavailable-at-runtime` 表示实际 clone 不可用且已确认回滚后改用 Full Copy。dry-run 只能报告预检降级，不能预告运行时降级。以上取值也适用于 `workspace list/status` 展示的历史成功物化事实。
+`materialization` 中的模式稳定值为 `cow-clone`、`full-copy`；`adapter` 稳定值为 macOS 的 `apfs-file-clone`、`full-copy` 及 Linux 的 `btrfs-reflink`。Linux 当前不产生 `full-copy` 成功回执。成功回执的 `cow` 为 `confirmed` 或 `not-used`。`fallback.used=false` 时 `reason=null`；为 true 时，`reason=clone-unsupported-at-preflight` 表示预检确认 clone 不支持，`reason=clone-unavailable-at-runtime` 表示实际 clone 不可用且已确认回滚后改用 Full Copy。dry-run 只能报告预检降级，不能预告运行时降级。以上取值也适用于 `workspace list/status` 展示的历史成功物化事实。
 
 `workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`target/target_hex`、`last_error_code` 和 `materialization`，不含 `git`、当前空间或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}` 和 `space={state,logical_bytes,allocated_bytes_estimate}`；space.state 为 `complete` 或 `unknown`，unknown 时两个数值均为 null。每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；`target/target_hex` 始终是登记路径，不代表当前存在或可用；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。空间字段是查询时的估算，不把创建时 Receipt 当成实时用量。
 
@@ -419,6 +419,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 |---|---|
 | macOS 15.7.2、Apple Silicon arm64、每次 source/target 同一 APFS 卷；按需使用 Apple Git 2.39.5 | 新布局已有本机真实 APFS 技术候选验证；阶段门禁与人工验收未完成，当前未放行 |
 | 其他 macOS/Git 版本或 Intel x86_64 | 未完成该组合的真实机资格验证，不纳入首发承诺 |
-| Linux、Windows 或 source/target 非 APFS 卷 | Phase 1 未实现 |
+| Debian 11.7、aarch64、ext4 控制目录、source/target 同一真实 Btrfs 挂载 | CLI 及真实生命周期正在验证；尚未完成全部质量门禁和人工验收，不列为正式支持 |
+| 其他 Linux 文件系统/发行版、Windows 或 source/target 跨卷/跨挂载 | 当前未实现或未完成资格验证 |
 
-已知限制按本手册各节的详细契约执行：每次来源与指定 target 必须在同一 APFS 卷，`~/.thinws` 可在其他卷，`--allow-copy` 不是跨卷开关（第四节）；普通路径可直接使用，但没有用户命令包装、构建缓存策略或 Sandbox（第一、二、六节）；Git 只用于按需的已跟踪变更检查，不代办分支、提交或 PR，未跟踪内容会随副本清理（第五至七节）；没有 GC、自动回收或中断续做，外部进程占用扫描也只能提供尽力证据（第六、八、九节）。Apple Git 不可用时，创建仍可进行，但依赖 Git 检查的普通清理可能因检查不完整而拒绝；是否显式强制清理仍由用户决定，且强制清理仍须验证目标存在与身份。
+已知限制按本手册各节的详细契约执行：每次来源与指定 target 必须同一 APFS 卷（macOS）或同一 Btrfs 挂载（当前 Linux 扩展），`~/.thinws` 可在其他卷或文件系统；`--allow-copy` 不是跨卷开关，Linux 当前没有 Full Copy 后端（第四节）。普通路径可直接使用，但没有用户命令包装、构建缓存策略或 Sandbox（第一、二、六节）；Git 只用于按需的已跟踪变更检查，不代办分支、提交或 PR，未跟踪内容会随副本清理（第五至七节）；没有 GC、自动回收或中断续做，外部进程占用扫描也只能提供尽力证据（第六、八、九节）。系统 Git 不可用时，创建仍可进行，但依赖 Git 检查的普通清理可能因检查不完整而拒绝；是否显式强制清理仍由用户决定，且强制清理仍须验证目标存在与身份。

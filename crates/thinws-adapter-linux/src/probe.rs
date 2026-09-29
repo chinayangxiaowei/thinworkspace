@@ -60,11 +60,14 @@ impl PlatformProbe for LinuxPlatformProbe {
         let trash = inspect_path(request.trash()).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::Trash)
         })?;
-        let (cow_state, cow_reasons) = combined_support(&source, &target, &staging, &trash, true);
-        let (copy_state, copy_reasons) =
-            combined_support(&source, &target, &staging, &trash, false);
+        let (cow_state, cow_reasons) = combined_support(&source, &target, &staging, &trash);
         let cow = CandidateEvidence::new(MaterializerKind::BtrfsReflink, cow_state, cow_reasons);
-        let copy = CandidateEvidence::new(MaterializerKind::FullCopy, copy_state, copy_reasons);
+        // Phase 1 Linux has no Full Copy executor or cross-filesystem fallback.
+        let copy = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Unsupported,
+            vec!["linux_full_copy_not_implemented".to_owned()],
+        );
         let digest = digest(&source, &target, &staging, &trash, &cow, &copy);
         Ok(MaterializationPathReport::new(
             source, target, staging, trash, cow, copy, digest,
@@ -297,7 +300,6 @@ fn combined_support(
     target: &PathCapabilityReport,
     staging: &PathCapabilityReport,
     trash: &PathCapabilityReport,
-    cow: bool,
 ) -> (SupportState, Vec<String>) {
     let paths = [source, target, staging, trash];
     let mut unsupported = Vec::new();
@@ -334,30 +336,28 @@ fn combined_support(
             SupportState::Unknown => unknown.push(format!("{name}_unknown")),
         }
     }
-    if cow {
-        let first_mount = source.mount().mount_id();
-        let first_volume = source.filesystem().volume_id().known().copied();
-        for path in paths {
-            if path.filesystem().type_name() != "btrfs" {
-                unsupported.push("non_btrfs_path".to_owned());
+    let first_mount = source.mount().mount_id();
+    let first_volume = source.filesystem().volume_id().known().copied();
+    for path in paths {
+        if path.filesystem().type_name() != "btrfs" {
+            unsupported.push("non_btrfs_path".to_owned());
+        }
+        match (first_mount, path.mount().mount_id()) {
+            (Some(a), Some(b)) if a != b => unsupported.push("different_mount".to_owned()),
+            (None, _) | (_, None) => unknown.push("mount_unknown".to_owned()),
+            _ => {}
+        }
+        match (first_volume, path.filesystem().volume_id().known().copied()) {
+            (Some(a), Some(b)) if a != b => unsupported.push("different_volume".to_owned()),
+            (None, _) | (_, None) => unknown.push("volume_unknown".to_owned()),
+            _ => {}
+        }
+        match path.cow_clone() {
+            SupportState::Supported => {}
+            SupportState::Unsupported => {
+                unsupported.push("clone_capability_unsupported".to_owned())
             }
-            match (first_mount, path.mount().mount_id()) {
-                (Some(a), Some(b)) if a != b => unsupported.push("different_mount".to_owned()),
-                (None, _) | (_, None) => unknown.push("mount_unknown".to_owned()),
-                _ => {}
-            }
-            match (first_volume, path.filesystem().volume_id().known().copied()) {
-                (Some(a), Some(b)) if a != b => unsupported.push("different_volume".to_owned()),
-                (None, _) | (_, None) => unknown.push("volume_unknown".to_owned()),
-                _ => {}
-            }
-            match path.cow_clone() {
-                SupportState::Supported => {}
-                SupportState::Unsupported => {
-                    unsupported.push("clone_capability_unsupported".to_owned())
-                }
-                SupportState::Unknown => unknown.push("clone_capability_unknown".to_owned()),
-            }
+            SupportState::Unknown => unknown.push("clone_capability_unknown".to_owned()),
         }
     }
     let has_unsupported = !unsupported.is_empty();

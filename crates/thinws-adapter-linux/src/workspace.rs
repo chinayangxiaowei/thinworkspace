@@ -11,7 +11,8 @@ use thinws_core::{
 };
 use thinws_ports::{
     DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PlatformProbe, PortConflict,
-    PortError, PortErrorKind, PreparedWorkspaceEvidence, RemovalLogRecord, WorkspaceSpace,
+    PortError, PortErrorKind, PreparedWorkspaceEvidence, RemovalLogRecord, WorkspaceRemoval,
+    WorkspaceSpace,
 };
 
 use crate::control::{document_error, read_private_document};
@@ -35,6 +36,13 @@ struct TargetDirectory {
     path: PathBuf,
     identity: HistoricalDirectoryIdentity,
     device: u64,
+}
+
+struct RegisteredTarget {
+    parent: TargetDirectory,
+    target_path: PathBuf,
+    isolated_path: PathBuf,
+    ownership: WorkspaceOwnership,
 }
 
 impl TargetDirectory {
@@ -465,74 +473,12 @@ impl LinuxHostAdapter {
     ) -> Result<Option<AbsolutePath>, PortError> {
         validate_data_root_lock(self, lock, layout)?;
         layout.revalidate()?;
-        let ownership = read_workspace_ownership(&layout.metadata, reservation.workspace_id())?;
-        if reservation.instance_id() != layout.instance_id
-            || ownership.instance_id != reservation.instance_id()
-            || ownership.target_path != *reservation.target_path()
-            || ownership.volume_id != reservation.target_volume_id()
-            || reservation.source_volume_id() != reservation.target_volume_id()
+        let registered = registered_target(layout, reservation)?;
+        let selected = locate_target(&registered)?.map(|(directory, _)| directory);
+        registered.parent.revalidate()?;
+        if read_workspace_ownership(&layout.metadata, reservation.workspace_id())?
+            != registered.ownership
         {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace registration and ownership proof differ",
-            ));
-        }
-        let target_path = PathBuf::from(OsStr::from_bytes(reservation.target_path().as_bytes()));
-        let parent_path = target_path.parent().ok_or_else(|| {
-            PortError::new(
-                PortErrorKind::InvalidLayout,
-                "registered target has no parent",
-            )
-        })?;
-        let parent = open_target_directory(parent_path)?;
-        if parent.identity != ownership.parent {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "registered Workspace parent identity changed",
-            ));
-        }
-        require_btrfs_mount(&parent, ownership.volume_id, ownership.mount_id)?;
-        let isolated_path =
-            parent_path.join(format!(".thinws-remove-{}", reservation.workspace_id()));
-        if ownership
-            .isolated_path
-            .as_ref()
-            .is_some_and(|registered| registered.as_bytes() != isolated_path.as_os_str().as_bytes())
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "registered isolation path is not the Workspace sibling",
-            ));
-        }
-        let active = open_optional_target(&parent, &target_path)?;
-        let isolated = open_optional_target(&parent, &isolated_path)?;
-        if isolated.is_some() && ownership.isolated_path.is_none() {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "unregistered isolated Workspace target exists",
-            ));
-        }
-        let selected = match (active, isolated) {
-            (Some(_), Some(_)) => {
-                return Err(PortError::new(
-                    PortErrorKind::InvalidLayout,
-                    "Workspace target exists at active and isolated paths",
-                ));
-            }
-            (Some(directory), None) | (None, Some(directory)) => {
-                if directory.identity != ownership.target {
-                    return Err(PortError::new(
-                        PortErrorKind::InvalidLayout,
-                        "registered Workspace target identity changed",
-                    ));
-                }
-                require_btrfs_mount(&directory, ownership.volume_id, ownership.mount_id)?;
-                Some(directory)
-            }
-            (None, None) => None,
-        };
-        parent.revalidate()?;
-        if read_workspace_ownership(&layout.metadata, reservation.workspace_id())? != ownership {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
                 "Workspace ownership proof changed during removal lookup",
@@ -540,7 +486,11 @@ impl LinuxHostAdapter {
         }
         if let Some(directory) = &selected {
             directory.revalidate()?;
-            require_btrfs_mount(directory, ownership.volume_id, ownership.mount_id)?;
+            require_btrfs_mount(
+                directory,
+                registered.ownership.volume_id,
+                registered.ownership.mount_id,
+            )?;
         }
         layout.revalidate()?;
         validate_data_root_lock(self, lock, layout)?;
@@ -564,6 +514,356 @@ impl LinuxHostAdapter {
         validate_data_root_lock(self, lock, layout)?;
         Ok(path)
     }
+
+    /// Removes only a Workspace whose registered target still exists at its
+    /// creation identity. Application must authorize this after its checks.
+    pub fn remove_workspace(
+        &self,
+        lock: &LinuxLockGuard,
+        layout: &LinuxDataRootLayout,
+        reservation: &WorkspaceReservation,
+    ) -> Result<WorkspaceRemoval, PortError> {
+        validate_data_root_lock(self, lock, layout)?;
+        layout.revalidate()?;
+        let mut registered = registered_target(layout, reservation)?;
+        let (target, at_isolated_path) = locate_target(&registered)?.ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::NotFound,
+                "registered Workspace target is missing",
+            )
+        })?;
+        // Keep an addressable, historically proven target until its independently
+        // registered staging and rollback siblings have been cleared.
+        for kind in ["staging", "trash"] {
+            remove_operation_directory(self, lock, layout, &registered, &target, kind)?;
+        }
+        let isolated = if at_isolated_path {
+            target
+        } else {
+            if registered.ownership.isolated_path.is_none() {
+                let mut desired = registered.ownership.clone();
+                desired.isolated_path = Some(absolute(&registered.isolated_path)?);
+                persist_workspace_ownership(layout, &desired)?;
+                registered.ownership = desired;
+            }
+            verify_selected_target(self, lock, layout, &registered, &target)?;
+            let target_name = registered.target_path.file_name().ok_or_else(|| {
+                PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "registered target has no name",
+                )
+            })?;
+            let isolated_name = registered.isolated_path.file_name().ok_or_else(|| {
+                PortError::new(PortErrorKind::InvalidLayout, "isolation path has no name")
+            })?;
+            rustix::fs::renameat_with(
+                &registered.parent.fd,
+                target_name,
+                &registered.parent.fd,
+                isolated_name,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(|error| io_error("isolate Workspace target without replacement", error))?;
+            sync_target_parent(&registered.parent)?;
+            let moved = open_target_directory(&registered.isolated_path)?;
+            if moved.identity != target.identity || moved.device != target.device {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "isolated Workspace target identity changed",
+                ));
+            }
+            moved
+        };
+        verify_selected_target(self, lock, layout, &registered, &isolated)?;
+        let verify_scope = || verify_selected_target(self, lock, layout, &registered, &isolated);
+        let root_entries = crate::destroy::remove_root_contents(
+            &isolated.fd,
+            isolated.file_identity(),
+            registered.ownership.mount_id,
+            &verify_scope,
+        )?;
+        verify_scope()?;
+        let isolated_name = registered.isolated_path.file_name().ok_or_else(|| {
+            PortError::new(PortErrorKind::InvalidLayout, "isolation path has no name")
+        })?;
+        rustix::fs::unlinkat(&registered.parent.fd, isolated_name, AtFlags::REMOVEDIR)
+            .map_err(|error| io_error("remove isolated Workspace root", error))?;
+        sync_target_parent(&registered.parent)?;
+        validate_data_root_lock(self, lock, layout)?;
+        registered.parent.revalidate()?;
+        require_btrfs_mount(
+            &registered.parent,
+            registered.ownership.volume_id,
+            registered.ownership.mount_id,
+        )?;
+        require_missing_child(&registered.parent, isolated_name)?;
+        let target_name = registered.target_path.file_name().ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::InvalidLayout,
+                "registered target has no name",
+            )
+        })?;
+        require_missing_child(&registered.parent, target_name)?;
+        if read_workspace_ownership(&layout.metadata, reservation.workspace_id())?
+            != registered.ownership
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace ownership proof changed after deletion",
+            ));
+        }
+        layout.revalidate()?;
+        Ok(WorkspaceRemoval::Removed { root_entries })
+    }
+}
+
+fn registered_target(
+    layout: &LinuxDataRootLayout,
+    reservation: &WorkspaceReservation,
+) -> Result<RegisteredTarget, PortError> {
+    let ownership = read_workspace_ownership(&layout.metadata, reservation.workspace_id())?;
+    if reservation.instance_id() != layout.instance_id
+        || ownership.instance_id != reservation.instance_id()
+        || ownership.target_path != *reservation.target_path()
+        || ownership.volume_id != reservation.target_volume_id()
+        || reservation.source_volume_id() != reservation.target_volume_id()
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace registration and ownership proof differ",
+        ));
+    }
+    let target_path = PathBuf::from(OsStr::from_bytes(reservation.target_path().as_bytes()));
+    let parent_path = target_path.parent().ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered target has no parent",
+        )
+    })?;
+    let parent = open_target_directory(parent_path)?;
+    if parent.identity != ownership.parent {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered Workspace parent identity changed",
+        ));
+    }
+    require_btrfs_mount(&parent, ownership.volume_id, ownership.mount_id)?;
+    let sibling_path =
+        |kind: &str| parent_path.join(format!(".thinws-{kind}-{}", reservation.workspace_id()));
+    if ownership.staging.path != absolute(&sibling_path("staging"))?
+        || ownership.trash.path != absolute(&sibling_path("trash"))?
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered Workspace operation paths changed",
+        ));
+    }
+    let isolated_path = sibling_path("remove");
+    if ownership
+        .isolated_path
+        .as_ref()
+        .is_some_and(|registered| registered.as_bytes() != isolated_path.as_os_str().as_bytes())
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered isolation path is not the Workspace sibling",
+        ));
+    }
+    Ok(RegisteredTarget {
+        parent,
+        target_path,
+        isolated_path,
+        ownership,
+    })
+}
+
+fn locate_target(
+    registered: &RegisteredTarget,
+) -> Result<Option<(TargetDirectory, bool)>, PortError> {
+    let active = open_optional_target(&registered.parent, &registered.target_path)?;
+    let isolated = open_optional_target(&registered.parent, &registered.isolated_path)?;
+    if isolated.is_some() && registered.ownership.isolated_path.is_none() {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "unregistered isolated Workspace target exists",
+        ));
+    }
+    let (directory, at_isolated_path) = match (active, isolated) {
+        (Some(_), Some(_)) => {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace target exists at active and isolated paths",
+            ));
+        }
+        (Some(directory), None) => (directory, false),
+        (None, Some(directory)) => (directory, true),
+        (None, None) => return Ok(None),
+    };
+    if directory.identity != registered.ownership.target {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered Workspace target identity changed",
+        ));
+    }
+    require_btrfs_mount(
+        &directory,
+        registered.ownership.volume_id,
+        registered.ownership.mount_id,
+    )?;
+    registered.parent.revalidate()?;
+    Ok(Some((directory, at_isolated_path)))
+}
+
+fn verify_selected_target(
+    adapter: &LinuxHostAdapter,
+    lock: &LinuxLockGuard,
+    layout: &LinuxDataRootLayout,
+    registered: &RegisteredTarget,
+    selected: &TargetDirectory,
+) -> Result<(), PortError> {
+    validate_data_root_lock(adapter, lock, layout)?;
+    layout.revalidate()?;
+    if read_workspace_ownership(&layout.metadata, registered.ownership.workspace_id)?
+        != registered.ownership
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership proof changed during deletion",
+        ));
+    }
+    let (current, _) = locate_target(registered)?.ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::NotFound,
+            "registered Workspace target is missing",
+        )
+    })?;
+    selected.revalidate()?;
+    if selected.path != current.path
+        || selected.identity != current.identity
+        || selected.device != current.device
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace deletion target changed",
+        ));
+    }
+    Ok(())
+}
+
+fn remove_operation_directory(
+    adapter: &LinuxHostAdapter,
+    lock: &LinuxLockGuard,
+    layout: &LinuxDataRootLayout,
+    registered: &RegisteredTarget,
+    target: &TargetDirectory,
+    kind: &str,
+) -> Result<(), PortError> {
+    let evidence = match kind {
+        "staging" => &registered.ownership.staging,
+        "trash" => &registered.ownership.trash,
+        _ => {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "unknown operation directory",
+            ));
+        }
+    };
+    let path = PathBuf::from(OsStr::from_bytes(evidence.path.as_bytes()));
+    let Some(directory) = open_optional_target(&registered.parent, &path)? else {
+        return Ok(());
+    };
+    if directory.identity != evidence.identity {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "registered Workspace operation directory identity changed",
+        ));
+    }
+    require_btrfs_mount(
+        &directory,
+        registered.ownership.volume_id,
+        registered.ownership.mount_id,
+    )?;
+    require_private_operation_directory(&directory)?;
+    let verify_scope = || {
+        verify_selected_target(adapter, lock, layout, registered, target)?;
+        directory.revalidate()?;
+        require_btrfs_mount(
+            &directory,
+            registered.ownership.volume_id,
+            registered.ownership.mount_id,
+        )?;
+        require_private_operation_directory(&directory)
+    };
+    crate::destroy::remove_root_contents(
+        &directory.fd,
+        directory.file_identity(),
+        registered.ownership.mount_id,
+        &verify_scope,
+    )?;
+    verify_scope()?;
+    let name = path.file_name().ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "operation directory has no name",
+        )
+    })?;
+    rustix::fs::unlinkat(&registered.parent.fd, name, AtFlags::REMOVEDIR)
+        .map_err(|error| io_error("remove Workspace operation directory", error))?;
+    sync_target_parent(&registered.parent)
+}
+
+fn persist_workspace_ownership(
+    layout: &LinuxDataRootLayout,
+    desired: &WorkspaceOwnership,
+) -> Result<(), PortError> {
+    let current = read_workspace_ownership(&layout.metadata, desired.workspace_id)?;
+    if current == *desired {
+        return Ok(());
+    }
+    let mut previous = desired.clone();
+    previous.isolated_path = None;
+    if current != previous {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership changed before isolation",
+        ));
+    }
+    let bytes = encode_workspace_ownership(desired).map_err(document_error)?;
+    let mut temporary =
+        PrivateTemp::create(&layout.metadata, "workspace-ownership-update", &bytes)?;
+    let name = ownership_name(desired.workspace_id);
+    if read_workspace_ownership(&layout.metadata, desired.workspace_id)? != current {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership changed before publication",
+        ));
+    }
+    temporary.exchange_with(&name)?;
+    if read_workspace_ownership(&layout.metadata, desired.workspace_id)? != *desired {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "isolated ownership publication changed",
+        ));
+    }
+    let old = read_private_document(&layout.metadata, temporary.name())?.ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "old ownership proof is missing",
+        )
+    })?;
+    if decode_workspace_ownership(&old).map_err(document_error)? != current {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "displaced ownership proof changed",
+        ));
+    }
+    rustix::fs::unlinkat(&layout.metadata.fd, temporary.name(), AtFlags::empty())
+        .map_err(|error| io_error("remove displaced ownership proof", error))?;
+    sync_directory(&layout.metadata.fd)
+}
+
+fn sync_target_parent(parent: &TargetDirectory) -> Result<(), PortError> {
+    rustix::fs::fsync(&parent.fd).map_err(|error| io_error("sync Workspace target parent", error))
 }
 
 fn open_optional_target(

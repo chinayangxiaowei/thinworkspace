@@ -485,7 +485,7 @@ impl PrivateTemp {
         ))
     }
 
-    fn exchange_with(&mut self, target: &str) -> Result<(), PortError> {
+    pub(crate) fn exchange_with(&mut self, target: &str) -> Result<(), PortError> {
         rustix::fs::renameat_with(
             &self.parent,
             self.name.as_str(),
@@ -499,6 +499,10 @@ impl PrivateTemp {
         // After the exchange, our temporary name refers to the old marker.
         self.active = false;
         sync_directory(&self.parent)
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 }
 

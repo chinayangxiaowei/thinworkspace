@@ -13,10 +13,16 @@ use thinws_core::{
     UnixMillis, WorkspaceId, WorkspaceName, WorkspaceReservation,
 };
 use thinws_ports::{
-    LifecycleLock, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
+    BootstrapStore, LifecycleLock, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
     PreparedWorkspaceEvidence, RemovalLogEvent, RemovalLogRecord, WorkspaceMaterializer,
     WorkspaceRemoval, WorkspaceSpace,
 };
+
+#[test]
+fn linux_host_implements_the_existing_bootstrap_port() {
+    fn require_bootstrap_store<T: BootstrapStore>() {}
+    require_bootstrap_store::<LinuxHostAdapter>();
+}
 
 fn absolute(path: &Path) -> AbsolutePath {
     AbsolutePath::try_from_bytes(path.as_os_str().as_encoded_bytes().to_vec()).unwrap()
@@ -95,6 +101,22 @@ fn reservation(
         false,
         UnixMillis::new(1_700_000_000_000).unwrap(),
     )
+}
+
+fn register_isolated_target(control: &Path, workspace_id: WorkspaceId, isolated: &Path) {
+    let ownership_path = control.join(format!("control/metadata/ownership-{workspace_id}.toml"));
+    let document = std::fs::read_to_string(&ownership_path).unwrap();
+    let path_hex = isolated
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::fs::write(
+        &ownership_path,
+        format!("{document}isolated_path_hex = \"{path_hex}\"\n"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -658,21 +680,7 @@ fn removal_lookup_accepts_only_the_durably_registered_isolated_target() {
     let isolated = target_fixture
         .path()
         .join(format!(".thinws-remove-{workspace_id}"));
-    let ownership_path = control
-        .path()
-        .join(format!("control/metadata/ownership-{workspace_id}.toml"));
-    let document = std::fs::read_to_string(&ownership_path).unwrap();
-    let path_hex = isolated
-        .as_os_str()
-        .as_encoded_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    std::fs::write(
-        &ownership_path,
-        format!("{document}isolated_path_hex = \"{path_hex}\"\n"),
-    )
-    .unwrap();
+    register_isolated_target(control.path(), workspace_id, &isolated);
     std::fs::rename(&target, &isolated).unwrap();
     assert_eq!(
         adapter
@@ -822,4 +830,218 @@ fn cleanup_log_refuses_a_link_without_writing_its_destination() {
     };
     assert!(adapter.append_removal_log(&lock, &layout, &record).is_err());
     assert_eq!(std::fs::read(&foreign).unwrap(), b"keep");
+}
+
+#[test]
+fn registered_btrfs_cleanup_removes_the_whole_copy_but_not_external_or_control_data() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    std::fs::create_dir(target.join(".git")).unwrap();
+    std::fs::write(target.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+    std::fs::write(target.join("changed"), b"copy").unwrap();
+    let external = target_fixture.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("keep"), b"outside").unwrap();
+    symlink(&external, target.join("escape")).unwrap();
+    for kind in ["staging", "trash"] {
+        std::fs::write(
+            target_fixture
+                .path()
+                .join(format!(".thinws-{kind}-{workspace_id}/partial")),
+            b"partial",
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap(),
+        WorkspaceRemoval::Removed { root_entries: 4 }
+    );
+    assert!(!target.exists());
+    for kind in ["staging", "trash", "remove"] {
+        assert!(
+            !target_fixture
+                .path()
+                .join(format!(".thinws-{kind}-{workspace_id}"))
+                .exists()
+        );
+    }
+    assert_eq!(std::fs::read(external.join("keep")).unwrap(), b"outside");
+    assert!(
+        control
+            .path()
+            .join(format!("control/metadata/ownership-{workspace_id}.toml"))
+            .exists()
+    );
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::NotFound
+    );
+}
+
+#[test]
+fn cleanup_rejects_a_missing_or_replaced_target_without_touching_foreign_content() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let displaced = target_fixture.path().join("displaced");
+    std::fs::rename(&target, &displaced).unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::NotFound
+    );
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("keep"), b"foreign").unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"foreign");
+    assert!(displaced.is_dir());
+}
+
+#[test]
+fn cleanup_resumes_only_a_registered_isolated_btrfs_target() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    std::fs::write(target.join("remaining"), b"copy").unwrap();
+    let isolated = target_fixture
+        .path()
+        .join(format!(".thinws-remove-{workspace_id}"));
+    register_isolated_target(control.path(), workspace_id, &isolated);
+    std::fs::rename(&target, &isolated).unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap(),
+        WorkspaceRemoval::Removed { root_entries: 1 }
+    );
+    assert!(!isolated.exists());
+    assert!(!target.exists());
+}
+
+#[test]
+fn cleanup_does_not_clear_operation_directories_if_an_isolated_collision_exists() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let staging = target_fixture
+        .path()
+        .join(format!(".thinws-staging-{workspace_id}"));
+    std::fs::write(staging.join("keep"), b"partial").unwrap();
+    let isolated = target_fixture
+        .path()
+        .join(format!(".thinws-remove-{workspace_id}"));
+    std::fs::create_dir(&isolated).unwrap();
+    std::fs::write(isolated.join("foreign"), b"outside").unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(std::fs::read(staging.join("keep")).unwrap(), b"partial");
+    assert_eq!(std::fs::read(isolated.join("foreign")).unwrap(), b"outside");
+    assert!(target.is_dir());
+}
+
+#[test]
+fn partial_cleanup_keeps_the_isolation_proof_until_an_explicit_retry() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    std::fs::write(target.join("a-file"), b"copy").unwrap();
+    let socket = UnixListener::bind(target.join("z-socket")).unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    let isolated = target_fixture
+        .path()
+        .join(format!(".thinws-remove-{workspace_id}"));
+    assert!(!target.exists());
+    assert!(isolated.join("z-socket").exists());
+    assert!(!isolated.join("a-file").exists());
+    let ownership = std::fs::read_to_string(
+        control
+            .path()
+            .join(format!("control/metadata/ownership-{workspace_id}.toml")),
+    )
+    .unwrap();
+    assert!(ownership.contains("isolated_path_hex = "));
+    drop(socket);
+    std::fs::remove_file(isolated.join("z-socket")).unwrap();
+    assert_eq!(
+        adapter
+            .remove_workspace(&lock, &layout, &registered)
+            .unwrap(),
+        WorkspaceRemoval::Removed { root_entries: 0 }
+    );
+    assert!(!isolated.exists());
 }

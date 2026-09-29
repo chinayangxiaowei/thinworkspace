@@ -70,3 +70,5 @@ P1-L05 Linux 长预算 fuzz 启动计划（2026-09-29 22:17 UTC）：冻结产�
 第二轮 Linux 长预算 fuzz 启动计划（2026-09-29 22:25 UTC）：冻结候选 `cecea25`，主 Agent 在同一 Debian/ext4＋Btrfs 环境执行，工具、8 目标×300 秒、单作业、Btrfs Cargo target/temp 与首轮一致；逐目标构建预检已全部通过。结果保留在本次命令会话输出，完成后将退出码、预算与是否有 crash/hang 写回本记录。预计已免去首次编译，首次主动查看约 23:10 UTC；首轮编译失败不作为完整运行的耗时基准。
 
 Linux Adapter 变异收口范围预核（2026-09-29）：在 Debian 对当前源码以 `cargo mutants --list --package thinws-adapter-linux --test-package thinws-adapter-linux --test-package thinws-application --test-package thinws-cli` 列举，恰为 1103 个候选；这只是完整 Adapter 包的待执行集合，不是通过结果。后续应使用真实 Btrfs 环境和这三个验证包执行包级收口，并与 Core/Application 等共享代码的变化范围分别核对；不把 macOS 专属 P0/Adapter 候选或全 workspace 的 4328 个静态列举混算为 Linux Adapter 的执行量。长预算 fuzz 尚在运行时不启动消耗同一 VM/Btrfs 构建资源的变异批次。
+
+Linux CLI 安全覆盖复核（2026-09-29）：现有 7 项 Debian Release CLI 用例已覆盖真实二进制隔离 HOME、普通 target 创建/查询/删除、Git 已跟踪修改、force 日志、缺失登记 target、NOCOW 失败及外部进程占用；但“新 target 嵌入活跃 Workspace target/其受控目录”的拒绝目前主要由 macOS 专属测试验证，尚无 Debian CLI 黑盒断言。当前 Linux 长预算 fuzz 不覆盖该路径状态机；待冻结批次终态后，须在真实 ext4 控制根＋Btrfs target 上补正式创建与 dry-run 的冲突回归，再对受影响判断补定向变异，不能以共享 macOS 测试冒充 Linux 平台验证。

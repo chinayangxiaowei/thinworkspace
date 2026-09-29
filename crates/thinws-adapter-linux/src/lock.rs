@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, StatxFlags};
 use thinws_core::{
-    AbsolutePath, HostCapabilityReport, MaterializationPathReport, PathCapabilityReport,
+    AbsolutePath, FileIdentity, HostCapabilityReport, MaterializationPathReport,
+    PathCapabilityReport,
 };
 use thinws_ports::{
     LifecycleLock, LifecycleLockGuard, LifecycleScope, MaterializationPathProbeRequest,
@@ -52,6 +53,11 @@ impl LinuxHostAdapter {
     pub fn control_root(&self) -> &Path {
         &self.control_root
     }
+
+    /// Creates or validates the fixed private bootstrap directory.
+    pub fn prepare_bootstrap(&self) -> Result<(), PortError> {
+        prepare_private_directory(&self.control_root).map(|_| ())
+    }
 }
 
 impl PlatformProbe for LinuxHostAdapter {
@@ -84,6 +90,12 @@ pub(crate) struct PrivateDirectory {
     pub(crate) fd: OwnedFd,
     path: PathBuf,
     identity: Identity,
+}
+
+impl PrivateDirectory {
+    pub(crate) const fn file_identity(&self) -> FileIdentity {
+        FileIdentity::new(self.identity.device, self.identity.inode)
+    }
 }
 
 /// Held Linux advisory lock; dropping it releases the kernel lock.
@@ -183,6 +195,13 @@ fn acquire(
 }
 
 pub(crate) fn open_private_directory(path: &Path) -> Result<PrivateDirectory, PortError> {
+    open_private_directory_optional(path)?
+        .ok_or_else(|| PortError::new(PortErrorKind::NotFound, "open private directory"))
+}
+
+pub(crate) fn open_private_directory_optional(
+    path: &Path,
+) -> Result<Option<PrivateDirectory>, PortError> {
     let absolute = AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec())
         .map_err(|error| io_error("validate private directory path", error))?;
     let mut fd = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())
@@ -191,34 +210,94 @@ pub(crate) fn open_private_directory(path: &Path) -> Result<PrivateDirectory, Po
         if component.is_empty() {
             continue;
         }
-        fd = rustix::fs::openat(
+        fd = match rustix::fs::openat(
             &fd,
             std::ffi::OsStr::from_bytes(component),
             DIRECTORY_FLAGS,
             Mode::empty(),
-        )
-        .map_err(|error| match error {
-            rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => PortError::new(
-                PortErrorKind::InvalidLayout,
-                "private directory contains a link or non-directory",
-            ),
-            _ => io_error("open private directory component", error),
-        })?;
+        ) {
+            Ok(next) => next,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(secure_directory_open_error(error)),
+        };
     }
     let stat =
         rustix::fs::fstat(&fd).map_err(|error| io_error("inspect private directory", error))?;
-    if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o077 != 0 {
+    if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o7777 != 0o700 {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
             "private directory owner or mode is invalid",
         ));
     }
     let identity = identity(&fd, stat.st_dev, stat.st_ino)?;
-    Ok(PrivateDirectory {
+    Ok(Some(PrivateDirectory {
         fd,
         path: path.to_path_buf(),
         identity,
-    })
+    }))
+}
+
+pub(crate) fn prepare_private_directory(path: &Path) -> Result<PrivateDirectory, PortError> {
+    let absolute =
+        AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).map_err(|error| {
+            PortError::new(
+                PortErrorKind::InvalidData,
+                "validate private directory path",
+            )
+            .with_source(error)
+        })?;
+    if absolute.as_bytes() == b"/" {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "filesystem root is not a private control directory",
+        ));
+    }
+    let mut parent = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())
+        .map_err(|error| io_error("open private directory root", error))?;
+    for component in absolute.as_bytes()[1..].split(|byte| *byte == b'/') {
+        let name = std::ffi::OsStr::from_bytes(component);
+        let child = match rustix::fs::openat(&parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                match rustix::fs::mkdirat(&parent, name, Mode::from_bits_retain(0o700)) {
+                    Ok(()) => {
+                        rustix::fs::fsync(&parent)
+                            .map_err(|error| io_error("sync created directory parent", error))?;
+                    }
+                    // Another initializer may have won the first-creation race.
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(io_error("create private directory", error)),
+                }
+                rustix::fs::openat(&parent, name, DIRECTORY_FLAGS, Mode::empty())
+                    .map_err(secure_directory_open_error)?
+            }
+            Err(error) => return Err(secure_directory_open_error(error)),
+        };
+        parent = child;
+    }
+    // Reopening the full no-follow path must still name the directory we held
+    // while traversing; a concurrent parent rename cannot authorize a peer.
+    let held_stat = rustix::fs::fstat(&parent)
+        .map_err(|error| io_error("inspect prepared private directory", error))?;
+    let held_identity = identity(&parent, held_stat.st_dev, held_stat.st_ino)?;
+    let current = open_private_directory(path)?;
+    if current.identity != held_identity {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "prepared private directory path changed",
+        ));
+    }
+    Ok(current)
+}
+
+fn secure_directory_open_error(error: rustix::io::Errno) -> PortError {
+    match error {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => PortError::new(
+            PortErrorKind::InvalidLayout,
+            "private directory contains a link or non-directory",
+        ),
+        _ => io_error("open private directory component", error),
+    }
 }
 
 pub(crate) fn revalidate_private_directory(directory: &PrivateDirectory) -> Result<(), PortError> {
@@ -297,4 +376,47 @@ fn io_error(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> PortError {
     PortError::new(PortErrorKind::Io, operation).with_source(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    use super::*;
+
+    #[test]
+    fn prepares_a_private_control_root_without_following_links() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs test mount");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-control-")
+            .tempdir_in(root)
+            .unwrap();
+        let control = fixture.path().join("nested/control");
+        let prepared = prepare_private_directory(&control).unwrap();
+        assert_eq!(
+            std::fs::metadata(&control).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        revalidate_private_directory(&prepared).unwrap();
+        assert_eq!(
+            prepare_private_directory(&control).unwrap().identity,
+            prepared.identity
+        );
+
+        let alias = fixture.path().join("alias");
+        symlink(fixture.path().join("nested"), &alias).unwrap();
+        assert_eq!(
+            prepare_private_directory(&alias.join("control"))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            prepare_private_directory(&control).unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
 }

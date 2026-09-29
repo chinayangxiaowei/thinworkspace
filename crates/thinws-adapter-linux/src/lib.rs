@@ -18,4 +18,13 @@ pub use probe::LinuxPlatformProbe;
 mod lock;
 
 #[cfg(target_os = "linux")]
+mod control;
+
+#[cfg(target_os = "linux")]
+mod document;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
+
+#[cfg(target_os = "linux")]
+pub use control::LinuxPreparedDataRoot;

@@ -554,9 +554,11 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "rustix",
+ "serde",
  "tempfile",
  "thinws-core",
  "thinws-ports",
+ "toml",
  "uuid",
 ]
 

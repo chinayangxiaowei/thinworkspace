@@ -401,7 +401,35 @@ fn tracked_git_changes_require_explicit_force_and_keep_the_cleanup_log() {
         ],
     );
     assert_eq!(status, 0, "{created}");
+    assert!(target.join(".git").is_dir());
+    let status_args = || {
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "status".into(),
+            "git-copy".into(),
+        ]
+    };
+    fs::write(target.join("untracked.txt"), b"new work").unwrap();
+    let (status, clean) = execute_json(&control, status_args());
+    assert_eq!(status, 0, "{clean}");
+    assert_eq!(clean["data"]["git"]["scan_complete"], true);
+    assert_eq!(clean["data"]["git"]["state"], "clean");
+    assert_eq!(
+        clean["data"]["git"]["repositories"][0]["tracked_changes"],
+        0
+    );
+    assert_eq!(clean["data"]["space"]["state"], "complete");
+    assert!(clean["data"]["space"]["logical_bytes"].as_u64().is_some());
     fs::write(target.join("tracked.txt"), b"modified").unwrap();
+    let (status, dirty) = execute_json(&control, status_args());
+    assert_eq!(status, 0, "{dirty}");
+    assert_eq!(dirty["data"]["git"]["state"], "dirty");
+    assert_eq!(
+        dirty["data"]["git"]["repositories"][0]["tracked_changes"],
+        1
+    );
     let remove_args = || {
         vec![
             "thinws".into(),
@@ -425,6 +453,38 @@ fn tracked_git_changes_require_explicit_force_and_keep_the_cleanup_log() {
     assert!(log.contains("\"event\":\"refused\""));
     assert!(log.contains("\"event\":\"started\""));
     assert!(log.contains("\"event\":\"completed\""));
+
+    let untracked_target = data_fixture.path().join("untracked-copy");
+    let (status, created) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            untracked_target.as_os_str().to_owned(),
+            "--name".into(),
+            "untracked-copy".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{created}");
+    fs::write(untracked_target.join("untracked.txt"), b"discardable").unwrap();
+    let (status, removed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "untracked-copy".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{removed}");
+    assert_eq!(removed["data"]["forced"], false);
+    assert!(!untracked_target.exists());
 }
 
 #[test]

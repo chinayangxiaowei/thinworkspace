@@ -50,7 +50,7 @@ trait PlatformProbe {
 - 对特定后端的 `supported | unsupported | unknown` 事实；
 - 无法得出结论的结构化原因。
 
-`inspect_materialization_paths` 接收实际原始 source 目录、用户指定的最终 target（不存在时为最近已存在 parent）、同卷临时 staging/trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称或单个路径推断。
+`inspect_materialization_paths` 接收实际原始 source 目录、用户指定的最终 target（不存在时为最近已存在 parent）、同卷临时 staging/trash 和候选后端，返回各路径报告、两两文件系统/Volume 关系、候选后端的 `supported | unsupported | unknown` 结论及证据。它是命令目录参数能否用于该底层实现的统一检测调用，不能只根据操作系统名称、系统调用是否存在、单个路径、文件系统类型相同或物理磁盘相同推断。Linux reflink 的具体条件见 §6.1。
 
 组合 Probe 在任一路径探测失败时，结构化 Port 错误必须标明失败的 `source | target root | staging | trash` 角色，不携带原始路径字节。Application 据此区分来源不可访问与目标不可访问；即使前一次单路径探测成功、两次探测间权限变化，也不能将来源失败误报为目标不可用。
 
@@ -153,6 +153,8 @@ AllowFullCopyOnCowUnsupported
 
 macOS 使用从 no-follow 打开的目录 FD 获得的 APFS Volume UUID，并与 `fstatfs` 结果一起形成 `FileSystemId`。APFS container ID 不等于 Volume ID。UUID 缺失或改变时结果是 unknown/布局错误，不得假定同卷。
 
+Linux 后续 Adapter 必须结合实际挂载关系与文件系统身份判断路径组合；`source` 和 `target` 同为 `btrfs` 或同为 `xfs`，甚至位于同一物理磁盘，均不足以证明可 reflink。文件系统身份或挂载边界无法确认时返回 `unknown`，不得凭名称推定 `supported`。
+
 ### 5.3 执行前重验
 
 Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializer 在任何写入前必须重新打开关键目录，并依据 Plan 中的身份和证据摘要核对：
@@ -171,7 +173,8 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 | 后端 | 一般底层能力 | 典型限制 |
 |---|---|---|
 | APFS File Clone | 不支持跨 Volume clone | 源和目标必须在同一 APFS Volume |
-| Btrfs/XFS reflink | 不支持跨文件系统 reflink | 需文件系统本身启用对应能力 |
+| Btrfs reflink | 不支持跨文件系统 reflink | 源与克隆落点须位于同一个 Btrfs 文件系统；文件属性和挂载关系还须满足 §6.1 |
+| XFS reflink | 不支持跨文件系统 reflink | 源与克隆落点须位于同一个启用 `reflink=1` 的 XFS 文件系统；还须满足 §6.1 |
 | OverlayFS | 不是通用跨文件系统克隆 | lower/upper/work/mount 需满足内核和文件系统组合要求 |
 | ReFS Block Clone | 不支持跨 ReFS Volume block clone | 卷格式和操作系统版本必须支持 |
 | Full Copy | 通常可以跨卷/跨文件系统 | 仍受权限、空间、路径安全和产品布局政策限制 |
@@ -187,6 +190,22 @@ Core 再依当前产品阶段和用户显式政策决定是否执行
 ```
 
 Phase 1 产品政策比 Full Copy 的底层能力更严：本次 source、最终 target 与同卷临时 staging/trash 必须位于同一 APFS Volume；固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 只允许该路径组合内把 CoW 不支持降级为 Full Copy，不是跨卷开关。source 与 target 不得互相包含。
+
+### 6.1 Linux reflink 候选后端的适用条件
+
+本节只定义后续 Linux Adapter 的候选能力判定，不改变 Phase 1 仅发布 macOS/APFS 的边界。Linux 提供 `FICLONE` 接口不代表所有文件系统或任意两条路径都支持块共享；普通复制成功、`cp --reflink=auto` 成功或 `copy_file_range` 成功，也不能当作 reflink 证据。`FICLONE` 要求源与目标文件位于同一文件系统；跨文件系统返回 `EXDEV`。[Linux `FICLONE` 手册](https://man7.org/linux/man-pages/man2/FICLONE.2const.html)
+
+两种后端共同要求源文件可读、克隆落点可写、相关挂载未只读、文件为可克隆的普通文件，且有足够空间写入新目录项和 CoW 元数据；目录/符号链接按 §3.4 处理，不因文件克隆能力而获得跨文件系统复制能力。路径级判断须覆盖实际 source、私有 staging、最终 target 和 trash，而非只检查两个根目录的名称。
+
+| 判定层 | Btrfs | XFS |
+|---|---|---|
+| 主机/卷能力 | 内核与已挂载的 Btrfs 文件系统须支持对普通文件执行 reflink；不以 Linux 版本或 `FICLONE` 常量存在单独判定。[Btrfs Reflink 文档](https://btrfs.readthedocs.io/en/latest/Reflink.html) | 内核须支持 XFS reflink，现有 XFS 卷须在格式化时启用 `reflink=1`，并使用 `crc=1`；不能通过挂载参数把已有 `reflink=0` 卷变为支持。以卷特性（例如 `xfs_info` 的 `reflink=1`）核验；DAX 模式与 reflink 不兼容。[XFS 格式化参数说明](https://manpages.debian.org/bullseye/xfsprogs/mkfs.xfs.8.en.html) |
+| 本次路径组合 | `source` 与实际克隆落点（私有 staging）须在同一个 Btrfs 文件系统；staging、最终 target 和 trash 的发布/摘取重命名也须处于允许的同文件系统布局。分别挂载的子卷不能仅凭相同文件系统 UUID 断言可用；Debian 5.10 等低于 5.18 的内核在跨两个挂载点 reflink 时会报跨设备错误 | `source` 与实际克隆落点须在同一个已启用 reflink 的 XFS 文件系统；staging、最终 target 和 trash 还须满足同文件系统的发布/摘取要求。两个不同的 XFS 卷即使类型相同也不可共享数据块 |
+| 文件级条件 | 源和目标普通文件的 NOCOW 与校验状态须兼容；例如源文件带 `+C` 而目标继承普通 CoW 属性时，不能仅凭目录路径合格就承诺该文件可 reflink | reflink 用于普通文件的数据区；目录和符号链接按 §3.4 各自物化，不以 reflink 处理。权限、只读挂载、不可变属性等仍可能使实际调用失败 |
+
+组合 Probe 的 `supported` 只表示本次路径组合及已知卷特性**预检合格**，不证明目录树内每个普通文件都可克隆，更不等于 `cow=confirmed`。若挂载/卷特性或逐文件属性尚无法核实，须保留 `unknown` 或在执行时按具体失败记录；已知为 ext4、Parallels 共享文件系统 `prl_fs`、XFS `reflink=0`，或源与目标位于不同文件系统时，对 Btrfs/XFS reflink 候选后端为 `unsupported`。只有各应克隆普通文件的真实 reflink 调用和最终树核验全部成功，才可按 §7.1 同一 CoW 证据规则记录 `confirmed`，不能静默改用 Full Copy。
+
+例如，在 Debian VM 中，`/media/psf/data/code` 若由 Parallels 以 `prl_fs` 挂载，即使把 target 放在 VM 内的 Btrfs/XFS 卷，仍是跨文件系统，不能从该共享目录直接 reflink。要验证 Linux 薄克隆，原始 source 与 target/staging 必须同处一个可用的 VM 内 Btrfs/XFS 文件系统；从共享目录先做一次普通复制只能建立新的 VM 内 source，不会让后续宿主机对共享目录的编辑自动同步到它。
 
 ---
 
@@ -228,8 +247,8 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | 平台后端 | 历史能力起点 | 额外条件 | 产品状态 |
 |---|---|---|---|
 | macOS APFS File Clone | macOS 10.13/APFS | 同一 APFS Volume | Phase 1 首发；实际发布以真实机资格矩阵为准 |
-| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE` | 同文件系统且项目位于 Btrfs | 后续阶段 Adapter |
-| Linux XFS reflink | Linux 4.9 开始引入 | XFS 创建时启用 `reflink=1` | 后续阶段 Adapter |
+| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE`；Btrfs 更早已有专用接口 | 源与克隆落点在同一个 Btrfs 文件系统；挂载及 NOCOW/校验约束见 §6.1 | 后续阶段 Adapter |
+| Linux XFS reflink | Linux 4.9 开始引入 | 源与克隆落点在同一个创建时启用 `reflink=1`、`crc=1` 的 XFS 文件系统；DAX 约束见 §6.1 | 后续阶段 Adapter |
 | Linux OverlayFS | Linux 3.18 进入主线 | 内核、挂载权限和上层文件系统组合合法 | 后续阶段 Adapter |
 | Windows Server ReFS Block Clone | Windows Server 2016 | 支持块克隆的 ReFS 卷格式 | 未排期 |
 | Windows 11 ReFS 优化复制 | Windows 11 24H2 | 支持的系统复制操作与 ReFS 卷 | 未排期 |
@@ -243,6 +262,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 本设计的实现至少需要以下证据，具体执行时机以《任务流程》为准：
 
 - 真实平台上的同卷成功与跨卷拒绝；
+- 后续 Linux Adapter 接入时，须覆盖 Btrfs/XFS 合格路径、ext4/`prl_fs`/XFS `reflink=0` 拒绝、同类型不同文件系统拒绝、Btrfs 文件属性不兼容和低于 5.18 内核跨挂载点场景；不得用 Full Copy 成功代替 reflink 成功；
 - supported/unsupported/unknown 三种 Probe 结果；
 - Probe 后路径、挂载点或 symlink 被替换的竞态；
 - 部分 clone、回滚成功/失败和重新规划；

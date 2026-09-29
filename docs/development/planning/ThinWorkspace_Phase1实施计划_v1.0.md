@@ -869,6 +869,8 @@ P1-L05 CLI 增量（2026-09-29）：CLI 以目标平台依赖装配本机 Adapte
 
 P1-L05 Linux 归属解析 fuzz 增量（2026-09-29）：为现有 `fuzz/` 增加按目标系统选择的纯内存归属文档 harness，Linux 使用版本 3 有效语料，macOS 仍使用既有版本 2 解析器；Linux 有效 seed 的普通解析回归通过。Debian 11.7、固定 `nightly-2026-08-14`、`cargo-fuzz 0.12.0`、AddressSanitizer、60 秒预算执行 Linux harness，完成 1,143,061 次、退出码 0、无 crash/hang。生成语料仅位于 Btrfs 临时目录，核对无 crash/timeout artifact 后删除；两个固定 seed 留在仓库。macOS 的全仓普通测试/严格 Clippy、两平台 fuzz harness 编译、Debian 产品包范围普通测试/严格 Clippy 均通过。本条仅为 Linux 归属解析的任务级 smoke 证据，不替代其他受影响解析器、定向变异、小阶段或阶段门禁。
 
+P1-L05 定向变异计划（2026-09-29）：候选冻结为本地 `main` 的 `eaf1063`，主 Agent 负责执行；Debian 11.7、`cargo-mutants 27.1.0`、真实 ext4/Btrfs 测试环境。先对本轮变更的 Linux `inspect_materialization_paths` 与 `combined_support` 精确枚举 17 个变异，验证包为 Linux Adapter 和 CLI；仅 1 job，输出 `/media/yxw/thinws/mutants-p1-l05-probe/`。Btrfs 测试盘原剩余约 1.6 GiB，已用 `cargo clean --release` 清理可重建的 685.4 MiB Release 构建缓存，为变异副本留空间；已通过的 Release 证据保留，但 VM 的 Release 二进制需重新构建才能再次使用。此为受影响函数的任务级补测，不是 Linux Adapter 或阶段全量变异；首次没有可比 Debian 同类耗时，按《任务流程》§18.4 启动后约 1 小时首次主动查看，不短轮询。
+
 ---
 
 ## 五、依赖摘要

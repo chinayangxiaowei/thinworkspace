@@ -189,7 +189,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 Core 再依当前产品阶段和用户显式政策决定是否执行
 ```
 
-Phase 1 产品政策比 Full Copy 的底层能力更严：本次 source、最终 target 与同卷临时 staging/trash 必须位于同一 APFS Volume；固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 只允许该路径组合内把 CoW 不支持降级为 Full Copy，不是跨卷开关。source 与 target 不得互相包含。
+Phase 1 产品政策比 Full Copy 的底层能力更严：macOS 首发要求本次 source、最终 target 与同卷临时 staging/trash 位于同一 APFS Volume；ADR-0007 准入的 Linux/Btrfs 扩展要求本次四类路径满足 §6.1 的同一 Btrfs 挂载布局。固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 不是跨卷开关；Linux 扩展当前不承诺跨文件系统 Full Copy，实际支持资格以用户手册为准。source 与 target 不得互相包含。
 
 ### 6.1 Linux reflink 候选后端的适用条件
 
@@ -247,7 +247,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | 平台后端 | 历史能力起点 | 额外条件 | 产品状态 |
 |---|---|---|---|
 | macOS APFS File Clone | macOS 10.13/APFS | 同一 APFS Volume | Phase 1 首发；实际发布以真实机资格矩阵为准 |
-| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE`；Btrfs 更早已有专用接口 | 源与克隆落点在同一个 Btrfs 文件系统；挂载及 NOCOW/校验约束见 §6.1 | 后续阶段 Adapter |
+| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE`；Btrfs 更早已有专用接口 | 源与克隆落点在同一个 Btrfs 文件系统；挂载及 NOCOW/校验约束见 §6.1 | Phase 1 扩展实施中；尚未完成 CLI 资格验收 |
 | Linux XFS reflink | Linux 4.9 开始引入 | 源与克隆落点在同一个创建时启用 `reflink=1`、`crc=1` 的 XFS 文件系统；DAX 约束见 §6.1 | 后续阶段 Adapter |
 | Linux OverlayFS | Linux 3.18 进入主线 | 内核、挂载权限和上层文件系统组合合法 | 后续阶段 Adapter |
 | Windows Server ReFS Block Clone | Windows Server 2016 | 支持块克隆的 ReFS 卷格式 | 未排期 |

@@ -30,6 +30,9 @@ mod layout;
 mod publication;
 
 #[cfg(target_os = "linux")]
+mod process;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]

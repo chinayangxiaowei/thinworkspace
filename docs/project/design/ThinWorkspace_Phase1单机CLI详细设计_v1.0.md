@@ -168,7 +168,7 @@ doctor 只读报告控制目录不一致及未完成状态，没有 `--repair`�
 
 ## 九、外部进程占用
 
-ProcessProbe 通过 macOS Adapter 报告当前用户可见进程对已验证 target 目录的 cwd/open-vnode 占用。进程身份不能只靠 PID；结果包含探测时间和完整性：
+ProcessProbe 通过平台 Adapter 报告当前用户可见进程对已验证 target 目录的 cwd/打开文件占用；macOS 使用 libproc，Linux 扩展使用 `/proc`。进程身份不能只靠 PID；结果包含探测时间和完整性：
 
 - `confirmed-in-use`：阻止删除，包括强制清理；
 - `no-evidence`：没有取得占用证据，不等于绝对无人使用；

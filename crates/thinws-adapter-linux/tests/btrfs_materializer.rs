@@ -7,6 +7,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use thinws_adapter_linux::{BtrfsReflinkMaterializer, LinuxPlatformProbe};
@@ -167,6 +168,34 @@ fn unsupported_socket_in_source_fails_without_touching_target() {
         RollbackStatus::NotNeeded
     );
     assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+}
+
+#[test]
+fn nocow_source_file_fails_closed_when_target_inherits_cow() {
+    let (_fixture, paths) = fixture("thinws-btrfs-nocow-");
+    let nocow = paths[0].join("nocow");
+    fs::create_dir(&nocow).unwrap();
+    let chattr = Command::new("chattr")
+        .arg("+C")
+        .arg(&nocow)
+        .status()
+        .expect("chattr must be installed for the Btrfs NOCOW test");
+    assert!(chattr.success(), "Btrfs test root must permit NOCOW");
+    fs::write(nocow.join("file"), b"NOCOW source bytes").unwrap();
+    let (request, plan) = request_and_plan(&paths);
+    let failure = BtrfsReflinkMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap_err();
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::CowUnavailable)
+    );
+    assert_eq!(
+        failure.receipt().rollback().status(),
+        RollbackStatus::ConfirmedBaseline
+    );
+    assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    assert_eq!(fs::read(nocow.join("file")).unwrap(), b"NOCOW source bytes");
 }
 
 #[test]

@@ -509,3 +509,174 @@ const fn state_byte(value: SupportState) -> u8 {
         SupportState::Unknown => 3,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(value: &str) -> AbsolutePath {
+        AbsolutePath::try_from_bytes(value.as_bytes().to_vec()).expect("valid test path")
+    }
+
+    fn known_volume() -> Evidence<VolumeId> {
+        Evidence::Known(
+            VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").expect("valid test UUID"),
+        )
+    }
+
+    fn report(
+        name: &str,
+        resolution: PathResolution,
+        mount_id: Option<u64>,
+        volume: Evidence<VolumeId>,
+    ) -> PathCapabilityReport {
+        let requested = path(&format!("/sample/{name}"));
+        let mut ancestry = vec![
+            DirectoryIdentityEvidence::new(path("/"), FileIdentity::new(1, 1)),
+            DirectoryIdentityEvidence::new(path("/sample"), FileIdentity::new(1, 2)),
+        ];
+        let (nearest, missing) = match resolution {
+            PathResolution::ExistingDirectory => {
+                let inode = match name {
+                    "source" => 3,
+                    "target" => 4,
+                    "staging" => 5,
+                    "trash" => 6,
+                    _ => panic!("unknown test path"),
+                };
+                ancestry.push(DirectoryIdentityEvidence::new(
+                    requested.clone(),
+                    FileIdentity::new(1, inode),
+                ));
+                (requested.clone(), Vec::new())
+            }
+            PathResolution::MissingTarget => (path("/sample"), vec![name.as_bytes().to_vec()]),
+        };
+        let mount = mount_id.map_or(MountEvidence::new(0, true), |id| {
+            MountEvidence::new(0, true).with_mount_id(id)
+        });
+        PathCapabilityReport::new(
+            requested,
+            resolution,
+            nearest,
+            missing,
+            ancestry,
+            FileSystemIdentity::new("btrfs", [1, 2], volume),
+            mount,
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .expect("consistent test report")
+    }
+
+    fn same_mount_reports() -> [PathCapabilityReport; 4] {
+        ["source", "target", "staging", "trash"].map(|name| {
+            report(
+                name,
+                PathResolution::ExistingDirectory,
+                Some(7),
+                known_volume(),
+            )
+        })
+    }
+
+    fn support(reports: &[PathCapabilityReport; 4]) -> (SupportState, Vec<String>) {
+        combined_support(&reports[0], &reports[1], &reports[2], &reports[3])
+    }
+
+    #[test]
+    fn same_btrfs_mount_and_volume_support_reflink() {
+        assert_eq!(
+            support(&same_mount_reports()),
+            (SupportState::Supported, vec![])
+        );
+    }
+
+    #[test]
+    fn absent_source_is_unsupported() {
+        let mut reports = same_mount_reports();
+        reports[0] = report(
+            "source",
+            PathResolution::MissingTarget,
+            Some(7),
+            known_volume(),
+        );
+        assert_eq!(
+            support(&reports),
+            (SupportState::Unsupported, vec!["source_missing".to_owned()])
+        );
+    }
+
+    #[test]
+    fn unknown_mount_identity_does_not_claim_support() {
+        let mut reports = same_mount_reports();
+        reports[1] = report(
+            "target",
+            PathResolution::ExistingDirectory,
+            None,
+            known_volume(),
+        );
+        assert_eq!(
+            support(&reports),
+            (SupportState::Unknown, vec!["mount_unknown".to_owned()])
+        );
+    }
+
+    #[test]
+    fn different_mount_is_unsupported_even_with_matching_volume() {
+        let mut reports = same_mount_reports();
+        reports[1] = report(
+            "target",
+            PathResolution::ExistingDirectory,
+            Some(8),
+            known_volume(),
+        );
+        assert_eq!(
+            support(&reports),
+            (
+                SupportState::Unsupported,
+                vec!["different_mount".to_owned()]
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_volume_identity_does_not_claim_support() {
+        let mut reports = same_mount_reports();
+        reports[1] = report(
+            "target",
+            PathResolution::ExistingDirectory,
+            Some(7),
+            Evidence::Unknown {
+                reason: "test unavailable".to_owned(),
+                errno: None,
+            },
+        );
+        assert_eq!(
+            support(&reports),
+            (SupportState::Unknown, vec!["volume_unknown".to_owned()])
+        );
+    }
+
+    #[test]
+    fn different_volume_is_unsupported_even_with_matching_mount() {
+        let mut reports = same_mount_reports();
+        reports[1] = report(
+            "target",
+            PathResolution::ExistingDirectory,
+            Some(7),
+            Evidence::Known(
+                VolumeId::from_str("550e8400-e29b-41d4-a716-446655440001")
+                    .expect("valid test UUID"),
+            ),
+        );
+        assert_eq!(
+            support(&reports),
+            (
+                SupportState::Unsupported,
+                vec!["different_volume".to_owned()]
+            )
+        );
+    }
+}

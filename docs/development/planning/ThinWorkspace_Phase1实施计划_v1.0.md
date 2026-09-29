@@ -871,6 +871,10 @@ P1-L05 Linux 归属解析 fuzz 增量（2026-09-29）：为现有 `fuzz/` 增加
 
 P1-L05 定向变异计划（2026-09-29）：候选冻结为本地 `main` 的 `eaf1063`，主 Agent 负责执行；Debian 11.7、`cargo-mutants 27.1.0`、真实 ext4/Btrfs 测试环境。先对本轮变更的 Linux `inspect_materialization_paths` 与 `combined_support` 精确枚举 17 个变异，验证包为 Linux Adapter 和 CLI；仅 1 job，输出 `/media/yxw/thinws/mutants-p1-l05-probe/`。Btrfs 测试盘原剩余约 1.6 GiB，已用 `cargo clean --release` 清理可重建的 685.4 MiB Release 构建缓存，为变异副本留空间；已通过的 Release 证据保留，但 VM 的 Release 二进制需重新构建才能再次使用。此为受影响函数的任务级补测，不是 Linux Adapter 或阶段全量变异；首次没有可比 Debian 同类耗时，按《任务流程》§18.4 启动后约 1 小时首次主动查看，不短轮询。
 
+P1-L05 定向变异结果（2026-09-29）：上述首次批次完整执行 84 秒，17 个变异中 7 个 caught、4 个 unviable、6 个 missed；未捕获项集中在 source 不存在、mount ID 缺失/不一致、Btrfs 卷身份缺失/不一致及 unknown 判定。随后在 Linux Probe 增加独立的路径证据组合单元测试；Debian 复测针对 `combined_support` 的 13 个有效变异用时 50 秒，13 个全部 caught（含首次 6 个 missed），结果在 `/media/yxw/thinws/mutants-p1-l05-probe-2/`。首次失败证据保留，不把该局部复测称为 Adapter 或阶段全量变异通过；下一次同类定向批次按约 1–2 分钟实际耗时加余量估计，不再机械等待 1 小时。
+
+P1-L03 Btrfs 文件属性增量（2026-09-29）：在真实 Btrfs 测试根通过 `chattr +C` 创建 NOCOW 来源文件，证实路径级 Probe 可预检合格但该普通文件的 `FICLONE` 在 Debian 5.10 上实际失败；物化返回 `CowUnavailable`、确认回滚至空 target，来源内容保持不变。此为实际文件属性失败边界，不扩展为全部内核或所有 NOCOW 组合的保证；对应集成测试依赖测试主机提供 `chattr` 且允许在专用 Btrfs 根设置 NOCOW。
+
 ---
 
 ## 五、依赖摘要

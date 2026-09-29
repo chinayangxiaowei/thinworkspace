@@ -746,11 +746,16 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("crate is beneath the workspace root")
-            .join("target")
+        let target_dir = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("crate is beneath the workspace root")
+                    .join("target")
+            });
+        let directory = target_dir
             .join("p0-07-git-query-timeout-fixtures")
             .join(format!("{}-{nanos}-{unique}", process::id()));
         fs::create_dir_all(&directory).expect("create retained timeout fixture");

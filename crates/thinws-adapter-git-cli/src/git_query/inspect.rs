@@ -177,23 +177,23 @@ impl CooperativeBudget {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Identity {
-    device: u64,
+    device: u128,
     inode: u64,
     mode: RawMode,
     size: i64,
     modified_seconds: i64,
-    modified_nanoseconds: i64,
+    modified_nanoseconds: i128,
 }
 
 impl Identity {
     fn from_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
-            device: stat.st_dev as u64,
+            device: stat.st_dev as u128,
             inode: stat.st_ino,
             mode: stat.st_mode,
             size: stat.st_size,
             modified_seconds: stat.st_mtime,
-            modified_nanoseconds: stat.st_mtime_nsec,
+            modified_nanoseconds: i128::from(stat.st_mtime_nsec),
         }
     }
 
@@ -677,9 +677,16 @@ fn parse_runtime_prefix(stdout: &[u8]) -> Result<PathBuf, InspectionIssue> {
         return Err(InspectionIssue::InvalidExecPath);
     }
     let exec_path = PathBuf::from(OsString::from_vec(path_bytes.to_vec()));
+    // Debian and macOS place Git helpers in different prefixes; unknown layouts
+    // remain unsupported until their system config sources are classified.
+    let expected_parent = if cfg!(target_os = "linux") {
+        OsStr::new("lib")
+    } else {
+        OsStr::new("libexec")
+    };
     if !exec_path.is_absolute()
         || exec_path.file_name() != Some(OsStr::new("git-core"))
-        || exec_path.parent().and_then(Path::file_name) != Some(OsStr::new("libexec"))
+        || exec_path.parent().and_then(Path::file_name) != Some(expected_parent)
     {
         return Err(InspectionIssue::InvalidExecPath);
     }
@@ -2068,11 +2075,16 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_nanos();
-            let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .expect("crate is beneath the workspace root")
-                .join("target")
+            let target_dir = env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .and_then(Path::parent)
+                        .expect("crate is beneath the workspace root")
+                        .join("target")
+                });
+            let base = target_dir
                 .join("p0-07-inspect-fixtures")
                 .join(format!("{label}-{}-{nanos}-{unique}", std::process::id()));
             let root = base.join("copy-root");
@@ -2151,6 +2163,9 @@ mod tests {
             .env_clear()
             .env(FIFO_PROBE_MODE, mode)
             .env(FIFO_PROBE_ROOT, root);
+        if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
+            command.env("CARGO_TARGET_DIR", target_dir);
+        }
         collect_command(
             command,
             Budget {
@@ -2181,12 +2196,16 @@ mod tests {
         let root = PathBuf::from(
             env::var_os(FIFO_PROBE_ROOT).expect("FIFO probe root accompanies probe mode"),
         );
-        let fixture_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("crate is beneath the workspace root")
-            .join("target")
-            .join("p0-07-inspect-fixtures");
+        let target_dir = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("crate is beneath the workspace root")
+                    .join("target")
+            });
+        let fixture_parent = target_dir.join("p0-07-inspect-fixtures");
         assert!(root.is_absolute(), "FIFO probe root must be absolute");
         assert!(
             root.starts_with(&fixture_parent),
@@ -4335,7 +4354,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_prefix_requires_the_frozen_libexec_git_core_suffix() {
+    fn runtime_prefix_requires_the_platform_git_core_suffix() {
         assert_eq!(
             parse_runtime_prefix(b"/Developer/usr/libexec/git-core\n")
                 .expect_err("nonexistent directory must not be trusted"),
@@ -4348,7 +4367,33 @@ mod tests {
         let real = super::run_bootstrap(Path::new("/"), GitQuery::ExecPath, Duration::from_secs(5))
             .expect("fixed real exec-path query");
         assert!(real.exit.success());
-        assert!(parse_runtime_prefix(&real.stdout).is_ok());
+        let prefix = parse_runtime_prefix(&real.stdout).expect("real platform Git exec path");
+        let platform_suffix = if cfg!(target_os = "linux") {
+            "lib/git-core"
+        } else {
+            "libexec/git-core"
+        };
+        assert_eq!(
+            prefix.join(platform_suffix).as_os_str().as_bytes(),
+            real.stdout.strip_suffix(b"\n").unwrap_or(&real.stdout)
+        );
+
+        let wrong_platform = Fixture::new("exec-path-other-platform");
+        let wrong_parent = if cfg!(target_os = "linux") {
+            "libexec"
+        } else {
+            "lib"
+        };
+        let wrong_platform_path = wrong_platform
+            .root
+            .join("prefix")
+            .join(wrong_parent)
+            .join("git-core");
+        fs::create_dir_all(&wrong_platform_path).expect("create other-platform exec path");
+        assert_eq!(
+            parse_runtime_prefix(wrong_platform_path.as_os_str().as_bytes()),
+            Err(InspectionIssue::InvalidExecPath)
+        );
 
         let newline = Fixture::new("exec-path-newline");
         let synthetic_exec_path = newline.root.join("prefix\nsegment/libexec/git-core");

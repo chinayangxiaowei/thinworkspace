@@ -23,10 +23,59 @@ class ReleaseFuzzTests(unittest.TestCase):
     def test_all_manifest_targets_are_selected_once(self) -> None:
         manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"
         targets = ci_release_fuzz.target_names(manifest)
-        self.assertEqual(len(targets), 10)
+        self.assertEqual(len(targets), 11)
         self.assertEqual(len(targets), len(set(targets)))
         self.assertIn("thinws_bootstrap_document", targets)
         self.assertIn("thinws_materialization_path", targets)
+        self.assertIn("thinws_platform_ownership_document", targets)
+
+    def test_platform_selection_does_not_count_macos_only_targets_on_linux(self) -> None:
+        manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"
+        all_targets = ci_release_fuzz.target_names(manifest)
+        macos_targets = ci_release_fuzz.eligible_target_names(manifest, "darwin")
+        linux_targets = ci_release_fuzz.eligible_target_names(manifest, "linux")
+        self.assertEqual(macos_targets, all_targets)
+        self.assertEqual(
+            set(all_targets) - set(linux_targets),
+            {
+                "thinws_probe_path_validation",
+                "thinws_materialize_layout_policy",
+                "thinws_bootstrap_document",
+            },
+        )
+        self.assertIn("thinws_platform_ownership_document", linux_targets)
+
+    def test_unknown_platform_or_manifest_target_is_rejected(self) -> None:
+        manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"
+        with self.assertRaisesRegex(ValueError, "unsupported fuzz platform"):
+            ci_release_fuzz.eligible_target_names(manifest, "win32")
+        with tempfile.TemporaryDirectory() as scratch:
+            invalid = Path(scratch) / "Cargo.toml"
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = ["missing"]\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown macOS-only fuzz target"):
+                ci_release_fuzz.eligible_target_names(invalid, "linux")
+
+    def test_missing_or_duplicate_platform_classification_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            invalid = Path(scratch) / "Cargo.toml"
+            invalid.write_text('[[bin]]\nname = "present"\n', encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "missing macOS-only fuzz target classification"
+            ):
+                ci_release_fuzz.eligible_target_names(invalid, "linux")
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = ["present", "present"]\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate macOS-only fuzz target"):
+                ci_release_fuzz.eligible_target_names(invalid, "linux")
 
     def test_duplicate_manifest_target_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -66,7 +115,7 @@ class ReleaseFuzzTests(unittest.TestCase):
             patch.dict(environ, {"THINWS_FUZZ_NIGHTLY": "nightly-test"}, clear=True),
             patch.object(
                 ci_release_fuzz,
-                "target_names",
+                "eligible_target_names",
                 return_value=["thinws_remove_request"],
             ),
             patch.object(ci_release_fuzz.subprocess, "run", side_effect=inspect_run),
@@ -79,7 +128,9 @@ class ReleaseFuzzTests(unittest.TestCase):
     def test_failure_stops_without_marking_later_targets_passed(self) -> None:
         with (
             patch.dict(environ, {"THINWS_FUZZ_NIGHTLY": "nightly-test"}, clear=True),
-            patch.object(ci_release_fuzz, "target_names", return_value=["first", "second"]),
+            patch.object(
+                ci_release_fuzz, "eligible_target_names", return_value=["first", "second"]
+            ),
             patch.object(
                 ci_release_fuzz.subprocess,
                 "run",
@@ -94,7 +145,7 @@ class ReleaseFuzzTests(unittest.TestCase):
     def test_process_timeout_stops_the_gate(self) -> None:
         with (
             patch.dict(environ, {"THINWS_FUZZ_NIGHTLY": "nightly-test"}, clear=True),
-            patch.object(ci_release_fuzz, "target_names", return_value=["first"]),
+            patch.object(ci_release_fuzz, "eligible_target_names", return_value=["first"]),
             patch.object(
                 ci_release_fuzz.subprocess,
                 "run",

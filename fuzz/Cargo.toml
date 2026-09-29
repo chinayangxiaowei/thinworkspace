@@ -8,6 +8,13 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
+[package.metadata.thinws]
+macos_only_fuzz_targets = [
+    "thinws_probe_path_validation",
+    "thinws_materialize_layout_policy",
+    "thinws_bootstrap_document",
+]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"

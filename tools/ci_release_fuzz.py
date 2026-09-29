@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every declared fuzz target with the Phase 1 release budget."""
+"""Run every declared target applicable to this host with the release budget."""
 
 from __future__ import annotations
 
@@ -23,6 +23,30 @@ def target_names(manifest_path: Path) -> list[str]:
     if not names or len(names) != len(set(names)):
         raise ValueError("missing or duplicate fuzz target in manifest")
     return names
+
+
+def eligible_target_names(manifest_path: Path, platform: str) -> list[str]:
+    if platform not in {"darwin", "linux"}:
+        raise ValueError(f"unsupported fuzz platform: {platform}")
+    names = target_names(manifest_path)
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    macos_only = (
+        manifest.get("package", {})
+        .get("metadata", {})
+        .get("thinws", {})
+        .get("macos_only_fuzz_targets")
+    )
+    if not isinstance(macos_only, list) or not all(
+        isinstance(name, str) for name in macos_only
+    ):
+        raise ValueError("missing macOS-only fuzz target classification")
+    if len(macos_only) != len(set(macos_only)):
+        raise ValueError("duplicate macOS-only fuzz target")
+    if unknown := set(macos_only) - set(names):
+        raise ValueError(f"unknown macOS-only fuzz target: {sorted(unknown)}")
+    if platform == "darwin":
+        return names
+    return [name for name in names if name not in macos_only]
 
 
 def fuzz_command(target: str, nightly: str, corpus: Path) -> list[str]:
@@ -67,8 +91,11 @@ def prepare_corpus(target: str, scratch: Path) -> Path:
 
 def main() -> int:
     nightly = os.environ["THINWS_FUZZ_NIGHTLY"]
-    targets = target_names(REPO_ROOT / "fuzz/Cargo.toml")
-    print(f"Running {len(targets)} fuzz targets with {BUDGET_SECONDS}s each", flush=True)
+    targets = eligible_target_names(REPO_ROOT / "fuzz/Cargo.toml", sys.platform)
+    print(
+        f"Running {len(targets)} applicable fuzz targets with {BUDGET_SECONDS}s each",
+        flush=True,
+    )
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a", encoding="utf-8") as output:
             output.write(

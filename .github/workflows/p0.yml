@@ -141,6 +141,8 @@ jobs:
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_remove_request -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Materialization path fuzz smoke
         run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_materialization_path -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
+      - name: Platform ownership document fuzz smoke
+        run: cargo +"$THINWS_FUZZ_NIGHTLY" fuzz run thinws_platform_ownership_document -- -max_total_time=60 -timeout=5 -max_len=4096 -print_final_stats=1
       - name: Detach experiment volume
         if: always() && steps.cross-volume.outcome == 'success'
         run: >-

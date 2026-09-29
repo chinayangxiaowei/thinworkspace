@@ -68,3 +68,5 @@ P1-L05 Linux 长预算 fuzz 启动计划（2026-09-29 22:17 UTC）：冻结产�
 首轮 Linux 长预算 fuzz 在首个 `thinws_git_status` 编译时即失败，退出码 1；原因是该 harness 使用的 P0 cleanup 纯策略/日志 crate 被 fuzz manifest 错误地限定为 macOS 依赖。没有任何目标完成 300 秒，不记录为阶段 fuzz 通过。已将此共享依赖移至普通依赖，并以工具单测固定 Linux 目标与依赖关系；Debian 使用同一固定 nightly、Btrfs 构建目录逐项预构建 8 个 Linux 适用目标，全部退出 0。随后本机 55 项工具测试、fuzz workspace fmt/严格 Clippy、`cargo deny` 通过（deny 仍有既有未命中例外警告）。这只是构建前置与修复验证，仍需重新完整运行长预算。
 
 第二轮 Linux 长预算 fuzz 启动计划（2026-09-29 22:25 UTC）：冻结候选 `cecea25`，主 Agent 在同一 Debian/ext4＋Btrfs 环境执行，工具、8 目标×300 秒、单作业、Btrfs Cargo target/temp 与首轮一致；逐目标构建预检已全部通过。结果保留在本次命令会话输出，完成后将退出码、预算与是否有 crash/hang 写回本记录。预计已免去首次编译，首次主动查看约 23:10 UTC；首轮编译失败不作为完整运行的耗时基准。
+
+Linux Adapter 变异收口范围预核（2026-09-29）：在 Debian 对当前源码以 `cargo mutants --list --package thinws-adapter-linux --test-package thinws-adapter-linux --test-package thinws-application --test-package thinws-cli` 列举，恰为 1103 个候选；这只是完整 Adapter 包的待执行集合，不是通过结果。后续应使用真实 Btrfs 环境和这三个验证包执行包级收口，并与 Core/Application 等共享代码的变化范围分别核对；不把 macOS 专属 P0/Adapter 候选或全 workspace 的 4328 个静态列举混算为 Linux Adapter 的执行量。长预算 fuzz 尚在运行时不启动消耗同一 VM/Btrfs 构建资源的变异批次。

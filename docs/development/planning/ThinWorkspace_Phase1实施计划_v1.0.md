@@ -891,6 +891,8 @@ P1-L05 Full Copy 错误映射定向变异计划（2026-09-29 21:14 UTC）：冻�
 
 P1-L05 Full Copy 错误映射结果与构建缓存复核（2026-09-29）：上述 1 个新分支变异用时 12 秒，结果 caught。macOS 全仓普通测试、fmt、严格 Clippy 通过。Debian 首次产品包全目标回归中，新 NOCOW CLI 测试仍拿到旧的 `E_FILESYSTEM`；单测曾拿到新结果。初步证据指向共享 `prl_fs` 源码路径下旧 Application/CLI 构建产物复用：清除 VM Btrfs 上这两个包的可重建 Cargo 缓存（约 795.8 MiB）并重新编译后，7 项 Linux CLI 黑盒用例串行全通过，随后产品包全目标普通测试与严格 Clippy 均通过；临时诊断输出已移除。这个缓存判断尚未独立复现并证明，不能把首次红灯写成通过；后续从 macOS 修改共享源码后，在 Debian 收口验证应明确观察受影响包实际重编译，必要时清理其可重建产物。此次 Linux 原样全 workspace 门禁仍受历史 macOS-only Adapter/P0 实验阻断，不以产品包结果冒称全仓通过。
 
+P1-L05 Release 回归及仓库级门禁边界（2026-09-29）：在最新本地 `98971f1` 上，于 Debian 11.7 从清除后的 Btrfs 构建缓存重新编译 `thinws-cli` Release（50.88 秒），`cargo test -p thinws-cli --release --test e2e_linux` 的 7 项真实 ext4 控制根＋Btrfs 生命周期黑盒用例全通过，包含 NOCOW 失败分类与两次强制清理。再次执行 Debian `cargo check --workspace --all-targets` 仍失败于历史 macOS-only Adapter/P0 实验（例如 Linux `libc` 无 macOS `attribute_set_t`、`O_SEARCH`、birthtime 字段，P0 共享测试支持文件类型不匹配），不是本轮产品包编译失败。要让该仓库级命令跨平台可用需对 Mac 专用实验/Adapter 包实施系统性条件编译与测试门禁修订；这超出 Linux CLI 装配的局部修复，当前不偷改全仓结构，也不把该门禁宣称通过。
+
 ---
 
 ## 五、依赖摘要

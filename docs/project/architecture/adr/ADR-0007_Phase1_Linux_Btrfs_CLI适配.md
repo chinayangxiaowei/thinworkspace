@@ -18,6 +18,7 @@
 2. Linux 也使用固定的 `~/.thinws` 控制目录，可位于经身份校验的 ext4 等非 Btrfs 本机文件系统；控制目录不参与 source/target reflink 同挂载判断。source、target parent、staging、trash 必须位于本次经证据确认可执行的同一 Btrfs 挂载布局。`prl_fs` 共享源码到 Btrfs target 的组合必须拒绝，而不是暗中完整复制。
 3. 保留现有七个 Port、状态机、强制清理授权和公开命令形状。Core/Application 不按操作系统分支；平台身份、文件系统特性、no-follow 访问、`FICLONE`、无覆盖发布和进程占用探测由 Linux Adapter 提供。不得复用 APFS UUID 或仅凭两个路径都是 Btrfs 推断同卷。
 4. Linux 的持久归属必须有可重验的文件系统与目录身份；身份不足、挂载变化、birthtime 缺失或控制目录布局无法证明时安全失败。任何持久格式更改须明确版本化，不静默读取或迁移不兼容数据。Linux 删除必须与 macOS 一样先确认登记 target 存在、身份匹配和占用边界；`--force` 不越过这些检查。
+   Linux 新建 Workspace 的归属文档使用独立的 `schema_version = 3`：沿用 ADR-0006 的实例、Workspace、Btrfs FSID、规范路径及父/目标/操作目录历史身份，并额外持久记录创建时 mount ID；重验要求 FSID、mount ID、inode 和 birthtime 均匹配。macOS 的既有版本 2 归属文档及两平台的版本 2 bootstrap 文档不变；Linux 不把 macOS 归属文档当作 Linux 可清理证明，也不隐式迁移。
 5. 平台资格顺序为：可移植 Core/持久模型 → Linux Host/Path Probe 与控制目录/锁 → Linux Btrfs 物化 → 删除、进程与空间边界 → CLI 装配及黑盒生命周期。只有真实 Btrfs、故障注入、CLI 契约和适用质量门禁通过后，用户手册才把 Linux 组合从“未实现”改为“候选已验收”；人工阶段放行仍另行决定。
 
 ## 备选方案与代价

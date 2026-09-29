@@ -39,6 +39,9 @@ mod tree;
 mod materializer;
 
 #[cfg(target_os = "linux")]
+mod workspace;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]
@@ -52,3 +55,6 @@ pub use publication::LinuxInitializingProof;
 
 #[cfg(target_os = "linux")]
 pub use materializer::BtrfsReflinkMaterializer;
+
+#[cfg(target_os = "linux")]
+pub use workspace::LinuxPreparedWorkspace;

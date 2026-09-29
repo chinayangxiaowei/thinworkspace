@@ -340,7 +340,7 @@ fn create_database_file(metadata: &PrivateDirectory) -> Result<File, PortError> 
     Ok(file)
 }
 
-fn validate_private_file(
+pub(crate) fn validate_private_file(
     parent: &PrivateDirectory,
     file: &File,
     name: &str,
@@ -377,13 +377,13 @@ fn validate_private_file(
     revalidate_private_directory(parent)
 }
 
-fn sync_directory(directory: &OwnedFd) -> Result<(), PortError> {
+pub(crate) fn sync_directory(directory: &OwnedFd) -> Result<(), PortError> {
     rustix::fs::fsync(directory).map_err(|error| {
         PortError::new(PortErrorKind::Io, "sync Linux control directory").with_source(error)
     })
 }
 
-struct PrivateTemp {
+pub(crate) struct PrivateTemp {
     parent: OwnedFd,
     name: String,
     file: Option<File>,
@@ -392,7 +392,11 @@ struct PrivateTemp {
 }
 
 impl PrivateTemp {
-    fn create(parent: &PrivateDirectory, prefix: &str, bytes: &[u8]) -> Result<Self, PortError> {
+    pub(crate) fn create(
+        parent: &PrivateDirectory,
+        prefix: &str,
+        bytes: &[u8],
+    ) -> Result<Self, PortError> {
         revalidate_private_directory(parent)?;
         let parent_fd = rustix::io::dup(&parent.fd).map_err(|error| {
             PortError::new(PortErrorKind::Io, "duplicate Linux control directory")
@@ -451,7 +455,10 @@ impl PrivateTemp {
         ))
     }
 
-    fn publish_noreplace(mut self, target: &str) -> Result<(File, (u64, u64)), PortError> {
+    pub(crate) fn publish_noreplace(
+        mut self,
+        target: &str,
+    ) -> Result<(File, (u64, u64)), PortError> {
         rustix::fs::renameat_with(
             &self.parent,
             self.name.as_str(),

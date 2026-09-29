@@ -94,6 +94,7 @@ fn actual_btrfs_paths_have_one_known_mount_and_a_btrfs_candidate() {
     assert_eq!(host.platform(), "Linux");
     assert_eq!(host.adapter(), "linux-btrfs");
     let report = probe.inspect_materialization_paths(&request).unwrap();
+    assert_eq!(report.source().writability(), SupportState::Supported);
     assert_eq!(report.cow_clone().kind(), MaterializerKind::BtrfsReflink);
     assert_ne!(report.cow_clone().state(), SupportState::Unsupported);
     let volume = report

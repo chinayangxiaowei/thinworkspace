@@ -160,8 +160,8 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         });
     let mount_kind = mount_id.and_then(|id| mountinfo::filesystem_type(id).ok().flatten());
     let fs_type = match mount_kind.as_deref() {
-        Some("btrfs") if statfs.f_type == libc::BTRFS_SUPER_MAGIC as _ => "btrfs",
-        Some("ext4") if statfs.f_type == libc::EXT4_SUPER_MAGIC as _ => "ext4",
+        Some("btrfs") if statfs.f_type as u64 == libc::BTRFS_SUPER_MAGIC as u64 => "btrfs",
+        Some("ext4") if statfs.f_type as u64 == libc::EXT4_SUPER_MAGIC as u64 => "ext4",
         Some("btrfs" | "ext4") => "unknown",
         Some(other) => other,
         None => "unknown",
@@ -208,16 +208,16 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     );
     let read = access_state(rustix::fs::accessat(
         &fd,
-        "",
+        ".",
         Access::READ_OK | Access::EXEC_OK,
-        AtFlags::EMPTY_PATH | AtFlags::EACCESS,
+        AtFlags::EACCESS,
     ));
     let write = if mount_writable {
         access_state(rustix::fs::accessat(
             &fd,
-            "",
+            ".",
             Access::WRITE_OK | Access::EXEC_OK,
-            AtFlags::EMPTY_PATH | AtFlags::EACCESS,
+            AtFlags::EACCESS,
         ))
     } else {
         SupportState::Unsupported

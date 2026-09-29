@@ -349,7 +349,9 @@ fn open_bound_directory(
     }
     let statfs = rustix::fs::fstatfs(&current)
         .map_err(|error| TreeFailure::io("inspect Btrfs filesystem type", error))?;
-    if statfs.f_type != libc::BTRFS_SUPER_MAGIC as _ || report.filesystem().type_name() != "btrfs" {
+    if statfs.f_type as u64 != libc::BTRFS_SUPER_MAGIC as u64
+        || report.filesystem().type_name() != "btrfs"
+    {
         return Err(stale_plan());
     }
     let fsid = btrfs_fsid(&current).map_err(|error| {

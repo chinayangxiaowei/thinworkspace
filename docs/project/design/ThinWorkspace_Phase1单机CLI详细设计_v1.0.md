@@ -83,7 +83,7 @@ SQLite 维护版本、活跃 Workspace、最终物化 Receipt 及最小删除 to
 - 只有确认登记 target 实际存在且归属可证、完成物理清理后，才能在同一事务删除活跃记录并写 tombstone；target 缺失不能收口；
 - 不在数据库事务中等待文件物化、Git 检查或子进程。
 
-新控制目录、SQLite schema/trigger、归属证据和唯一锁文件协议由 [ADR-0006](../architecture/adr/ADR-0006_Phase1用户控制目录与显式目标路径.md) 维护；ADR-0004 只描述旧候选，不迁移或兼容。本文只定义它们在生命周期中的职责与顺序。
+新控制目录、SQLite schema/trigger、归属证据和唯一锁文件协议由 [ADR-0006](../architecture/adr/ADR-0006_Phase1用户控制目录与显式目标路径.md) 维护；Linux 归属版本和挂载身份证明的差异由 [ADR-0007](../architecture/adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 决定。ADR-0004 只描述旧候选，不迁移或兼容。本文只定义它们在生命周期中的职责与顺序。
 
 源目录后续消失不影响已创建副本的普通使用或清理。没有文件系统和 SQLite 的跨系统事务；不提供中断操作重放。
 

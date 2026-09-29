@@ -856,6 +856,9 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
+P1-L02/L04 交界实施记录（2026-09-29）：Linux Adapter 已增量加入显式 Btrfs target 的创建时目录身份与版本 3 归属文档，归属仅存于 ext4 控制根；真实 Btrfs 测试覆盖普通空 target、预占 target/操作目录拒绝、ext4 target 拒绝及 target 被替换后的失效。路径 Probe 的可写目录检测从不可用的空路径 `accessat` 调整为持有目录 FD 下的 `.` 检查，真实 Btrfs 回归确认可写证据。此能力尚未接入完整 `BootstrapStore`、Application 或 CLI；Ready 查询、空间统计、安全删除与命令黑盒验收仍未完成，不调整任务 Done 状态。
+本次本地证据：Debian 11.7、ext4 控制测试根 `/home/yxw`、真实 Btrfs 测试根 `/media/yxw/thinws` 上，`cargo test -p thinws-adapter-linux --all-targets` 共 44 项通过；该包 `cargo clippy --all-targets --all-features -- -D warnings`、全仓 fmt、macOS 全仓普通测试与依赖方向检查通过。Linux `cargo check --workspace --all-targets` 仍因既有 macOS-only Adapter/P0 实验未条件编译而失败，CLI 尚不能在 Debian 构建；Linux VM 尚未安装 `cargo-mutants`，定向变异及本次归属解析 fuzz 未执行，故本记录不作为任务或小阶段放行。
+
 ---
 
 ## 五、依赖摘要

@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use rustix::fs::{AtFlags, Mode, OFlags};
-use thinws_core::{AbsolutePath, InstallationIdentity, VolumeId};
+use thinws_core::{AbsolutePath, InstallationIdentity, InstanceId, VolumeId};
 use thinws_ports::{DataRootLayoutEvidence, PortError, PortErrorKind};
 
 use crate::LinuxHostAdapter;
@@ -17,14 +17,15 @@ use crate::lock::{
 /// Descriptor-backed proof of the Linux control directory and SQLite file.
 #[derive(Debug)]
 pub struct LinuxDataRootLayout {
-    data_root: PrivateDirectory,
-    metadata: PrivateDirectory,
+    pub(crate) data_root: PrivateDirectory,
+    pub(crate) metadata: PrivateDirectory,
     logs: PrivateDirectory,
     database_file: File,
     database_identity: (u64, u64),
     database_path: AbsolutePath,
     volume_id: VolumeId,
     mount_id: u64,
+    pub(crate) instance_id: InstanceId,
 }
 
 impl DataRootLayoutEvidence for LinuxDataRootLayout {
@@ -108,6 +109,7 @@ impl LinuxHostAdapter {
             database_identity: (stat.st_dev, stat.st_ino),
             volume_id: identity.volume_id(),
             mount_id,
+            instance_id: identity.instance_id(),
         };
         layout.revalidate()?;
         Ok(layout)

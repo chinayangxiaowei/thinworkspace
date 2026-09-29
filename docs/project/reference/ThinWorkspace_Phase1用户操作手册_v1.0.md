@@ -135,7 +135,7 @@ Git setup:       not performed
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh --allow-copy
 ```
 
-Linux/Btrfs 当前没有 Full Copy 后端：`--allow-copy` 不会把不支持的来源、目标或失败的 `FICLONE` 变成可复制；同挂载 CoW 可用时仍执行 reflink。输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
+Linux/Btrfs 当前没有 Full Copy 后端：`--allow-copy` 不会把不支持的来源、目标或失败的 `FICLONE` 变成可复制；同挂载 CoW 可用时仍执行 reflink。若实际 reflink 失败且带 `--allow-copy`，返回 `E_CAPABILITY_UNAVAILABLE`（没有可用的 Full Copy 后端），不带该参数则返回 `E_COW_UNAVAILABLE`；已登记的非 Ready 工作区只按第九节显式清理。输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
 
 `--allow-copy` 不是跨卷开关；跨卷、卷身份变化、空间不足或普通 I/O 错误不触发复制降级。这里的“回滚”只指创建命令仍在运行时，核对并撤离本次已登记的目标副本项，尽力恢复创建前的目标位置；它不修改来源，也不撤销 Ready 工作区后续的用户改动。无法确认目标已恢复时保留 Error，不发布混合或不完整目录；已隔离对象可能仍留在目标父目录下的私有临时位置，不因此自动删除。进程中断后不自动续做或恢复，见第九节。
 已预留 Workspace 后的创建失败在错误 `context.workspace_id` 中标明受控对象；若物化已产生失败回执，还给出 `materialization_attempt_count`、`rollback_incomplete` 和 `unconfirmed_staging` 摘要。摘要不表示已自动清理，也不把 partial receipt 写成成功的 final receipt。

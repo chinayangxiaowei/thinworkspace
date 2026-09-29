@@ -965,6 +965,10 @@ fn map_plan_error(error: MaterializationPlanError) -> UseCaseError {
             ErrorCode::CowUnavailable,
             "CoW clone is unavailable and Full Copy was not authorized",
         ),
+        MaterializationPlanError::FullCopyUnavailable => semantic_error(
+            ErrorCode::CapabilityUnavailable,
+            "Full Copy is unavailable for this path combination",
+        ),
         MaterializationPlanError::UnknownVolume => semantic_error(
             ErrorCode::CapabilityUnavailable,
             "materialization volume identity is unknown",
@@ -1356,6 +1360,12 @@ mod tests {
                 .diagnostic()
                 .code(),
             ErrorCode::CowUnavailable
+        );
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::FullCopyUnavailable)
+                .diagnostic()
+                .code(),
+            ErrorCode::CapabilityUnavailable
         );
         assert_eq!(
             map_plan_error(MaterializationPlanError::UnknownVolume)

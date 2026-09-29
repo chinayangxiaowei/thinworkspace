@@ -881,6 +881,16 @@ P1-L05 创建编排首批结果及跨平台核验计划（2026-09-29）：上述
 
 P1-L05 创建编排 macOS 对照结果（2026-09-29）：完整执行 71 秒，同一 23 个变异为 17 caught、4 unviable、2 missed，输出位于上述 macOS 结果目录。共享的两个关键存活项是同名请求的 `allow_full_copy` 差异条件，以及已选择 CoW Adapter 与注入执行器种类不一致的保护。Linux 首批的另外 11 个 missed 由 macOS 专属 Application 测试捕获，但不据此宣称 Linux 各失败边界已获真实平台验证；针对共享两项先补 Linux Application 集成测试，再按影响范围定向复测。
 
+P1-L05 创建编排补测计划（2026-09-29 21:07 UTC）：候选为本地 `main` 的 `9430fba`，已在 Debian 实际 Btrfs 工作区新增“同名但复制政策不同不复用”和“Btrfs Plan 不接受 APFS 执行器”两项 Application 集成测试；主 Agent 使用相同 Debian/ext4＋Btrfs、`cargo-mutants 27.1.0`、1 job，仅重跑首次及 macOS 对照共同存活的 `create.rs:390:17`、`create.rs:583:36` 两个变异，Application＋CLI 测试包，输出 `/media/yxw/thinws/mutants-p1-l05-create-2/`。依前一完整批次 67 秒和本次目标数，首次查看约 1 分钟；其余首次 Linux missed 保留为平台覆盖缺口，不用此局部复测冒充全量完成。
+
+P1-L05 创建编排补测结果（2026-09-29）：上述两个共享关键存活变异在 Debian 14 秒定向复测中均 caught，未重跑第一次已 caught 的 6 项。macOS 对照已覆盖共享实现中其余 11 项，但 Linux 专项的失败路径仍按实际测试证据单独判断。新测试与既有 Linux 产品包全部目标测试、严格 Clippy，以及 macOS 全仓普通测试/严格 Clippy 均通过；新增的 Linux 内部测试依赖未引入外部包，`cargo deny check` 和离线 `cargo audit --no-fetch` 通过。
+
+P1-L02/L03 真实跨挂载与 CLI 失败路径补测（2026-09-29）：在 Debian VM 的同一 Btrfs 文件系统内临时 bind-mount 第二目录，分别实测相同 FSID、不同 mount ID，手动运行需 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT` 的专用 ignored 集成测试；Linux Probe 明确给 `different_mount` 与 unsupported。测试后卸载第二挂载并移除空临时目录。另一真实 NOCOW CLI 场景证明：带 `--allow-copy` 的 `FICLONE` 失败时没有 Full Copy 后端，应返回 `E_CAPABILITY_UNAVAILABLE`，原实现误映射为 `E_FILESYSTEM`；不带参数时仍返回 `E_COW_UNAVAILABLE`。已按 RED→GREEN 修正共享 Application 错误映射、更新用户手册，并验证两种失败后均保留非 Ready 登记、空目标和来源不变，显式 `remove --force` 可安全清理。此处仍需适用的变异复测和完整回归门禁，不能单凭专项测试宣布 L05 Done。
+
+P1-L05 Full Copy 错误映射定向变异计划（2026-09-29 21:14 UTC）：冻结候选为 `9430fba` 加本轮未提交的错误映射/测试/文档差异；主 Agent 在 Debian 11.7、真实 ext4/Btrfs 环境使用 `cargo-mutants 27.1.0`、1 job，只检验新加的 `create.rs:968:9` FullCopyUnavailable 匹配分支，运行 Application＋CLI 测试包，输出 `/media/yxw/thinws/mutants-p1-l05-fullcopy-error/`。前一两个变异批次 14 秒，本次首次查看估计约 1 分钟；不将这个单变异结果推广到其他错误映射或阶段全量。
+
+P1-L05 Full Copy 错误映射结果与构建缓存复核（2026-09-29）：上述 1 个新分支变异用时 12 秒，结果 caught。macOS 全仓普通测试、fmt、严格 Clippy 通过。Debian 首次产品包全目标回归中，新 NOCOW CLI 测试仍拿到旧的 `E_FILESYSTEM`；单测曾拿到新结果。初步证据指向共享 `prl_fs` 源码路径下旧 Application/CLI 构建产物复用：清除 VM Btrfs 上这两个包的可重建 Cargo 缓存（约 795.8 MiB）并重新编译后，7 项 Linux CLI 黑盒用例串行全通过，随后产品包全目标普通测试与严格 Clippy 均通过；临时诊断输出已移除。这个缓存判断尚未独立复现并证明，不能把首次红灯写成通过；后续从 macOS 修改共享源码后，在 Debian 收口验证应明确观察受影响包实际重编译，必要时清理其可重建产物。此次 Linux 原样全 workspace 门禁仍受历史 macOS-only Adapter/P0 实验阻断，不以产品包结果冒称全仓通过。
+
 ---
 
 ## 五、依赖摘要

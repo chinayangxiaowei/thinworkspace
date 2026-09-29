@@ -116,3 +116,49 @@ fn actual_btrfs_paths_have_one_known_mount_and_a_btrfs_candidate() {
     let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     assert_eq!(plan.selected_adapter(), MaterializerKind::BtrfsReflink);
 }
+
+#[test]
+#[ignore = "requires THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT on a distinct mount of the same Btrfs filesystem"]
+fn same_btrfs_filesystem_on_a_different_mount_is_rejected() {
+    let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+        .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the primary Btrfs mount");
+    let second = env::var_os("THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT")
+        .expect("set THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT to a distinct Btrfs mount");
+    let source_fixture = tempfile::Builder::new()
+        .prefix("thinws-linux-primary-mount-")
+        .tempdir_in(root)
+        .unwrap();
+    let target_fixture = tempfile::Builder::new()
+        .prefix("thinws-linux-second-mount-")
+        .tempdir_in(second)
+        .unwrap();
+    let source = source_fixture.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let request = MaterializationPathProbeRequest::new(
+        absolute(&source),
+        absolute(&target_fixture.path().join("target")),
+        absolute(&target_fixture.path().join("staging")),
+        absolute(&target_fixture.path().join("trash")),
+    );
+    let report = LinuxPlatformProbe
+        .inspect_materialization_paths(&request)
+        .unwrap();
+    assert_eq!(report.source().filesystem().type_name(), "btrfs");
+    assert_eq!(report.target_root().filesystem().type_name(), "btrfs");
+    assert_eq!(
+        report.source().filesystem().volume_id().known(),
+        report.target_root().filesystem().volume_id().known()
+    );
+    assert_ne!(
+        report.source().mount().mount_id(),
+        report.target_root().mount().mount_id()
+    );
+    assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
+    assert!(
+        report
+            .cow_clone()
+            .reasons()
+            .iter()
+            .any(|reason| reason == "different_mount")
+    );
+}

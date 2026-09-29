@@ -207,6 +207,126 @@ fn shared_source_never_falls_back_to_full_copy_on_linux() {
 }
 
 #[test]
+fn runtime_nocow_failures_keep_policy_and_cleanup_boundaries() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
+    let control_fixture = Builder::new()
+        .prefix("thinws-cli-linux-control-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let data_fixture = Builder::new()
+        .prefix("thinws-cli-linux-nocow-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let control = control_fixture.path().join(".thinws");
+    let source = data_fixture.path().join("source");
+    let target = data_fixture.path().join("copy");
+    fs::create_dir(&source).unwrap();
+    let chattr = Command::new("chattr")
+        .arg("+C")
+        .arg(&source)
+        .status()
+        .expect("chattr must be installed for the Btrfs NOCOW test");
+    assert!(chattr.success(), "Btrfs test root must permit NOCOW");
+    fs::write(source.join("file"), b"NOCOW source bytes").unwrap();
+    assert_eq!(
+        execute_json(
+            &control,
+            vec!["thinws".into(), "--json".into(), "init".into()]
+        )
+        .0,
+        0
+    );
+    let (status, rejected) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
+            "--name".into(),
+            "nocow-copy".into(),
+            "--allow-copy".into(),
+        ],
+    );
+    assert_eq!(status, 11, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "E_CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        rejected["error"]["message"],
+        "Full Copy is unavailable for this path combination"
+    );
+    assert!(target.is_dir());
+    assert!(fs::read_dir(&target).unwrap().next().is_none());
+    assert_eq!(
+        fs::read(source.join("file")).unwrap(),
+        b"NOCOW source bytes"
+    );
+
+    let other_target = data_fixture.path().join("copy-without-fallback");
+    let (status, denied) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            other_target.as_os_str().to_owned(),
+            "--name".into(),
+            "nocow-without-copy".into(),
+        ],
+    );
+    assert_eq!(status, 12, "{denied}");
+    assert_eq!(denied["error"]["code"], "E_COW_UNAVAILABLE");
+    assert!(other_target.is_dir());
+    assert!(fs::read_dir(&other_target).unwrap().next().is_none());
+
+    let (status, listed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{listed}");
+    assert_eq!(listed["data"]["workspaces"].as_array().unwrap().len(), 2);
+    let (status, removed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "nocow-copy".into(),
+            "--force".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{removed}");
+    assert!(!target.exists());
+    let (status, removed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "nocow-without-copy".into(),
+            "--force".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{removed}");
+    assert!(!other_target.exists());
+}
+
+#[test]
 fn tracked_git_changes_require_explicit_force_and_keep_the_cleanup_log() {
     let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
     let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();

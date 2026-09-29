@@ -2,6 +2,10 @@
 
 面向多 Agent 并行开发的低额外磁盘占用隔离工作区。
 
+<p align="center">
+  <img src="docs/project/reference/assets/thinws-space-saving-illustration-v2.png" alt="ThinWorkspace 空间占用宣传插图" width="420">
+</p>
+
 ## 职责
 
 本文件作为仓库入口，维护项目名称，并指向 Agent 规则、文档索引和当前实施计划。

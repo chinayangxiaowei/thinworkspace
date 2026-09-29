@@ -842,6 +842,22 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 ---
 
+### 4.8 Linux/Btrfs CLI 扩展（ADR-0007）
+
+本扩展由维护者要求在 Debian VM 与显式指定的真实 Btrfs 测试根上推进；当前仍是实施中，不改变 macOS 候选的既有 Done/放行事实。实验 `FICLONE` 和文件对预检已通过，但不构成以下产品任务的 Done 证据。每项任务以对应设计文档的完整契约为准，不在此复制系统调用或测试矩阵。
+
+| 任务 | 可验收结果 | 前置 | 风险 | 状态 |
+|---|---|---|---|---|
+| P1-L01 通用物化身份与持久编解码 | Core/Port 不再把唯一 CoW 候选写死为 APFS；旧 macOS 记录和测试保持可读 | ADR-0007 | R3 | In Progress |
+| P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | Todo |
+| P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | Todo |
+| P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | Todo |
+| P1-L05 CLI 装配与真实机验收 | Debian `thinws` 全命令可编译并完成 Btrfs 黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | Todo |
+
+此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`，缺失时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
+
+---
+
 ## 五、依赖摘要
 
 长链只表达技术依赖，不代替 §3.1 的串行执行顺序。

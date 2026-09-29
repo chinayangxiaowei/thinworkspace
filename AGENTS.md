@@ -50,6 +50,7 @@
 | Phase 1 数据布局、只读 Git 检查、状态机和失败边界 | [Phase 1 单机 CLI 详细设计](docs/project/design/ThinWorkspace_Phase1单机CLI详细设计_v1.0.md) | 决定 Phase 1 内部组件如何协作 |
 | Phase 1 控制目录、显式 target、持久归属和删除存在性 | [ADR-0006](docs/project/architecture/adr/ADR-0006_Phase1用户控制目录与显式目标路径.md) | 决定新布局与旧版不兼容的边界；ADR-0004 仅为历史材料 |
 | Phase 1 GC 范围 | [ADR-0005](docs/project/architecture/adr/ADR-0005_Phase1暂不实现GC.md) | 决定首版不发布 GC；保留当前空间统计与显式 Workspace 清理 |
+| Linux/Btrfs CLI 扩展边界 | [ADR-0007](docs/project/architecture/adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) | 决定 Linux 接入顺序、控制目录与真实资格验证；不表示当前 CLI 已支持 Linux |
 | 工作区物化、能力检测、跨卷和 Adapter 语义 | [跨平台工作区物化设计](docs/project/design/ThinWorkspace_跨平台工作区物化设计_v1.0.md) | 决定 Probe/Plan/Receipt 和平台实现契约 |
 | Rust、crate、Adapter、依赖和测试工具 | [技术栈](docs/project/reference/技术栈.md) | 决定使用什么技术以及依赖边界 |
 | 编码、安全、状态机、测试和评审规则 | [开发规范](docs/development/process/开发规范.md) | 决定代码必须如何实现和验证 |
@@ -111,6 +112,7 @@
 | Workspace 创建、删除、未完成状态或空间统计 | Phase 1 详细设计的状态机、查询、未完成状态与空间统计章节；开发规范相关章节 |
 | init、`~/.thinws` 控制目录、SQLite schema、归属证据或 lifecycle lock | Phase 1 详细设计的实例、持久化与并发章节；ADR-0006；技术栈的 SQLite 与本机锁章节 |
 | APFS、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的 macOS/APFS 选型章节 |
+| Linux/Btrfs 适配、`FICLONE` 或 Linux CLI 装配 | ADR-0007；跨平台物化设计 §3、§5、§6.1、§9；技术栈的 Adapter 与测试章节 |
 | Git、子仓库、branch、worktree 或旧 Base 路线 | Phase 1 详细设计的只读 Git 检查章节、ADR-0002；技术栈和开发规范相关章节；交付追加任务流程 §13.1 |
 | 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/失败边界章节；开发规范 §13；任务流程 §13.1 |
 | 内部子进程、超时或外部进程占用检查 | Phase 1 详细设计的外部进程占用章节；用户手册的删除契约；技术栈和开发规范相关章节 |

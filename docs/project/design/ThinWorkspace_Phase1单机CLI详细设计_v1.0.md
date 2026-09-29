@@ -10,6 +10,8 @@
 
 本次简化依据 [ADR-0002](../architecture/adr/ADR-0002_Phase1原始目录镜像与流程交付.md)。不再维护 Repository、Base、托管分支或 Git 导入生命周期。
 
+下文明确写作 macOS、APFS、Volume UUID 或 libproc 的实现条件仅约束现有 macOS Adapter；[ADR-0007](../architecture/adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md)准入的 Linux/Btrfs Adapter 必须提供同等的状态、归属和失败保护，但不得将 APFS 身份或 API 套用于 Linux。Linux 支持资格尚未完成，公开状态仍以用户手册为准。
+
 ## 二、部署与分层
 
 Phase 1 是同步、按需运行的本机 CLI，没有 daemon、网络服务或 LLM 调用。

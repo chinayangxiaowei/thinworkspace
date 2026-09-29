@@ -1,6 +1,6 @@
 # ThinWorkspace：跨平台工作区物化设计
 
-**版本：v1.0｜文档性质：详细设计｜首发实现：macOS APFS**
+**版本：v1.0｜文档性质：详细设计｜当前已实现候选：macOS APFS；Linux/Btrfs 扩展准入见 ADR-0007**
 
 ## 一、文档职责
 
@@ -193,7 +193,7 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：本次 source、最终
 
 ### 6.1 Linux reflink 候选后端的适用条件
 
-本节只定义后续 Linux Adapter 的候选能力判定，不改变 Phase 1 仅发布 macOS/APFS 的边界。Linux 提供 `FICLONE` 接口不代表所有文件系统或任意两条路径都支持块共享；普通复制成功、`cp --reflink=auto` 成功或 `copy_file_range` 成功，也不能当作 reflink 证据。`FICLONE` 要求源与目标文件位于同一文件系统；跨文件系统返回 `EXDEV`。[Linux `FICLONE` 手册](https://man7.org/linux/man-pages/man2/FICLONE.2const.html)
+本节定义 Linux Adapter 的候选能力判定；[ADR-0007](../architecture/adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md)已将 Btrfs CLI 适配纳入 Phase 1 扩展，但当前支持矩阵仍以用户手册为准，底层实验不等于产品放行。Linux 提供 `FICLONE` 接口不代表所有文件系统或任意两条路径都支持块共享；普通复制成功、`cp --reflink=auto` 成功或 `copy_file_range` 成功，也不能当作 reflink 证据。`FICLONE` 要求源与目标文件位于同一文件系统；跨文件系统返回 `EXDEV`。[Linux `FICLONE` 手册](https://man7.org/linux/man-pages/man2/FICLONE.2const.html)
 
 两种后端共同要求源文件可读、克隆落点可写、相关挂载未只读、文件为可克隆的普通文件，且有足够空间写入新目录项和 CoW 元数据；目录/符号链接按 §3.4 处理，不因文件克隆能力而获得跨文件系统复制能力。路径级判断须覆盖实际 source、私有 staging、最终 target 和 trash，而非只检查两个根目录的名称。
 

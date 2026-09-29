@@ -30,6 +30,7 @@
 - [ADR-0004：旧 Phase 1 持久化 Schema 与双 Scope 锁](project/architecture/adr/ADR-0004_Phase1持久化Schema与双Scope锁.md)：已由 ADR-0006 取代，仅供追溯。
 - [ADR-0005：Phase 1 暂不实现 GC](project/architecture/adr/ADR-0005_Phase1暂不实现GC.md)
 - [ADR-0006：Phase 1 用户控制目录与显式目标路径](project/architecture/adr/ADR-0006_Phase1用户控制目录与显式目标路径.md)
+- [ADR-0007：Phase 1 Linux/Btrfs CLI 适配](project/architecture/adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md)
 - `project/architecture/adr/`：已接受的架构决策记录；草案和审核过程不放在这里。
 
 ### 设计

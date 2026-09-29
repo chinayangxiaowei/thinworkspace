@@ -157,7 +157,7 @@ Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCode
 
 ### 5.2 Phase 1 决策
 
-Phase 1 只发布 macOS 单机 Adapter：
+Phase 1 当前 macOS 候选按下列规则实现；Linux/Btrfs CLI 扩展已按 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 准入开发，但尚未完成产品资格验证，不因底层实验通过而列为受支持平台：
 
 - APFS File Clone 是主物化后端；
 - 配置、SQLite、锁、日志和归属证据位于固定用户控制目录 `~/.thinws`；用户为每个 Workspace 指定最终 target，控制目录与 target 不要求同卷；
@@ -167,7 +167,7 @@ Phase 1 只发布 macOS 单机 Adapter：
 
 当前发布资格组合由 Phase 1 用户操作手册公开；macOS 10.13/APFS 之类底层历史能力起点不等于产品支持。新增 CPU、系统或 Git 组合前必须补真实平台门禁并更新该公开契约。
 
-Linux Btrfs/XFS/OverlayFS 和 Windows ReFS 的历史起点、跨卷限制与接入条件由《跨平台工作区物化设计》统一管理，不在本路线图重复表格。
+Linux Btrfs/XFS/OverlayFS 和 Windows ReFS 的历史起点、跨卷限制与接入条件由《跨平台工作区物化设计》统一管理，不在本路线图重复表格。当前只有 Btrfs 被纳入 Phase 1 扩展实施；其他 Linux 后端未获准进入本次实现。
 
 ---
 
@@ -430,6 +430,8 @@ Node Runtime 继续使用相同的 Platform Adapters。控制面只消费统一�
 | Phase 5 规模化 | 按需求组合，不作为统一大版本 | 高可用、扩缩、多租户、审计、Windows、高级冲突或 Agent 编排中的必要子集 | 不因“平台化”一次性引入全部能力；LLM 不作为唯一合并或正确性判据 | 指标证明对应瓶颈或业务需求存在；单独立项和安全评审 | 每个子能力使用独立 SLO、容量、恢复和安全验收，不共享模糊的“Phase 5 完成”标准 |
 
 跨阶段控制规则：
+
+Phase 1 表中的 macOS/APFS 退出控制点是原有首发基线；Linux/Btrfs 是 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 的独立平台资格扩展，不因本表的 macOS 验收自动放行，也不把未完成 Linux 候选计为已支持。
 
 1. 正式发布后的对象身份与 CLI 语义变更必须另行版本化决策。ADR-0006 是尚未正式发布的 Phase 1 技术候选的明确破坏性重订，不迁移或兼容旧 data root，且不得自动删除旧数据。
 2. Phase 1 代码中不得出现 Job、Node、Placement、远程租约等未来领域概念；只允许存在不依赖这些概念的窄 Port。

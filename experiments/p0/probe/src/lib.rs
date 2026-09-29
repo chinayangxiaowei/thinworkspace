@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Repeatable, read-only macOS host and path evidence for the P0-01 experiment.
 //!
 //! This crate reports preflight observations only. It neither materializes data

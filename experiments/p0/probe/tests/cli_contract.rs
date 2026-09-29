@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Experimental CLI commands stay read-only and handle output errors without panicking.
 
 use std::fs;

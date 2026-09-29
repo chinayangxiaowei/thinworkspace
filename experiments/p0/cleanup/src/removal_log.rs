@@ -292,12 +292,18 @@ mod tests {
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn retained_fixture() -> PathBuf {
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        #[cfg(target_os = "linux")]
+        let fixture_parent = PathBuf::from(
+            std::env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+                .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable local Btrfs test root"),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let fixture_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(3)
             .expect("cleanup crate is nested below the repository root")
-            .to_path_buf();
-        let path = repository.join("target").join(format!(
+            .join("target");
+        let path = fixture_parent.join(format!(
             "p007-removal-log-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)

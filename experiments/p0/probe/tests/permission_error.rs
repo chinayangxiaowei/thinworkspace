@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Permission errors must remain distinguishable from observed path replacement.
 
 use std::fs;

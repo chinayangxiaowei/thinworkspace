@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};

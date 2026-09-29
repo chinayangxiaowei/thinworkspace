@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 

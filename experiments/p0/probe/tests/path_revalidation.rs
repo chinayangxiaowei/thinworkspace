@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Real directory-entry changes must invalidate previously observed paths.
 
 use std::fs;

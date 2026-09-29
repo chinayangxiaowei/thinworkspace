@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! P0-02 experiment for APFS clone and explicit byte-copy materialization.
 //!
 //! This crate records repeatable platform evidence. It is not the Phase 1

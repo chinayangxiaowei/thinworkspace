@@ -856,7 +856,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：Debian 11.7/aarch64 的 ext4 控制根与同挂载 Btrfs 工作区已完成 Release CLI 7 项黑盒测试；受影响函数的定向变异和相关输入边界短预算 fuzz 已执行。L01–L05 仍为 In Progress：Linux 原样全仓门禁被历史 macOS-only 包阻断，受影响 crate 的收口级全量变异、阶段级 fuzz 和人工验收尚未完成。逐次实施、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
+当前证据：Debian 11.7/aarch64 的 ext4 控制根与同挂载 Btrfs 工作区已完成 Release CLI 7 项黑盒测试；受影响函数的定向变异和相关输入边界短预算 fuzz 已执行，Linux 原样全仓 check/test/Clippy 也已通过。L01–L05 仍为 In Progress：受影响 crate 的收口级全量变异、阶段级 fuzz 和人工验收尚未完成。逐次实施、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
 
 ---
 

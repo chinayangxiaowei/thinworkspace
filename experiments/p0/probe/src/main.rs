@@ -1,16 +1,22 @@
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "macos")]
 use std::ffi::OsString;
+#[cfg(target_os = "macos")]
 use std::io::Write;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(target_os = "macos")]
 use serde::Serialize;
+#[cfg(target_os = "macos")]
 use thinws_p0_probe::{
     EXPERIMENT_NAME, MaterializationPathProbeRequest, MaterializerCandidate, ProbeError,
     inspect_host, inspect_materialization_paths, inspect_path,
 };
 
+#[cfg(target_os = "macos")]
 #[derive(Serialize)]
 struct ErrorEnvelope<'a> {
     experiment: &'a str,
@@ -18,6 +24,7 @@ struct ErrorEnvelope<'a> {
     error: CliError,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Serialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 enum CliError {
@@ -25,6 +32,7 @@ enum CliError {
     Probe { error: ProbeError },
 }
 
+#[cfg(target_os = "macos")]
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1).collect()) {
         Ok(value) => match serde_json::to_writer_pretty(std::io::stdout().lock(), &value) {
@@ -61,6 +69,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn run(arguments: Vec<OsString>) -> Result<serde_json::Value, CliError> {
     let Some(command) = arguments.first().and_then(|argument| argument.to_str()) else {
         return Err(usage());
@@ -101,18 +110,27 @@ fn run(arguments: Vec<OsString>) -> Result<serde_json::Value, CliError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn probe_error(error: ProbeError) -> CliError {
     CliError::Probe { error }
 }
 
+#[cfg(target_os = "macos")]
 fn usage() -> CliError {
     usage_message(
         "usage: thinws-p0-probe host | thinws-p0-probe path <absolute-directory> | thinws-p0-probe materialization <source> <target> <staging> <trash>",
     )
 }
 
+#[cfg(target_os = "macos")]
 fn usage_message(message: impl Into<String>) -> CliError {
     CliError::Usage {
         message: message.into(),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() -> ExitCode {
+    eprintln!("thinws-p0-probe is a macOS-only experiment");
+    ExitCode::from(1)
 }

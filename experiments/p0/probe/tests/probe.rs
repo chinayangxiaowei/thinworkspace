@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};

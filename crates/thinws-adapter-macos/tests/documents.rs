@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 use thinws_adapter_macos::{
     DocumentError, MAX_DOCUMENT_BYTES, decode_bootstrap_config, decode_root_marker,
 };

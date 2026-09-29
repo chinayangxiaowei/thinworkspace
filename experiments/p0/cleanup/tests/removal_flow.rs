@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! P0-07 test-only connection of removal policy, persistent events, and a
 //! controlled no-follow deletion fixture. This is not a Phase 1 lifecycle API.
 

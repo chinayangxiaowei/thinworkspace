@@ -1,0 +1,1216 @@
+//! Linux Btrfs implementation of the frozen Workspace materialization Port.
+
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_OMIT};
+use thinws_core::{
+    AbsolutePath, CreatedObjectEvidence, FileIdentity, MaterializationAttemptEvidence,
+    MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
+    MaterializationPlan, MaterializationReceipt, MaterializeRequest, MaterializedEntryKind,
+    MaterializerKind, PathCapabilityReport, PathResolution, RelativePath, RollbackEvidence,
+    RollbackStatus, SupportState, TreeDigest, VolumeId,
+};
+use thinws_ports::{
+    MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
+    WorkspaceMaterializer,
+};
+
+use crate::LinuxPlatformProbe;
+use crate::ffi::{btrfs_fsid, reflink_clone};
+use crate::tree::{
+    DIRECTORY_FLAGS, Node, NodeKind, TreeFailure, TreeSnapshot, directory_names, mount_id,
+    mount_id_at, node, node_at, open_directory, open_file, snapshot,
+};
+
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Real `FICLONE` materializer for one proven same-mount Btrfs path set.
+#[derive(Clone, Copy, Default)]
+pub struct BtrfsReflinkMaterializer;
+
+impl BtrfsReflinkMaterializer {
+    /// Creates a materializer; capability and identity are rechecked per call.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    fn materialize_with_hook(
+        &self,
+        request: &MaterializeRequest,
+        plan: &MaterializationPlan,
+        hook: &dyn ExecutionHook,
+    ) -> Result<MaterializationReceipt, MaterializationFailure> {
+        materialize_with_hook(request, plan, hook)
+    }
+}
+
+impl WorkspaceMaterializer for BtrfsReflinkMaterializer {
+    fn kind(&self) -> MaterializerKind {
+        MaterializerKind::BtrfsReflink
+    }
+
+    fn materialize(
+        &self,
+        request: &MaterializeRequest,
+        plan: &MaterializationPlan,
+    ) -> Result<MaterializationReceipt, MaterializationFailure> {
+        self.materialize_with_hook(request, plan, &NoopHook)
+    }
+}
+
+trait ExecutionHook {
+    fn before_staged_publish(&self, _relative: &[u8]) -> Result<(), TreeFailure> {
+        Ok(())
+    }
+
+    fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+        Ok(())
+    }
+}
+
+struct NoopHook;
+impl ExecutionHook for NoopHook {}
+
+fn materialize_with_hook(
+    request: &MaterializeRequest,
+    plan: &MaterializationPlan,
+    hook: &dyn ExecutionHook,
+) -> Result<MaterializationReceipt, MaterializationFailure> {
+    let started = Instant::now();
+    let mut context = ExecutionContext::default();
+    let mut bound = None;
+    let result = (|| {
+        validate_request_plan(request, plan)?;
+        let fresh = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(request))
+            .map_err(|error| {
+                TreeFailure::with_source(
+                    MaterializationFailureKind::PlanStale,
+                    PortErrorKind::InvalidLayout,
+                    "revalidate Btrfs materialization paths",
+                    error,
+                )
+            })?;
+        if fresh.evidence_digest() != plan.probe_evidence_digest()
+            || fresh.cow_clone().state() == SupportState::Unsupported
+        {
+            return Err(stale_plan());
+        }
+        let paths = BoundPaths::open(request, fresh)?;
+        ensure_empty(&paths.target)?;
+        ensure_empty(&paths.staging)?;
+        ensure_empty(&paths.trash)?;
+        let source_snapshot = snapshot(&paths.source)?;
+        context.source_manifest = Some(source_snapshot.manifest.digest());
+        context.regular_files = Some(source_snapshot.manifest.regular_files);
+        context.logical_bytes = Some(source_snapshot.manifest.logical_bytes);
+        bound = Some(paths);
+        let paths = bound.as_ref().expect("just-bound paths exist");
+        materialize_directory(
+            &paths.source,
+            &paths.target,
+            &paths.staging,
+            &[],
+            &source_snapshot,
+            &mut context,
+            hook,
+        )?;
+        context.target_modified = true;
+        set_preserved_metadata(
+            &paths.target,
+            node(&paths.target)?.identity(),
+            source_snapshot.root,
+        )?;
+        let source_after = snapshot(&paths.source).map_err(|error| {
+            TreeFailure::with_source(
+                MaterializationFailureKind::SourceChanged,
+                PortErrorKind::InvalidData,
+                "revalidate Btrfs source tree",
+                error.into_port_error(),
+            )
+        })?;
+        if source_after != source_snapshot {
+            return Err(TreeFailure::source_changed());
+        }
+        let target_after = snapshot(&paths.target).map_err(|error| {
+            TreeFailure::with_source(
+                MaterializationFailureKind::TargetChanged,
+                PortErrorKind::InvalidLayout,
+                "revalidate Btrfs target tree",
+                error.into_port_error(),
+            )
+        })?;
+        context.target_manifest = Some(target_after.manifest.digest());
+        context.physical_bytes = Some(target_after.manifest.physical_bytes);
+        if !target_after
+            .manifest
+            .matches_promised(&source_snapshot.manifest)
+            || !created_matches_target(&target_after, &context.created)
+        {
+            return Err(TreeFailure::new(
+                MaterializationFailureKind::ManifestMismatch,
+                PortErrorKind::InvalidData,
+                "verify Btrfs target manifest",
+            ));
+        }
+        paths.revalidate(request)?;
+        MaterializationReceipt::successful_cow_clone(
+            plan,
+            source_snapshot.manifest.regular_files,
+            context.clone_calls,
+            context
+                .created
+                .iter()
+                .map(TrackedCreated::evidence)
+                .collect(),
+            source_snapshot.manifest.digest(),
+            target_after.manifest.digest(),
+            elapsed_millis(started),
+            source_snapshot.manifest.logical_bytes,
+            Some(target_after.manifest.physical_bytes),
+        )
+        .map_err(|error| {
+            TreeFailure::with_source(
+                MaterializationFailureKind::ManifestMismatch,
+                PortErrorKind::InvalidData,
+                "construct Btrfs materialization receipt",
+                error,
+            )
+        })
+    })();
+    match result {
+        Ok(receipt) => Ok(receipt),
+        Err(error) => {
+            if let Some(paths) = bound.as_ref() {
+                cleanup_active_staging(paths, request, &mut context);
+            }
+            let rollback = bound.as_ref().map_or_else(
+                || RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
+                |paths| rollback_created(paths, request, &context),
+            );
+            let evidence = MaterializationAttemptEvidence::new(
+                context.logical_bytes,
+                context.physical_bytes,
+                context.regular_files,
+                context.clone_calls,
+                context.source_manifest,
+                context.target_manifest,
+            );
+            let mut receipt = MaterializationReceipt::failed_cow_clone(
+                plan,
+                error.kind,
+                context
+                    .created
+                    .iter()
+                    .map(TrackedCreated::evidence)
+                    .collect(),
+                context.target_modified,
+                rollback,
+                evidence,
+                elapsed_millis(started),
+            );
+            if let Some(staged) = context.active_staging {
+                receipt = receipt.with_unconfirmed_staging(staged.evidence());
+            }
+            Err(MaterializationFailure::new(
+                error.into_port_error(),
+                receipt,
+            ))
+        }
+    }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn validate_request_plan(
+    request: &MaterializeRequest,
+    plan: &MaterializationPlan,
+) -> Result<(), TreeFailure> {
+    if plan.selected_adapter() != MaterializerKind::BtrfsReflink
+        || plan.effective_mode() != MaterializationMode::CowClone
+        || request.source() != plan.source_path()
+        || request.target() != plan.target_path()
+        || request.staging() != plan.staging_path()
+        || request.trash() != plan.trash_path()
+    {
+        return Err(stale_plan());
+    }
+    Ok(())
+}
+
+fn stale_plan() -> TreeFailure {
+    TreeFailure::new(
+        MaterializationFailureKind::PlanStale,
+        PortErrorKind::InvalidLayout,
+        "Btrfs materialization plan changed",
+    )
+}
+
+struct BoundPaths {
+    source: OwnedFd,
+    target: OwnedFd,
+    staging: OwnedFd,
+    trash: OwnedFd,
+    target_baseline: Node,
+    report: MaterializationPathReport,
+}
+
+impl BoundPaths {
+    fn open(
+        request: &MaterializeRequest,
+        report: MaterializationPathReport,
+    ) -> Result<Self, TreeFailure> {
+        let source = open_bound_directory(request.source(), report.source())?;
+        let target = open_bound_directory(request.target(), report.target_root())?;
+        let staging = open_bound_directory(request.staging(), report.staging())?;
+        let trash = open_bound_directory(request.trash(), report.trash())?;
+        let target_baseline = node(&target)?;
+        let expected_mount = mount_id(&source)?;
+        if [mount_id(&target)?, mount_id(&staging)?, mount_id(&trash)?]
+            .iter()
+            .any(|actual| *actual != expected_mount)
+        {
+            return Err(stale_plan());
+        }
+        Ok(Self {
+            source,
+            target,
+            staging,
+            trash,
+            target_baseline,
+            report,
+        })
+    }
+
+    fn revalidate(&self, request: &MaterializeRequest) -> Result<(), TreeFailure> {
+        for (path, report, held) in [
+            (request.source(), self.report.source(), &self.source),
+            (request.target(), self.report.target_root(), &self.target),
+            (request.staging(), self.report.staging(), &self.staging),
+            (request.trash(), self.report.trash(), &self.trash),
+        ] {
+            let reopened = open_bound_directory(path, report)?;
+            if node(&reopened)?.identity() != node(held)?.identity() {
+                return Err(stale_plan());
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate_target_trash(&self, request: &MaterializeRequest) -> Result<(), TreeFailure> {
+        for (path, report, held) in [
+            (request.target(), self.report.target_root(), &self.target),
+            (request.trash(), self.report.trash(), &self.trash),
+        ] {
+            let reopened = open_bound_directory(path, report)?;
+            if node(&reopened)?.identity() != node(held)?.identity() {
+                return Err(stale_plan());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn open_bound_directory(
+    path: &AbsolutePath,
+    report: &PathCapabilityReport,
+) -> Result<OwnedFd, TreeFailure> {
+    if report.requested_path() != path || report.resolution() != PathResolution::ExistingDirectory {
+        return Err(stale_plan());
+    }
+    let mut current = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())
+        .map_err(|error| TreeFailure::io("open Btrfs filesystem root", error))?;
+    let mut ancestry = report.ancestry().iter();
+    if ancestry.next().map(|entry| entry.identity()) != Some(node(&current)?.identity()) {
+        return Err(stale_plan());
+    }
+    for part in path.as_bytes()[1..].split(|byte| *byte == b'/') {
+        if part.is_empty() {
+            continue;
+        }
+        current = open_directory(&current, OsStr::from_bytes(part))?;
+        if ancestry.next().map(|entry| entry.identity()) != Some(node(&current)?.identity()) {
+            return Err(stale_plan());
+        }
+    }
+    if ancestry.next().is_some()
+        || mount_id(&current)? != report.mount().mount_id().ok_or_else(stale_plan)?
+    {
+        return Err(stale_plan());
+    }
+    let statfs = rustix::fs::fstatfs(&current)
+        .map_err(|error| TreeFailure::io("inspect Btrfs filesystem type", error))?;
+    if statfs.f_type != libc::BTRFS_SUPER_MAGIC as _ || report.filesystem().type_name() != "btrfs" {
+        return Err(stale_plan());
+    }
+    let fsid = btrfs_fsid(&current).map_err(|error| {
+        TreeFailure::with_source(
+            MaterializationFailureKind::PlanStale,
+            PortErrorKind::InvalidLayout,
+            "inspect Btrfs FSID",
+            error,
+        )
+    })?;
+    let volume = VolumeId::from_str(&uuid::Uuid::from_bytes(fsid).hyphenated().to_string())
+        .expect("UUID formatting is canonical");
+    if report.filesystem().volume_id().known() != Some(&volume) {
+        return Err(stale_plan());
+    }
+    Ok(current)
+}
+
+fn ensure_empty(directory: &OwnedFd) -> Result<(), TreeFailure> {
+    if directory_names(directory)?.is_empty() {
+        Ok(())
+    } else {
+        Err(TreeFailure::new(
+            MaterializationFailureKind::InvalidLayout,
+            PortErrorKind::NotEmpty,
+            "require empty Btrfs target",
+        ))
+    }
+}
+
+#[derive(Default)]
+struct ExecutionContext {
+    created: Vec<TrackedCreated>,
+    active_staging: Option<TrackedCreated>,
+    clone_calls: u64,
+    target_modified: bool,
+    source_manifest: Option<TreeDigest>,
+    target_manifest: Option<TreeDigest>,
+    regular_files: Option<u64>,
+    logical_bytes: Option<u64>,
+    physical_bytes: Option<u64>,
+}
+
+#[derive(Clone)]
+struct TrackedCreated {
+    path: Vec<u8>,
+    kind: NodeKind,
+    identity: Option<FileIdentity>,
+}
+
+impl TrackedCreated {
+    fn evidence(&self) -> CreatedObjectEvidence {
+        let path = RelativePath::try_from_bytes(self.path.clone())
+            .expect("verified tree relative path is valid");
+        let kind = match self.kind {
+            NodeKind::Directory => MaterializedEntryKind::Directory,
+            NodeKind::File => MaterializedEntryKind::RegularFile,
+            NodeKind::Symlink => MaterializedEntryKind::SymbolicLink,
+            NodeKind::Unsupported => unreachable!("unsupported entry is never created"),
+        };
+        CreatedObjectEvidence::new(path, kind, self.identity)
+    }
+}
+
+fn materialize_directory(
+    source: &OwnedFd,
+    target: &OwnedFd,
+    staging: &OwnedFd,
+    prefix: &[u8],
+    expected: &TreeSnapshot,
+    context: &mut ExecutionContext,
+    hook: &dyn ExecutionHook,
+) -> Result<(), TreeFailure> {
+    for name in directory_names(source)? {
+        let mut relative = prefix.to_vec();
+        if !relative.is_empty() {
+            relative.push(b'/');
+        }
+        relative.extend_from_slice(name.as_bytes());
+        let entry = expected
+            .entries
+            .get(&relative)
+            .ok_or_else(TreeFailure::source_changed)?;
+        let before = node_at(source, &name)?;
+        if before != entry.node {
+            return Err(TreeFailure::source_changed());
+        }
+        match before.kind {
+            NodeKind::Directory => {
+                let source_child = open_directory(source, &name)?;
+                if node(&source_child)? != before {
+                    return Err(TreeFailure::source_changed());
+                }
+                let identity = stage_and_publish(
+                    staging,
+                    target,
+                    &name,
+                    relative.clone(),
+                    NodeKind::Directory,
+                    context,
+                    hook,
+                    |parent, stage_name| {
+                        rustix::fs::mkdirat(parent, stage_name, Mode::from_bits_retain(0o700))
+                    },
+                    |_, _| Ok(0),
+                )?;
+                let target_child = open_directory(target, &name)?;
+                ensure_identity(node(&target_child)?, identity, NodeKind::Directory)?;
+                materialize_directory(
+                    &source_child,
+                    &target_child,
+                    staging,
+                    &relative,
+                    expected,
+                    context,
+                    hook,
+                )?;
+                set_preserved_metadata(&target_child, identity, before)?;
+                if node(&source_child)? != before {
+                    return Err(TreeFailure::source_changed());
+                }
+            }
+            NodeKind::File => {
+                let source_file = open_file(source, &name)?;
+                if node(&source_file)? != before {
+                    return Err(TreeFailure::source_changed());
+                }
+                let identity = stage_and_publish(
+                    staging,
+                    target,
+                    &name,
+                    relative,
+                    NodeKind::File,
+                    context,
+                    hook,
+                    |parent, stage_name| {
+                        rustix::fs::openat(
+                            parent,
+                            stage_name,
+                            OFlags::CREATE
+                                | OFlags::EXCL
+                                | OFlags::RDWR
+                                | OFlags::NOFOLLOW
+                                | OFlags::CLOEXEC,
+                            Mode::from_bits_retain(0o600),
+                        )
+                        .map(|_| ())
+                    },
+                    |parent, stage_name| {
+                        let destination = rustix::fs::openat(
+                            parent,
+                            stage_name,
+                            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                            Mode::empty(),
+                        )
+                        .map_err(|error| TreeFailure::io("open staged Btrfs file", error))?;
+                        reflink_clone(&source_file, &destination).map_err(classify_clone_error)?;
+                        Ok(1)
+                    },
+                )?;
+                let target_file = open_file(target, &name)?;
+                ensure_identity(node(&target_file)?, identity, NodeKind::File)?;
+                set_preserved_metadata(&target_file, identity, before)?;
+                if node(&source_file)? != before {
+                    return Err(TreeFailure::source_changed());
+                }
+            }
+            NodeKind::Symlink => {
+                let text = rustix::fs::readlinkat(source, &name, Vec::new())
+                    .map_err(|error| TreeFailure::io("read source symbolic link", error))?;
+                if entry.link_text.as_deref() != Some(text.to_bytes())
+                    || node_at(source, &name)? != before
+                {
+                    return Err(TreeFailure::source_changed());
+                }
+                stage_and_publish(
+                    staging,
+                    target,
+                    &name,
+                    relative,
+                    NodeKind::Symlink,
+                    context,
+                    hook,
+                    |parent, stage_name| rustix::fs::symlinkat(&text, parent, stage_name),
+                    |_, _| Ok(0),
+                )?;
+            }
+            NodeKind::Unsupported => {
+                return Err(TreeFailure::new(
+                    MaterializationFailureKind::UnsupportedSourceEntry,
+                    PortErrorKind::InvalidData,
+                    "reject unsupported source entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn classify_clone_error(error: std::io::Error) -> TreeFailure {
+    let (kind, port_kind) = match error.raw_os_error() {
+        Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL) => (
+            MaterializationFailureKind::CowUnavailable,
+            PortErrorKind::CapabilityUnavailable,
+        ),
+        Some(libc::EXDEV) => (
+            MaterializationFailureKind::InvalidLayout,
+            PortErrorKind::InvalidLayout,
+        ),
+        Some(libc::ENOSPC) => (MaterializationFailureKind::NoSpace, PortErrorKind::Io),
+        _ => (MaterializationFailureKind::Filesystem, PortErrorKind::Io),
+    };
+    TreeFailure::with_source(kind, port_kind, "clone Btrfs file with FICLONE", error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_and_publish(
+    staging: &OwnedFd,
+    target: &OwnedFd,
+    target_name: &OsStr,
+    relative: Vec<u8>,
+    kind: NodeKind,
+    context: &mut ExecutionContext,
+    hook: &dyn ExecutionHook,
+    mut create: impl FnMut(&OwnedFd, &OsStr) -> Result<(), rustix::io::Errno>,
+    mut prepare: impl FnMut(&OwnedFd, &OsStr) -> Result<u64, TreeFailure>,
+) -> Result<FileIdentity, TreeFailure> {
+    let mut selected = None;
+    for _ in 0..128 {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = OsString::from(format!(
+            ".thinws-materialize-{}-{sequence}",
+            std::process::id()
+        ));
+        match create(staging, &name) {
+            Ok(()) => {
+                selected = Some(name);
+                break;
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(TreeFailure::io("create staged Btrfs entry", error)),
+        }
+    }
+    let staged_name = selected.ok_or_else(|| {
+        TreeFailure::new(
+            MaterializationFailureKind::Filesystem,
+            PortErrorKind::Io,
+            "reserve Btrfs staging name",
+        )
+    })?;
+    context.active_staging = Some(TrackedCreated {
+        path: staged_name.as_bytes().to_vec(),
+        kind,
+        identity: None,
+    });
+    let staged = node_at(staging, &staged_name)?;
+    if staged.kind != kind {
+        return Err(TreeFailure::target_changed());
+    }
+    let identity = staged.identity();
+    context
+        .active_staging
+        .as_mut()
+        .expect("staging just recorded")
+        .identity = Some(identity);
+    let clone_calls = prepare(staging, &staged_name)?;
+    context.clone_calls = context.clone_calls.saturating_add(clone_calls);
+    ensure_identity(node_at(staging, &staged_name)?, identity, kind)?;
+    hook.before_staged_publish(&relative)?;
+    if let Err(error) = rustix::fs::renameat_with(
+        staging,
+        &staged_name,
+        target,
+        target_name,
+        RenameFlags::NOREPLACE,
+    ) {
+        return Err(if error == rustix::io::Errno::EXIST {
+            TreeFailure::target_changed()
+        } else {
+            TreeFailure::io("publish staged Btrfs entry", error)
+        });
+    }
+    context.active_staging = None;
+    context.created.push(TrackedCreated {
+        path: relative,
+        kind,
+        identity: Some(identity),
+    });
+    context.target_modified = true;
+    ensure_identity(node_at(target, target_name)?, identity, kind)?;
+    hook.after_published(
+        &context
+            .created
+            .last()
+            .expect("published entry is recorded")
+            .path,
+        context.created.len(),
+    )?;
+    Ok(identity)
+}
+
+fn ensure_identity(
+    observed: Node,
+    expected: FileIdentity,
+    kind: NodeKind,
+) -> Result<(), TreeFailure> {
+    if observed.identity() != expected || observed.kind != kind {
+        Err(TreeFailure::target_changed())
+    } else {
+        Ok(())
+    }
+}
+
+fn set_preserved_metadata(
+    target: &OwnedFd,
+    identity: FileIdentity,
+    source: Node,
+) -> Result<(), TreeFailure> {
+    ensure_identity(node(target)?, identity, source.kind)?;
+    let times = Timestamps {
+        last_access: Timespec {
+            tv_sec: 0,
+            tv_nsec: UTIME_OMIT,
+        },
+        last_modification: Timespec {
+            tv_sec: source.mtime_seconds,
+            tv_nsec: source.mtime_nanoseconds,
+        },
+    };
+    rustix::fs::futimens(target, &times)
+        .map_err(|error| TreeFailure::io("preserve Btrfs entry modification time", error))?;
+    rustix::fs::fchmod(target, Mode::from_bits_retain(source.mode))
+        .map_err(|error| TreeFailure::io("preserve Btrfs entry permissions", error))?;
+    let after = node(target)?;
+    ensure_identity(after, identity, source.kind)?;
+    if after.mode != source.mode || after.mtime() != source.mtime() {
+        return Err(TreeFailure::new(
+            MaterializationFailureKind::ManifestMismatch,
+            PortErrorKind::InvalidData,
+            "verify Btrfs entry metadata",
+        ));
+    }
+    Ok(())
+}
+
+fn created_matches_target(target: &TreeSnapshot, created: &[TrackedCreated]) -> bool {
+    target.entries.len() == created.len()
+        && created.iter().all(|entry| {
+            target.entries.get(&entry.path).is_some_and(|observed| {
+                observed.node.kind == entry.kind && entry.identity == Some(observed.node.identity())
+            })
+        })
+}
+
+fn cleanup_active_staging(
+    paths: &BoundPaths,
+    request: &MaterializeRequest,
+    context: &mut ExecutionContext,
+) {
+    let Some(staged) = context.active_staging.as_ref() else {
+        return;
+    };
+    let Some(identity) = staged.identity else {
+        return;
+    };
+    if open_bound_directory(request.staging(), paths.report.staging())
+        .ok()
+        .and_then(|reopened| node(&reopened).ok())
+        .map(Node::identity)
+        != node(&paths.staging).ok().map(Node::identity)
+    {
+        return;
+    }
+    let name = OsStr::from_bytes(&staged.path);
+    if node_at(&paths.staging, name)
+        .ok()
+        .is_none_or(|observed| observed.identity() != identity || observed.kind != staged.kind)
+    {
+        return;
+    }
+    let flags = if staged.kind == NodeKind::Directory {
+        AtFlags::REMOVEDIR
+    } else {
+        AtFlags::empty()
+    };
+    if rustix::fs::unlinkat(&paths.staging, name, flags).is_ok() {
+        context.active_staging = None;
+    }
+}
+
+fn rollback_created(
+    paths: &BoundPaths,
+    request: &MaterializeRequest,
+    context: &ExecutionContext,
+) -> RollbackEvidence {
+    if !context.target_modified && context.created.is_empty() {
+        return RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new());
+    }
+    let baseline = paths.target_baseline;
+    if paths.revalidate_target_trash(request).is_err()
+        || node(&paths.target).ok().is_none_or(|root| {
+            root.identity() != baseline.identity() || root.kind != NodeKind::Directory
+        })
+    {
+        return incomplete_rollback(&context.created);
+    }
+    if node(&paths.target)
+        .ok()
+        .is_some_and(|root| root.mode != baseline.mode)
+        && rustix::fs::fchmod(&paths.target, Mode::from_bits_retain(baseline.mode)).is_err()
+    {
+        return incomplete_rollback(&context.created);
+    }
+    let mut removed = Vec::new();
+    let mut quarantined = Vec::new();
+    let mut unconfirmed_quarantined = Vec::new();
+    let mut active_count = context.created.len();
+    for entry in context.created.iter().rev() {
+        if !rollback_set_matches(&paths.target, &context.created[..active_count])
+            || paths.revalidate_target_trash(request).is_err()
+        {
+            break;
+        }
+        let Some(identity) = entry.identity else {
+            break;
+        };
+        let Ok((parent, name)) = open_rollback_parent(&paths.target, entry, &context.created)
+        else {
+            break;
+        };
+        if node_at(&parent, &name)
+            .ok()
+            .is_none_or(|current| current.identity() != identity || current.kind != entry.kind)
+        {
+            break;
+        }
+        match detach_to_trash(&parent, &name, &paths.trash, entry, removed.len()) {
+            DetachOutcome::Confirmed(path) => {
+                quarantined.push(path);
+                removed.push(entry.evidence().path().clone());
+                active_count -= 1;
+            }
+            DetachOutcome::Unconfirmed(path) => {
+                unconfirmed_quarantined.push(path);
+                break;
+            }
+            DetachOutcome::NotDetached => break,
+        }
+    }
+    let exact_remaining = rollback_set_matches(&paths.target, &context.created[..active_count]);
+    let restored = exact_remaining
+        && paths.revalidate_target_trash(request).is_ok()
+        && set_preserved_metadata(&paths.target, baseline.identity(), baseline).is_ok()
+        && node(&paths.target).is_ok_and(|root| root_baseline_matches(root, baseline));
+    let remaining = context.created[..active_count]
+        .iter()
+        .map(TrackedCreated::evidence)
+        .collect::<Vec<_>>();
+    let status = if remaining.is_empty() && restored {
+        RollbackStatus::ConfirmedBaseline
+    } else {
+        RollbackStatus::Incomplete
+    };
+    RollbackEvidence::new(status, removed, remaining)
+        .with_quarantined(quarantined)
+        .with_unconfirmed_quarantined(unconfirmed_quarantined)
+}
+
+fn incomplete_rollback(created: &[TrackedCreated]) -> RollbackEvidence {
+    RollbackEvidence::new(
+        RollbackStatus::Incomplete,
+        Vec::new(),
+        created.iter().map(TrackedCreated::evidence).collect(),
+    )
+}
+
+fn root_baseline_matches(current: Node, baseline: Node) -> bool {
+    current.identity() == baseline.identity()
+        && current.kind == NodeKind::Directory
+        && current.mode == baseline.mode
+        && current.mtime() == baseline.mtime()
+}
+
+fn rollback_set_matches(target: &OwnedFd, created: &[TrackedCreated]) -> bool {
+    let Ok(root_mount) = mount_id(target) else {
+        return false;
+    };
+    let mut observed = BTreeMap::new();
+    if observe_target_entries(target, &[], root_mount, &mut observed).is_err()
+        || observed.len() != created.len()
+    {
+        return false;
+    }
+    created.iter().all(|entry| {
+        entry
+            .identity
+            .is_some_and(|identity| observed.get(&entry.path) == Some(&(identity, entry.kind)))
+    })
+}
+
+fn observe_target_entries(
+    directory: &OwnedFd,
+    prefix: &[u8],
+    root_mount: u64,
+    observed: &mut BTreeMap<Vec<u8>, (FileIdentity, NodeKind)>,
+) -> Result<(), TreeFailure> {
+    for name in directory_names(directory)? {
+        let mut path = prefix.to_vec();
+        if !path.is_empty() {
+            path.push(b'/');
+        }
+        path.extend_from_slice(name.as_bytes());
+        let current = node_at(directory, &name)?;
+        if mount_id_at(directory, &name)? != root_mount {
+            return Err(TreeFailure::target_changed());
+        }
+        observed.insert(path.clone(), (current.identity(), current.kind));
+        if current.kind == NodeKind::Directory {
+            let child = open_directory(directory, &name)?;
+            ensure_identity(node(&child)?, current.identity(), NodeKind::Directory)?;
+            observe_target_entries(&child, &path, root_mount, observed)?;
+        }
+    }
+    Ok(())
+}
+
+fn open_rollback_parent(
+    target: &OwnedFd,
+    entry: &TrackedCreated,
+    created: &[TrackedCreated],
+) -> Result<(OwnedFd, OsString), TreeFailure> {
+    let mut parts = entry.path.split(|byte| *byte == b'/').collect::<Vec<_>>();
+    let leaf = parts.pop().ok_or_else(TreeFailure::target_changed)?;
+    let mut parent = rustix::io::dup(target)
+        .map_err(|error| TreeFailure::io("duplicate rollback target", error))?;
+    let mut prefix = Vec::new();
+    for component in parts {
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        prefix.extend_from_slice(component);
+        parent = open_directory(&parent, OsStr::from_bytes(component))?;
+        let expected = created
+            .iter()
+            .find(|candidate| candidate.path == prefix && candidate.kind == NodeKind::Directory)
+            .and_then(|candidate| candidate.identity)
+            .ok_or_else(TreeFailure::target_changed)?;
+        ensure_identity(node(&parent)?, expected, NodeKind::Directory)?;
+    }
+    Ok((parent, OsString::from_vec(leaf.to_vec())))
+}
+
+enum DetachOutcome {
+    Confirmed(RelativePath),
+    Unconfirmed(RelativePath),
+    NotDetached,
+}
+
+fn detach_to_trash(
+    parent: &OwnedFd,
+    name: &OsStr,
+    trash: &OwnedFd,
+    entry: &TrackedCreated,
+    sequence: usize,
+) -> DetachOutcome {
+    let Some(identity) = entry.identity else {
+        return DetachOutcome::NotDetached;
+    };
+    for collision in 0..128 {
+        let quarantine = OsString::from(format!(
+            ".thinws-rollback-{}-{}-{sequence}-{collision}",
+            identity.device(),
+            identity.inode()
+        ));
+        match rustix::fs::renameat_with(parent, name, trash, &quarantine, RenameFlags::NOREPLACE) {
+            Ok(()) => {
+                let relative = RelativePath::try_from_bytes(quarantine.as_bytes().to_vec())
+                    .expect("generated quarantine name is valid");
+                let matches = node_at(trash, &quarantine)
+                    .is_ok_and(|moved| moved.identity() == identity && moved.kind == entry.kind)
+                    && (entry.kind != NodeKind::Directory
+                        || open_directory(trash, &quarantine)
+                            .and_then(|directory| {
+                                ensure_identity(node(&directory)?, identity, NodeKind::Directory)?;
+                                directory_names(&directory)
+                            })
+                            .is_ok_and(|names| names.is_empty()));
+                if matches {
+                    return DetachOutcome::Confirmed(relative);
+                }
+                return if rustix::fs::renameat_with(
+                    trash,
+                    &quarantine,
+                    parent,
+                    name,
+                    RenameFlags::NOREPLACE,
+                )
+                .is_ok()
+                {
+                    DetachOutcome::NotDetached
+                } else {
+                    DetachOutcome::Unconfirmed(relative)
+                };
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(_) => return DetachOutcome::NotDetached,
+        }
+    }
+    DetachOutcome::NotDetached
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+    use thinws_core::{CowEvidence, FallbackPolicy};
+
+    use super::*;
+
+    fn absolute(path: &Path) -> AbsolutePath {
+        AbsolutePath::try_from_bytes(path.as_os_str().as_bytes().to_vec()).unwrap()
+    }
+
+    fn fixture(
+        prefix: &str,
+    ) -> (
+        TempDir,
+        [PathBuf; 4],
+        MaterializeRequest,
+        MaterializationPlan,
+    ) {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs directory");
+        let fixture = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(root)
+            .unwrap();
+        let paths = ["source", "target", "staging", "trash"].map(|name| fixture.path().join(name));
+        for path in &paths {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(paths[0].join("a"), b"first file").unwrap();
+        fs::write(paths[0].join("b"), b"second file").unwrap();
+        let request = MaterializeRequest::new(
+            absolute(&paths[0]),
+            absolute(&paths[1]),
+            absolute(&paths[2]),
+            absolute(&paths[3]),
+        );
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
+        (fixture, paths, request, plan)
+    }
+
+    fn injected_failure() -> TreeFailure {
+        TreeFailure::new(
+            MaterializationFailureKind::Filesystem,
+            PortErrorKind::Io,
+            "injected Btrfs failure",
+        )
+    }
+
+    struct FailAfterOne;
+    impl ExecutionHook for FailAfterOne {
+        fn after_published(&self, _relative: &[u8], count: usize) -> Result<(), TreeFailure> {
+            if count == 1 {
+                Err(injected_failure())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn partial_clone_detaches_only_registered_identity_and_restores_empty_target() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-rollback-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &FailAfterOne)
+            .unwrap_err();
+        let receipt = failure.receipt();
+        assert_eq!(
+            receipt.failure_kind(),
+            Some(MaterializationFailureKind::Filesystem)
+        );
+        assert_eq!(receipt.clone_calls_succeeded(), 1);
+        assert_eq!(receipt.cow_evidence(), CowEvidence::Unknown);
+        assert_eq!(receipt.created().len(), 1);
+        assert_eq!(
+            receipt.rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert_eq!(receipt.rollback().removed().len(), 1);
+        assert_eq!(receipt.rollback().quarantined().len(), 1);
+        assert!(receipt.rollback().remaining().is_empty());
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+        assert_eq!(fs::read_dir(&paths[3]).unwrap().count(), 1);
+    }
+
+    struct FailBeforePublish;
+    impl ExecutionHook for FailBeforePublish {
+        fn before_staged_publish(&self, _relative: &[u8]) -> Result<(), TreeFailure> {
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn failed_staged_clone_is_removed_without_claiming_target_creation() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-stage-fail-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &FailBeforePublish)
+            .unwrap_err();
+        let receipt = failure.receipt();
+        assert_eq!(receipt.clone_calls_succeeded(), 1);
+        assert_eq!(receipt.rollback().status(), RollbackStatus::NotNeeded);
+        assert!(receipt.created().is_empty());
+        assert!(receipt.unconfirmed_staging().is_none());
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+        assert!(fs::read_dir(&paths[2]).unwrap().next().is_none());
+    }
+
+    struct ReplacePublished {
+        target: PathBuf,
+    }
+    impl ExecutionHook for ReplacePublished {
+        fn after_published(&self, relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            let name = OsStr::from_bytes(relative);
+            fs::rename(self.target.join(name), self.target.join("displaced")).map_err(|error| {
+                TreeFailure::io("replace published Btrfs entry for test", error)
+            })?;
+            fs::write(self.target.join(name), b"foreign")
+                .map_err(|error| TreeFailure::io("create foreign Btrfs entry for test", error))?;
+            Err(TreeFailure::target_changed())
+        }
+    }
+
+    #[test]
+    fn rollback_never_deletes_a_foreign_replacement() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-replacement-");
+        let hook = ReplacePublished {
+            target: paths[1].clone(),
+        };
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+        let receipt = failure.receipt();
+        assert_eq!(receipt.rollback().status(), RollbackStatus::Incomplete);
+        assert_eq!(receipt.rollback().remaining().len(), 1);
+        assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"foreign");
+        assert_eq!(fs::read(paths[1].join("displaced")).unwrap(), b"first file");
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn nested_partial_clone_is_quarantined_child_before_parent() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-nested-rollback-");
+        fs::remove_file(paths[0].join("a")).unwrap();
+        fs::remove_file(paths[0].join("b")).unwrap();
+        fs::create_dir(paths[0].join("nested")).unwrap();
+        fs::write(paths[0].join("nested/file"), b"nested bytes").unwrap();
+        let request = MaterializeRequest::new(
+            absolute(&paths[0]),
+            absolute(&paths[1]),
+            absolute(&paths[2]),
+            absolute(&paths[3]),
+        );
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
+        struct FailAfterTwo;
+        impl ExecutionHook for FailAfterTwo {
+            fn after_published(&self, _relative: &[u8], count: usize) -> Result<(), TreeFailure> {
+                if count == 2 {
+                    Err(injected_failure())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &FailAfterTwo)
+            .unwrap_err();
+        let rollback = failure.receipt().rollback();
+        assert_eq!(rollback.status(), RollbackStatus::ConfirmedBaseline);
+        assert_eq!(rollback.removed().len(), 2);
+        assert_eq!(rollback.quarantined().len(), 2);
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+        assert_eq!(fs::read_dir(&paths[3]).unwrap().count(), 2);
+    }
+
+    struct ReplaceStaged {
+        staging: PathBuf,
+    }
+    impl ExecutionHook for ReplaceStaged {
+        fn before_staged_publish(&self, _relative: &[u8]) -> Result<(), TreeFailure> {
+            let name = fs::read_dir(&self.staging)
+                .map_err(|error| TreeFailure::io("enumerate test staging", error))?
+                .next()
+                .expect("one staged entry exists")
+                .map_err(|error| TreeFailure::io("read test staging", error))?
+                .file_name();
+            fs::rename(self.staging.join(&name), self.staging.join("displaced"))
+                .map_err(|error| TreeFailure::io("displace staged entry for test", error))?;
+            fs::write(self.staging.join(&name), b"foreign")
+                .map_err(|error| TreeFailure::io("replace staged entry for test", error))?;
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn unknown_staging_replacement_is_preserved_and_reported() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-stage-replace-");
+        let hook = ReplaceStaged {
+            staging: paths[2].clone(),
+        };
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+        let receipt = failure.receipt();
+        assert!(receipt.unconfirmed_staging().is_some());
+        assert_eq!(receipt.rollback().status(), RollbackStatus::NotNeeded);
+        assert_eq!(fs::read_dir(&paths[2]).unwrap().count(), 2);
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    }
+
+    struct MutateSource {
+        source: PathBuf,
+    }
+    impl ExecutionHook for MutateSource {
+        fn after_published(&self, _relative: &[u8], count: usize) -> Result<(), TreeFailure> {
+            if count == 1 {
+                fs::write(self.source.join("a"), b"changed while cloning")
+                    .map_err(|error| TreeFailure::io("mutate test source", error))?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn changed_source_is_not_reported_as_a_successful_clone() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-source-change-");
+        let hook = MutateSource {
+            source: paths[0].clone(),
+        };
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(&request, &plan, &hook)
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::SourceChanged)
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    }
+}

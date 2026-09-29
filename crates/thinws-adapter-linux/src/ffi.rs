@@ -39,3 +39,20 @@ pub(crate) fn btrfs_fsid(directory: &OwnedFd) -> io::Result<[u8; 16]> {
     }
     Ok(info.fsid)
 }
+
+/// Clones ordinary-file data between two held descriptors on Btrfs.
+pub(crate) fn reflink_clone(source: &OwnedFd, destination: &OwnedFd) -> io::Result<()> {
+    // SAFETY: FICLONE consumes two live file descriptors by value. The kernel
+    // does not retain either descriptor or an application pointer.
+    let result = unsafe {
+        libc::ioctl(
+            destination.as_raw_fd(),
+            libc::FICLONE as libc::c_ulong,
+            source.as_raw_fd(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}

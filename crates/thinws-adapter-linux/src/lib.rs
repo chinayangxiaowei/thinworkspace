@@ -33,6 +33,12 @@ mod publication;
 mod process;
 
 #[cfg(target_os = "linux")]
+mod tree;
+
+#[cfg(target_os = "linux")]
+mod materializer;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]
@@ -43,3 +49,6 @@ pub use layout::LinuxDataRootLayout;
 
 #[cfg(target_os = "linux")]
 pub use publication::LinuxInitializingProof;
+
+#[cfg(target_os = "linux")]
+pub use materializer::BtrfsReflinkMaterializer;

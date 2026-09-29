@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use tempfile::Builder;
-use thinws_p0_linux_reflink::clone_file_data;
+use thinws_p0_linux_reflink::{BtrfsPairPreflight, clone_file_data, inspect_btrfs_pair};
 
 fn configured_btrfs_root() -> PathBuf {
     let root = PathBuf::from(
@@ -56,6 +56,11 @@ fn ficlone_shares_blocks_and_later_writes_stay_private() {
         .open(&clone_path)
         .expect("create clone only inside the private fixture root");
 
+    assert_eq!(
+        inspect_btrfs_pair(&source, &clone).expect("inspect both held file descriptors"),
+        BtrfsPairPreflight::EligibleSameMount
+    );
+
     clone_file_data(&source, &clone).expect("FICLONE must succeed on the configured Btrfs mount");
     assert_eq!(fs::read(&clone_path).unwrap(), initial);
     clone.write_all(b"changed").expect("write into cloned file");
@@ -84,4 +89,43 @@ fn ficlone_reports_bad_destination_mode_without_hiding_errno() {
 
     let error = clone_file_data(&source, &destination).expect_err("read-only target must fail");
     assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+}
+
+#[test]
+#[ignore = "requires THINWS_LINUX_BTRFS_TEST_ROOT on a writable Btrfs mount"]
+fn preflight_rejects_a_directory_even_on_the_same_btrfs_mount() {
+    let root = configured_btrfs_root();
+    let scratch = Builder::new()
+        .prefix("thinws-linux-pair-type-")
+        .tempdir_in(root)
+        .expect("create private Btrfs fixture root");
+    let regular_path = scratch.path().join("regular");
+    fs::write(&regular_path, b"regular file").expect("write private fixture");
+    let directory = OpenOptions::new().read(true).open(scratch.path()).unwrap();
+    let regular = OpenOptions::new().read(true).open(regular_path).unwrap();
+
+    assert_eq!(
+        inspect_btrfs_pair(&directory, &regular).unwrap(),
+        BtrfsPairPreflight::UnsupportedFileType
+    );
+}
+
+#[test]
+#[ignore = "requires THINWS_LINUX_BTRFS_TEST_ROOT on a writable Btrfs mount"]
+fn preflight_rejects_a_file_on_another_filesystem() {
+    let root = configured_btrfs_root();
+    let scratch = Builder::new()
+        .prefix("thinws-linux-pair-fs-")
+        .tempdir_in(root)
+        .expect("create private Btrfs fixture root");
+    let source_path = scratch.path().join("source");
+    fs::write(&source_path, b"source").expect("write private Btrfs fixture");
+    let source = OpenOptions::new().read(true).open(source_path).unwrap();
+    // Procfs is read-only input for the negative probe; no file is created there.
+    let other = OpenOptions::new().read(true).open("/proc/version").unwrap();
+
+    assert_eq!(
+        inspect_btrfs_pair(&source, &other).unwrap(),
+        BtrfsPairPreflight::UnsupportedFilesystem
+    );
 }

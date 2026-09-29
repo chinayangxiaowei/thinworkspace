@@ -9,3 +9,9 @@ mod ffi;
 
 #[cfg(target_os = "linux")]
 pub use ffi::clone_file_data;
+
+#[cfg(target_os = "linux")]
+mod pair_probe;
+
+#[cfg(target_os = "linux")]
+pub use pair_probe::{BtrfsPairPreflight, inspect_btrfs_pair};

@@ -111,7 +111,7 @@ fn preflight_rejects_a_directory_even_on_the_same_btrfs_mount() {
 }
 
 #[test]
-#[ignore = "requires THINWS_LINUX_BTRFS_TEST_ROOT on a writable Btrfs mount"]
+#[ignore = "requires THINWS_LINUX_BTRFS_TEST_ROOT and THINWS_LINUX_OTHER_TEST_FILE"]
 fn preflight_rejects_a_file_on_another_filesystem() {
     let root = configured_btrfs_root();
     let scratch = Builder::new()
@@ -121,8 +121,15 @@ fn preflight_rejects_a_file_on_another_filesystem() {
     let source_path = scratch.path().join("source");
     fs::write(&source_path, b"source").expect("write private Btrfs fixture");
     let source = OpenOptions::new().read(true).open(source_path).unwrap();
-    // Procfs is read-only input for the negative probe; no file is created there.
-    let other = OpenOptions::new().read(true).open("/proc/version").unwrap();
+    let other_path = PathBuf::from(
+        env::var_os("THINWS_LINUX_OTHER_TEST_FILE")
+            .expect("set THINWS_LINUX_OTHER_TEST_FILE to an existing regular file"),
+    );
+    assert!(other_path.is_absolute(), "other test file must be absolute");
+    let other = OpenOptions::new()
+        .read(true)
+        .open(other_path)
+        .expect("open other test file read-only");
 
     assert_eq!(
         inspect_btrfs_pair(&source, &other).unwrap(),

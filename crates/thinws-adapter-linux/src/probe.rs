@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::str::FromStr;
 
@@ -15,6 +16,7 @@ use thinws_ports::{
 };
 
 use crate::ffi::btrfs_fsid;
+use crate::mountinfo;
 
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -151,12 +153,18 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     };
     let stat = rustix::fs::fstat(&fd).map_err(|error| port_io("stat nearest ancestor", error))?;
     let statfs = rustix::fs::fstatfs(&fd).map_err(|error| port_io("stat filesystem", error))?;
-    let fs_type = if statfs.f_type == libc::BTRFS_SUPER_MAGIC as _ {
-        "btrfs"
-    } else if statfs.f_type == libc::EXT4_SUPER_MAGIC as _ {
-        "ext4"
-    } else {
-        "other"
+    let mount_id = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
+        .ok()
+        .and_then(|observed| {
+            (observed.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(observed.stx_mnt_id)
+        });
+    let mount_kind = mount_id.and_then(|id| mountinfo::filesystem_type(id).ok().flatten());
+    let fs_type = match mount_kind.as_deref() {
+        Some("btrfs") if statfs.f_type == libc::BTRFS_SUPER_MAGIC as _ => "btrfs",
+        Some("ext4") if statfs.f_type == libc::EXT4_SUPER_MAGIC as _ => "ext4",
+        Some("btrfs" | "ext4") => "unknown",
+        Some(other) => other,
+        None => "unknown",
     };
     let volume = if fs_type == "btrfs" {
         match btrfs_fsid(&fd) {
@@ -169,9 +177,17 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
                 errno: error.raw_os_error(),
             },
         }
+    } else if fs_type == "ext4" {
+        match ext4_identity(&fd) {
+            Ok(id) => Evidence::Known(id),
+            Err(error) => Evidence::Unknown {
+                reason: "ext4 filesystem identity unavailable".to_owned(),
+                errno: Some(error.raw_os_error()),
+            },
+        }
     } else {
         Evidence::Unknown {
-            reason: "non-Btrfs filesystem has no Btrfs FSID".to_owned(),
+            reason: "unsupported or unverified Linux filesystem identity".to_owned(),
             errno: None,
         }
     };
@@ -185,11 +201,6 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         }
         Evidence::Unknown { .. } => [stat.st_dev as i32, statfs.f_type as i32],
     };
-    let mount_id = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
-        .ok()
-        .and_then(|observed| {
-            (observed.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(observed.stx_mnt_id)
-        });
     let mount_writable = (statfs.f_flags as u64 & libc::ST_RDONLY) == 0;
     let mount = mount_id.map_or(
         MountEvidence::new(statfs.f_flags as u32, mount_writable),
@@ -211,10 +222,8 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     } else {
         SupportState::Unsupported
     };
-    let cow = if fs_type == "btrfs" && volume.known().is_some() && mount_id.is_some() {
+    let cow = if fs_type == "btrfs" {
         // The ioctl result and per-file flags are not known until execution.
-        SupportState::Unknown
-    } else if fs_type == "btrfs" {
         SupportState::Unknown
     } else {
         SupportState::Unsupported
@@ -232,6 +241,24 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         cow,
     )
     .map_err(|error| port_invalid("build path report", error))
+}
+
+fn ext4_identity(directory: &OwnedFd) -> Result<VolumeId, rustix::io::Errno> {
+    let statvfs = rustix::fs::fstatvfs(directory)?;
+    if statvfs.f_fsid == 0 {
+        return Err(rustix::io::Errno::INVAL);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"thinws-linux-ext4-identity-v1\0");
+    hasher.update(&statvfs.f_fsid.to_le_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(
+        VolumeId::from_str(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+            .expect("UUID formatter produces canonical lowercase UUID"),
+    )
 }
 
 fn access_state(result: Result<(), rustix::io::Errno>) -> SupportState {

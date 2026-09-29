@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// A canonical absolute filesystem path represented by lossless platform bytes.
 ///
-/// Phase 1 persists macOS path bytes rather than a display string. Conversion
+/// Phase 1 persists Unix path bytes rather than a display string. Conversion
 /// to or from an operating-system path belongs to the platform Adapter.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AbsolutePath(Vec<u8>);

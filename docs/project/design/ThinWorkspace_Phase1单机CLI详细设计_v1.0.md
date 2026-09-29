@@ -48,7 +48,7 @@ macOS 固定控制位置：
 └── logs/operations.jsonl
 ```
 
-配置保存新布局的 schema version 和 InstanceId，不登记单一数据卷或默认 Workspace 输出位置。控制目录固定在当前用户主目录，生产 CLI 不提供隐藏环境变量切换位置；测试通过依赖注入替换。控制目录必须是当前用户拥有、不可由其他用户写入的真实目录，配置和 SQLite 安全打开；此目录所在卷不参与某个 Workspace 的 APFS 同卷判断。
+配置保存新布局的 schema version 和 InstanceId，不登记单一数据卷或默认 Workspace 输出位置。控制目录固定在当前用户主目录，生产 CLI 不提供隐藏环境变量切换位置；测试通过依赖注入替换。控制目录必须是当前用户拥有、不可由其他用户写入的真实目录，配置和 SQLite 安全打开；此目录所在卷不参与某个 Workspace 的 APFS 同卷判断。Linux/Btrfs 扩展也保持此分离：Btrfs 工作区使用从已打开目录读取的真实 FSID 与 mount ID；ext4 控制目录以已打开目录的 `f_fsid` 构造命名空间隔离、可重验的持久身份 token，它**不是** ext4 的完整磁盘 UUID。Linux 的 ext4 类型须由同一 mount ID 的挂载信息与 `fstatfs` 双重确认；身份不可得或变化时拒绝接管，不将其他文件系统误报为 ext4。Linux 控制身份不用于 Btrfs 克隆同挂载判断。
 
 SQLite installation 与配置中的 InstanceId 必须一致。旧 `~/Library/Application Support/ThinWorkspace/` 和旧 data root 不被新版本读取、迁移、接管或删除；旧版无法直接用于新命令。
 

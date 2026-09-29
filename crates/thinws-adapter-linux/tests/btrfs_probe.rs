@@ -16,6 +16,22 @@ fn absolute(path: &Path) -> AbsolutePath {
 }
 
 #[test]
+fn actual_ext4_control_root_has_a_stable_non_btrfs_identity() {
+    let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+        .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a readable ext4 directory");
+    let path = absolute(Path::new(&root));
+    let first = LinuxPlatformProbe.inspect_path(&path).unwrap();
+    let second = LinuxPlatformProbe.inspect_path(&path).unwrap();
+    assert_eq!(first.filesystem().type_name(), "ext4");
+    assert_eq!(
+        first.filesystem().volume_id().known(),
+        second.filesystem().volume_id().known()
+    );
+    assert!(first.filesystem().volume_id().known().is_some());
+    assert_eq!(first.cow_clone(), SupportState::Unsupported);
+}
+
+#[test]
 fn real_shared_source_is_not_a_btrfs_clone_candidate() {
     let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
         .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs test mount");

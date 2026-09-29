@@ -124,7 +124,7 @@ pub trait PreparedDataRootEvidence {
     /// Returns the canonical path bound to the held directory descriptor.
     fn data_root(&self) -> &AbsolutePath;
 
-    /// Returns the actual filesystem volume UUID observed through that descriptor.
+    /// Returns the platform's stable filesystem identity observed through that descriptor.
     fn volume_id(&self) -> VolumeId;
 }
 

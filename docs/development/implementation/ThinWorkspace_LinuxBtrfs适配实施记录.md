@@ -44,3 +44,13 @@ P1-L05 Full Copy 错误映射结果与构建缓存复核（2026-09-29）：上�
 P1-L05 Release 回归及仓库级门禁边界（2026-09-29）：在最新本地 `98971f1` 上，于 Debian 11.7 从清除后的 Btrfs 构建缓存重新编译 `thinws-cli` Release（50.88 秒），`cargo test -p thinws-cli --release --test e2e_linux` 的 7 项真实 ext4 控制根＋Btrfs 生命周期黑盒用例全通过，包含 NOCOW 失败分类与两次强制清理。再次执行 Debian `cargo check --workspace --all-targets` 仍失败于历史 macOS-only Adapter/P0 实验（例如 Linux `libc` 无 macOS `attribute_set_t`、`O_SEARCH`、birthtime 字段，P0 共享测试支持文件类型不匹配），不是本轮产品包编译失败。要让该仓库级命令跨平台可用需对 Mac 专用实验/Adapter 包实施系统性条件编译与测试门禁修订；这超出 Linux CLI 装配的局部修复，当前不偷改全仓结构，也不把该门禁宣称通过。
 
 Linux 输入边界 fuzz 补充（2026-09-29）：Debian 11.7/aarch64，固定 nightly-2026-08-14、cargo-fuzz 0.12.0、AddressSanitizer，在 Btrfs 临时 corpus/artifact 根上分别运行 `thinws_materialization_path`、`thinws_create_request`、`thinws_remove_request` 各 60 秒，执行约 12,692,178 / 8,111,079 / 6,744,965 次，三者退出码均为 0，未见 crash/hang。确认临时 artifact 目录为空后删除约 1.7 MiB 生成语料；仓库固定 seed 保留。首次未切换到仓库工作目录的命令未启动 fuzz，调整工作目录后运行成功。本证据仅为任务级 smoke，不代替所有相关目标的阶段长预算。
+
+P1-L04 删除边界定向变异计划（2026-09-29 21:35 UTC）：候选为本地 `main` 的 `388eecd`，主 Agent 在 Debian 11.7 的 ext4 控制根＋真实 Btrfs 工作区执行；`cargo-mutants 27.1.0`、1 job，限于 Linux Adapter 的 `destroy.rs` 30 个变异，以 Linux Adapter＋CLI 测试包验证，输出 `/media/yxw/thinws/mutants-p1-l04-destroy/`。参考前批 17/23 个变异的 67–84 秒，首次查看约 3 分钟；此为受影响删除模块的任务级测试，不是 1103 个 Adapter 变异的全量收口。
+
+P1-L04 删除边界首批结果（2026-09-29）：上述 30 个变异耗时约 3 分钟，19 caught、2 unviable、9 missed；存活项涉及深度阈值、递归深度推进、目录/目录项身份重验以及同设备不同挂载识别。此批次未达标，保留结果，不将其称为删除安全门禁通过；后续以这些具体存活项为 RED 证据补真实文件系统测试并定向复测。
+
+P1-L04 删除边界补测计划（2026-09-29）：候选为 `388eecd` 加本轮 5 个 `destroy.rs` 单元测试及本实施记录，仍在 Debian 11.7 真实 Btrfs 上以 `cargo-mutants 27.1.0`、1 job，仅重跑上述 9 个 missed，Linux Adapter＋CLI 为验证包，输出 `/media/yxw/thinws/mutants-p1-l04-destroy-2/`。其中同设备不同挂载测试由临时 Btrfs bind mount 提供，测试环境显式传入 `THINWS_LINUX_BIND_MOUNT_CHILD`；真实运行前检查设备相同、mount ID 不同。参考首批 30 个用时约 3 分钟，此批首次主动查看约 2 分钟；结束后卸载并删除临时空目录，不动持久测试根。
+
+P1-L04 删除边界补测结果（2026-09-29）：9 个存活变异 70 秒全部 caught，含目录替换后不误删、512 层阈值及同设备不同 mount ID 拒绝。先以环境变量执行真实 bind mount 用例 1 项通过，再在同一挂载上运行 mutation baseline 与 9 项变异；`findmnt` 核对挂载源后卸载，临时目录 `rmdir` 完成。该测试未设置 `THINWS_LINUX_BIND_MOUNT_CHILD` 时不执行其特殊断言；常规测试通过不能代替 bind mount 专项证据。此补测只修复首批 9 个 missed，首批 2 个 unviable 保留原始分类，不冒充 crate 或阶段全量变异。
+
+本轮普通回归（2026-09-29）：Debian 11.7/ext4＋Btrfs 上七个产品包（Core、Ports、SQLite、Git CLI、Linux Adapter、Application、CLI）的 `cargo test --all-targets` 与严格 Clippy 均退出 0；macOS 全仓 fmt、严格 Clippy 退出 0。macOS 首次 `cargo test --workspace --all-targets` 在未改动的 P0 Probe 实验 `closed_output_and_diagnostic_channels_return_failure_without_panic` 出现一次返回码 0/预期 1 的失败；同项独立复跑通过，完整全仓复跑（仅加 `--quiet`）退出 0。该不稳定现象仍作为质量风险保留，未修改实验生产代码或把首次失败删除。Linux 全仓门禁仍受历史 macOS-only 包阻断；本轮未运行受影响 crate 的全量变异或阶段长预算 fuzz，不宣布 L04/L05 Done。

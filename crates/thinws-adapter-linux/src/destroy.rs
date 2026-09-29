@@ -146,3 +146,155 @@ fn stale_scope() -> PortError {
         "Workspace deletion scope changed",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs;
+    use std::os::fd::OwnedFd;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rustix::fs::{Mode, open};
+
+    use super::*;
+    use crate::tree::DIRECTORY_FLAGS;
+
+    fn fixture() -> (tempfile::TempDir, OwnedFd, FileIdentity, u64) {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs test mount");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-destroy-")
+            .tempdir_in(root)
+            .unwrap();
+        let copy = fixture.path().join("copy");
+        fs::create_dir(&copy).unwrap();
+        let fd = directory(&copy);
+        let identity = node(&fd)
+            .map_err(|error| error.into_port_error())
+            .unwrap()
+            .identity();
+        let mount = mount_id(&fd)
+            .map_err(|error| error.into_port_error())
+            .unwrap();
+        (fixture, fd, identity, mount)
+    }
+
+    fn directory(path: &Path) -> OwnedFd {
+        open(path, DIRECTORY_FLAGS, Mode::empty()).unwrap()
+    }
+
+    #[test]
+    fn held_directory_requires_both_identity_and_mount() {
+        let (_fixture, fd, identity, mount) = fixture();
+        require_directory(&fd, identity, mount).unwrap();
+        let wrong_identity = FileIdentity::new(identity.device(), identity.inode() + 1);
+        assert_eq!(
+            require_directory(&fd, wrong_identity, mount)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            require_directory(&fd, identity, mount + 1)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn changed_file_is_not_unlinked_after_scope_revalidation() {
+        let (fixture, fd, identity, mount) = fixture();
+        let copy = fixture.path().join("copy");
+        fs::write(copy.join("file"), b"original").unwrap();
+        let calls = AtomicUsize::new(0);
+        let result = remove_root_contents(&fd, identity, mount, &|| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 2 {
+                fs::rename(copy.join("file"), fixture.path().join("displaced")).unwrap();
+                fs::write(copy.join("file"), b"foreign").unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().kind(), PortErrorKind::InvalidLayout);
+        assert_eq!(fs::read(copy.join("file")).unwrap(), b"foreign");
+        assert_eq!(
+            fs::read(fixture.path().join("displaced")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn changed_child_name_does_not_delete_held_old_directory() {
+        let (fixture, fd, identity, mount) = fixture();
+        let copy = fixture.path().join("copy");
+        fs::create_dir(copy.join("nested")).unwrap();
+        fs::write(copy.join("nested/file"), b"original").unwrap();
+        let calls = AtomicUsize::new(0);
+        let result = remove_root_contents(&fd, identity, mount, &|| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 2 {
+                fs::rename(copy.join("nested"), fixture.path().join("displaced")).unwrap();
+                fs::create_dir(copy.join("nested")).unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().kind(), PortErrorKind::InvalidLayout);
+        assert_eq!(
+            fs::read(fixture.path().join("displaced/file")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn depth_limit_accepts_boundary_and_rejects_next_child() {
+        let (fixture, fd, identity, mount) = fixture();
+        let copy = fixture.path().join("copy");
+        fs::write(copy.join("leaf"), b"data").unwrap();
+        assert_eq!(
+            remove_directory_contents(&fd, identity, mount, MAX_DELETE_DEPTH, &|| Ok(())).unwrap(),
+            1
+        );
+        fs::create_dir(copy.join("nested")).unwrap();
+        fs::write(copy.join("nested/leaf"), b"data").unwrap();
+        assert_eq!(
+            remove_directory_contents(&fd, identity, mount, MAX_DELETE_DEPTH, &|| Ok(()))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(fs::read(copy.join("nested/leaf")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn same_device_child_on_different_mount_is_not_in_deletion_scope() {
+        let Some(child_path) = env::var_os("THINWS_LINUX_BIND_MOUNT_CHILD") else {
+            return;
+        };
+        let child_path = Path::new(&child_path);
+        let parent = directory(child_path.parent().unwrap());
+        let expected = node(&parent)
+            .map_err(|error| error.into_port_error())
+            .unwrap()
+            .identity();
+        let expected_mount = mount_id(&parent)
+            .map_err(|error| error.into_port_error())
+            .unwrap();
+        let name = child_path.file_name().unwrap();
+        let child = node_at(&parent, name)
+            .map_err(|error| error.into_port_error())
+            .unwrap();
+        assert_eq!(child.device, expected.device());
+        assert_ne!(
+            mount_id_at(&parent, name)
+                .map_err(|error| error.into_port_error())
+                .unwrap(),
+            expected_mount
+        );
+        assert_eq!(
+            checked_entry(&parent, name, expected, expected_mount)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+}

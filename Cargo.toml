@@ -8,6 +8,7 @@ members = [
     "crates/thinws-metadata-sqlite",
     "crates/thinws-ports",
     "experiments/p0/cleanup",
+    "experiments/p0/linux-reflink",
     "experiments/p0/materialize",
     "experiments/p0/probe",
 ]

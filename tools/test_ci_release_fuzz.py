@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import tomllib
 import unittest
 from os import environ
 from pathlib import Path
@@ -44,6 +45,18 @@ class ReleaseFuzzTests(unittest.TestCase):
             },
         )
         self.assertIn("thinws_platform_ownership_document", linux_targets)
+
+    def test_linux_git_status_target_has_its_shared_cleanup_dependency(self) -> None:
+        manifest = tomllib.loads(
+            (ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "thinws_git_status",
+            ci_release_fuzz.eligible_target_names(
+                ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml", "linux"
+            ),
+        )
+        self.assertIn("thinws-p0-cleanup", manifest["dependencies"])
 
     def test_unknown_platform_or_manifest_target_is_rejected(self) -> None:
         manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"

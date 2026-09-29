@@ -867,6 +867,8 @@ P1-L04 物理清理增量（2026-09-29）：Linux Adapter 已接入既有 `Boots
 
 P1-L05 CLI 增量（2026-09-29）：CLI 以目标平台依赖装配本机 Adapter；Linux 调用现有 Application 创建编排的 CoW-only 入口，不提供 Full Copy 执行器，Probe 对 Linux Full Copy 明确给出 unsupported。Debian 11.7 的 ext4 隔离控制根、真实 Btrfs 工作区上，包级 JSON/人类接口与实际二进制覆盖 init、doctor、dry-run、create、list、path、status、remove；`prl_fs` 来源即使带 `--allow-copy` 也拒绝。Git 已跟踪修改普通清理拒绝、显式强制清理留日志；登记 target 移走后强制清理仍返回 E_TARGET_MISSING 且保留登记；实际外部进程占用时强制清理返回 E_WORKSPACE_BUSY。Linux 产品包范围普通测试和严格 Clippy、macOS 全仓普通测试/严格 Clippy 均通过；Linux Release CLI 构建和 6 项真实 Btrfs Release E2E 通过。初次 `cargo deny check` 发现 Linux 两个仓库自有 crate 缺少本项目许可证例外，补精确例外后通过；离线 `cargo audit --no-fetch` 扫描本地 1261 条 advisory 通过。Debian 原样 `cargo check --workspace --all-targets` 仍被历史 macOS-only Adapter/P0 实验阻断，不作为 Linux 产品失败或全仓通过结论。受影响范围变异、fuzz 和阶段人工验收尚未完成，L01–L05 不标 Done。
 
+P1-L05 Linux 归属解析 fuzz 增量（2026-09-29）：为现有 `fuzz/` 增加按目标系统选择的纯内存归属文档 harness，Linux 使用版本 3 有效语料，macOS 仍使用既有版本 2 解析器；Linux 有效 seed 的普通解析回归通过。Debian 11.7、固定 `nightly-2026-08-14`、`cargo-fuzz 0.12.0`、AddressSanitizer、60 秒预算执行 Linux harness，完成 1,143,061 次、退出码 0、无 crash/hang。生成语料仅位于 Btrfs 临时目录，核对无 crash/timeout artifact 后删除；两个固定 seed 留在仓库。macOS 的全仓普通测试/严格 Clippy、两平台 fuzz harness 编译、Debian 产品包范围普通测试/严格 Clippy 均通过。本条仅为 Linux 归属解析的任务级 smoke 证据，不替代其他受影响解析器、定向变异、小阶段或阶段门禁。
+
 ---
 
 ## 五、依赖摘要

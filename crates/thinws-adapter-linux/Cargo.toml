@@ -24,3 +24,4 @@ thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
 
 [lints.rust]
 unsafe_code = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

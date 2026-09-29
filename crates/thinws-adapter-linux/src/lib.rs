@@ -23,6 +23,19 @@ mod control;
 #[cfg(target_os = "linux")]
 mod document;
 
+/// Exercises the Linux ownership document parser and canonical round-trip in memory.
+#[cfg(all(target_os = "linux", fuzzing))]
+pub fn fuzz_workspace_ownership_document(bytes: &[u8]) {
+    if let Ok(ownership) = document::decode_workspace_ownership(bytes) {
+        let encoded = document::encode_workspace_ownership(&ownership)
+            .expect("valid ownership has a bounded canonical encoding");
+        assert_eq!(
+            document::decode_workspace_ownership(&encoded),
+            Ok(ownership)
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod layout;
 

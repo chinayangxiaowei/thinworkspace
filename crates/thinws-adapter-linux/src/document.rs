@@ -503,4 +503,12 @@ mod tests {
             Err(DocumentError::InvalidIdentity)
         );
     }
+
+    #[test]
+    fn fuzz_corpus_contains_a_valid_linux_ownership_document() {
+        let seed = include_bytes!(
+            "../../../fuzz/corpus/thinws_platform_ownership_document/valid-linux-ownership"
+        );
+        assert!(decode_workspace_ownership(seed).is_ok());
+    }
 }

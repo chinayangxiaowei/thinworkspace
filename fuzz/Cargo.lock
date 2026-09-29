@@ -340,6 +340,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinws-adapter-linux"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "linux-raw-sys",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thinws-core",
+ "thinws-ports",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "thinws-adapter-macos"
 version = "0.1.0"
 dependencies = [
@@ -376,6 +392,7 @@ dependencies = [
  "libfuzzer-sys",
  "serde_json",
  "thinws-adapter-git-cli",
+ "thinws-adapter-linux",
  "thinws-adapter-macos",
  "thinws-application",
  "thinws-core",

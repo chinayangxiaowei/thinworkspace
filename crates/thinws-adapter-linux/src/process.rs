@@ -294,6 +294,8 @@ fn path_error(operation: &'static str, error: rustix::io::Errno) -> PortError {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
     use super::*;
 
     #[test]
@@ -303,5 +305,44 @@ mod tests {
         assert_eq!(identity.uid, rustix::process::geteuid().as_raw());
         assert!(identity.start_ticks > 0);
         assert_eq!(read_process_identity(&self_dir), Some(identity));
+    }
+
+    #[test]
+    fn changed_process_start_time_cannot_confirm_use() {
+        let self_dir = PathBuf::from(format!("/proc/{}", std::process::id()));
+        let identity = read_process_identity(&self_dir).unwrap();
+        let cwd = env::current_dir().unwrap();
+        assert_eq!(
+            inspect_process(&self_dir, identity, &cwd, Instant::now() + SCAN_BUDGET),
+            ProcessUse::ConfirmedInUse
+        );
+        let stale = ProcessIdentity {
+            start_ticks: identity.start_ticks + 1,
+            ..identity
+        };
+        assert_eq!(
+            inspect_process(&self_dir, stale, &cwd, Instant::now() + SCAN_BUDGET),
+            ProcessUse::ScanIncomplete
+        );
+    }
+
+    #[test]
+    fn renamed_workspace_root_does_not_revalidate_against_a_replacement() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-process-replace-")
+            .tempdir_in(root)
+            .unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let path = AbsolutePath::try_from_bytes(workspace.as_os_str().as_bytes().to_vec()).unwrap();
+        let held = open_bound_root(&path).unwrap();
+        fs::rename(&workspace, fixture.path().join("displaced")).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        assert_eq!(
+            revalidate_root(&path, &held).unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
     }
 }

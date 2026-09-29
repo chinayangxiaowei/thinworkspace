@@ -53,6 +53,7 @@ jobs:
           tools/test_check_crate_dependencies.py
           tools/test_ci_detach_image.py
           tools/test_ci_fuzz.py
+          tools/test_linux_btrfs_preflight.py
           tools/test_ci_mutation.py
           tools/test_ci_platform.py
           tools/test_ci_release_binary_e2e.py

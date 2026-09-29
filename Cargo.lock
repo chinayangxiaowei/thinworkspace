@@ -557,6 +557,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thinws-core",
+ "thinws-metadata-sqlite",
  "thinws-ports",
  "toml",
  "uuid",

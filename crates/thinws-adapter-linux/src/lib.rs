@@ -24,7 +24,13 @@ mod control;
 mod document;
 
 #[cfg(target_os = "linux")]
+mod layout;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]
 pub use control::LinuxPreparedDataRoot;
+
+#[cfg(target_os = "linux")]
+pub use layout::LinuxDataRootLayout;

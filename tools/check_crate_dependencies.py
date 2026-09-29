@@ -32,7 +32,7 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-adapter-git-cli": frozenset({"rustix"}),
     "thinws-adapter-linux": frozenset(
-        {"blake3", "libc", "linux-raw-sys", "rustix", "uuid"}
+        {"blake3", "libc", "linux-raw-sys", "rustix", "serde", "toml", "uuid"}
     ),
     "thinws-adapter-macos": frozenset(
         {"blake3", "libc", "rustix", "serde", "serde_json", "toml"}

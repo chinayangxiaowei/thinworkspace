@@ -21,6 +21,7 @@ use crate::{LinuxHostAdapter, LinuxPlatformProbe};
 pub struct LinuxPreparedDataRoot {
     data_root: AbsolutePath,
     volume_id: VolumeId,
+    mount_id: u64,
     pub(crate) directory: PrivateDirectory,
 }
 
@@ -38,8 +39,8 @@ impl LinuxPreparedDataRoot {
     /// Revalidates the held control directory and its verified filesystem identity.
     pub fn revalidate(&self) -> Result<(), PortError> {
         revalidate_private_directory(&self.directory)?;
-        let current = control_volume_id(&self.directory, &self.data_root)?;
-        if current != self.volume_id {
+        let current = control_filesystem_identity(&self.directory, &self.data_root)?;
+        if current != (self.volume_id, self.mount_id) {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
                 "control-root filesystem identity changed",
@@ -63,10 +64,11 @@ impl LinuxHostAdapter {
         }
         let directory = prepare_private_directory(self.control_root())?;
         require_unclaimed_control_root(&directory)?;
-        let volume_id = control_volume_id(&directory, data_root)?;
+        let (volume_id, mount_id) = control_filesystem_identity(&directory, data_root)?;
         let prepared = LinuxPreparedDataRoot {
             data_root: data_root.clone(),
             volume_id,
+            mount_id,
             directory,
         };
         prepared.revalidate()?;
@@ -240,15 +242,14 @@ fn require_unclaimed_control_root(directory: &PrivateDirectory) -> Result<(), Po
     revalidate_private_directory(directory)
 }
 
-fn control_volume_id(
+pub(crate) fn control_filesystem_identity(
     directory: &PrivateDirectory,
     data_root: &AbsolutePath,
-) -> Result<VolumeId, PortError> {
+) -> Result<(VolumeId, u64), PortError> {
     revalidate_private_directory(directory)?;
     let report = LinuxPlatformProbe.inspect_path(data_root)?;
     let held = report.ancestry().last().map(|entry| entry.identity());
     if report.resolution() != PathResolution::ExistingDirectory
-        || report.mount().mount_id().is_none()
         || held != Some(directory.file_identity())
     {
         return Err(PortError::new(
@@ -256,10 +257,10 @@ fn control_volume_id(
             "control-root path or mount identity changed",
         ));
     }
-    if !matches!(report.filesystem().type_name(), "ext4" | "btrfs") || !report.mount().writable() {
+    if !matches!(report.filesystem().type_name(), "ext4" | "btrfs") {
         return Err(PortError::new(
             PortErrorKind::CapabilityUnavailable,
-            "control-root filesystem is not verified and writable",
+            "control-root filesystem type is not verified",
         ));
     }
     let volume = report
@@ -273,6 +274,12 @@ fn control_volume_id(
                 "control-root filesystem identity is unavailable",
             )
         })?;
+    let mount_id = report.mount().mount_id().ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::CapabilityUnavailable,
+            "control-root mount identity is unavailable",
+        )
+    })?;
     revalidate_private_directory(directory)?;
-    Ok(volume)
+    Ok((volume, mount_id))
 }

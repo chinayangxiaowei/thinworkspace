@@ -96,6 +96,10 @@ impl PrivateDirectory {
     pub(crate) const fn file_identity(&self) -> FileIdentity {
         FileIdentity::new(self.identity.device, self.identity.inode)
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Held Linux advisory lock; dropping it releases the kernel lock.

@@ -547,6 +547,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinws-adapter-linux"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "linux-raw-sys",
+ "rustix",
+ "tempfile",
+ "thinws-core",
+ "thinws-ports",
+ "uuid",
+]
+
+[[package]]
 name = "thinws-adapter-macos"
 version = "0.1.0"
 dependencies = [

@@ -16,12 +16,14 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-cli": frozenset(
         {
             "thinws-adapter-git-cli",
+            "thinws-adapter-linux",
             "thinws-adapter-macos",
             "thinws-application",
             "thinws-metadata-sqlite",
         }
     ),
     "thinws-adapter-git-cli": frozenset({"thinws-core", "thinws-ports"}),
+    "thinws-adapter-linux": frozenset({"thinws-core", "thinws-ports"}),
     "thinws-adapter-macos": frozenset({"thinws-core", "thinws-ports"}),
     "thinws-metadata-sqlite": frozenset({"thinws-core", "thinws-ports"}),
 }
@@ -29,6 +31,9 @@ ALLOWED_LOCAL_DEPENDENCIES: dict[str, frozenset[str]] = {
 # Production dependency edges only; integration-test adapters remain dev dependencies.
 STRICT_EXTERNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "thinws-adapter-git-cli": frozenset({"rustix"}),
+    "thinws-adapter-linux": frozenset(
+        {"blake3", "libc", "linux-raw-sys", "rustix", "uuid"}
+    ),
     "thinws-adapter-macos": frozenset(
         {"blake3", "libc", "rustix", "serde", "serde_json", "toml"}
     ),

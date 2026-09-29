@@ -2075,16 +2075,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock after epoch")
                 .as_nanos();
-            let target_dir = env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .parent()
-                        .and_then(Path::parent)
-                        .expect("crate is beneath the workspace root")
-                        .join("target")
-                });
-            let base = target_dir
+            let base = super::super::retained_fixture_root()
                 .join("p0-07-inspect-fixtures")
                 .join(format!("{label}-{}-{nanos}-{unique}", std::process::id()));
             let root = base.join("copy-root");
@@ -2163,6 +2154,13 @@ mod tests {
             .env_clear()
             .env(FIFO_PROBE_MODE, mode)
             .env(FIFO_PROBE_ROOT, root);
+        #[cfg(target_os = "linux")]
+        command.env(
+            "THINWS_LINUX_BTRFS_TEST_ROOT",
+            env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+                .expect("set THINWS_LINUX_BTRFS_TEST_ROOT for the FIFO probe child"),
+        );
+        #[cfg(not(target_os = "linux"))]
         if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
             command.env("CARGO_TARGET_DIR", target_dir);
         }
@@ -2196,16 +2194,7 @@ mod tests {
         let root = PathBuf::from(
             env::var_os(FIFO_PROBE_ROOT).expect("FIFO probe root accompanies probe mode"),
         );
-        let target_dir = env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(Path::parent)
-                    .expect("crate is beneath the workspace root")
-                    .join("target")
-            });
-        let fixture_parent = target_dir.join("p0-07-inspect-fixtures");
+        let fixture_parent = super::super::retained_fixture_root().join("p0-07-inspect-fixtures");
         assert!(root.is_absolute(), "FIFO probe root must be absolute");
         assert!(
             root.starts_with(&fixture_parent),

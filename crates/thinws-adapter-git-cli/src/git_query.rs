@@ -40,6 +40,29 @@ const STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 256 * 1024;
 const MAX_DRAIN_READS: usize = 16;
 
+#[cfg(test)]
+fn retained_fixture_root() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::PathBuf::from(
+            std::env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+                .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root"),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("crate is beneath the workspace root")
+                    .join("target")
+            })
+    }
+}
+
 /// One of the fixed Git command shapes accepted by the inspector.
 pub enum GitQuery<'a> {
     /// Query the fixed system Git version in bounded-runner tests.
@@ -746,16 +769,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        let target_dir = env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(Path::parent)
-                    .expect("crate is beneath the workspace root")
-                    .join("target")
-            });
-        let directory = target_dir
+        let directory = super::retained_fixture_root()
             .join("p0-07-git-query-timeout-fixtures")
             .join(format!("{}-{nanos}-{unique}", process::id()));
         fs::create_dir_all(&directory).expect("create retained timeout fixture");

@@ -38,7 +38,7 @@ macOS 首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；Lin
 
 init 只建立固定的用户控制目录 `~/.thinws`；已完整初始化且身份一致时重复执行幂等。中断初始化留下的非空未归属控制目录不自动接管，需用户核对后在平台之外显式处理。没有 `--data-root`、reset 或 migrate。
 
-配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在本次运行识别的 home 目录下的 `~/.thinws`。macOS 要求控制目录位于 APFS；Linux 要求位于可验证身份的本机文件系统，当前真实验收使用 ext4。控制目录可以与 source/target 在不同卷或文件系统，不决定工作区目标卷。没有 `--data-root` 或 ThinWorkspace 专用环境变量来另选控制目录。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。
+配置、SQLite、生命周期锁、操作日志和工作区归属证据均保存在本次运行识别的 home 目录下的 `~/.thinws`。macOS 要求控制目录位于 APFS；Linux 当前实现仅接受可验证身份的 ext4 或 Btrfs 控制目录，真实验收组合使用 ext4。控制目录可以与 source/target 在不同卷或文件系统，不决定工作区目标卷。没有 `--data-root` 或 ThinWorkspace 专用环境变量来另选控制目录。旧 `~/Library/Application Support/ThinWorkspace/` 配置与旧 data root 不读取、不迁移、不接管，也不自动删除。
 
 doctor 对 ThinWorkspace 产品状态只读，报告主机、控制目录、未完成工作区与 Git 检查是否可用。它不修改配置、控制目录归属标记、主数据库、schema 或 Workspace 记录；SQLite 读取 WAL 数据库时可能管理同目录的 `state.db-wal`/`state.db-shm` 协调文件，因此该承诺不是文件系统字节零变化。只读预检不是 CoW 成功证据；没有 `doctor --repair`，也不自动续做中断操作。
 

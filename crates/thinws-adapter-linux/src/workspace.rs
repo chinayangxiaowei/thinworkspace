@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, StatxFlags};
 use thinws_core::{
     AbsolutePath, FileIdentity, PathResolution, SupportState, VolumeId, WorkspaceId,
+    WorkspaceReservation,
 };
 use thinws_ports::{
     DataRootLayoutEvidence, LifecycleLockGuard, LifecycleScope, PlatformProbe, PortConflict,
@@ -135,19 +136,8 @@ impl PreparedWorkspaceEvidence for LinuxPreparedWorkspace {
             &name,
             self.ownership_file_identity,
         )?;
-        let bytes = read_private_document(&self.ownership_metadata, &name)?.ok_or_else(|| {
-            PortError::new(
-                PortErrorKind::InvalidLayout,
-                "Workspace ownership proof is missing",
-            )
-        })?;
-        let current = decode_workspace_ownership(&bytes).map_err(|error| {
-            PortError::new(
-                PortErrorKind::InvalidLayout,
-                "decode Workspace ownership proof",
-            )
-            .with_source(error)
-        })?;
+        let current =
+            read_workspace_ownership(&self.ownership_metadata, self.ownership.workspace_id)?;
         if current != self.ownership {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
@@ -168,16 +158,7 @@ impl LinuxHostAdapter {
         workspace_id: WorkspaceId,
         target: &AbsolutePath,
     ) -> Result<LinuxPreparedWorkspace, PortError> {
-        if lock.scope() != LifecycleScope::DataRoot
-            || layout.data_root.path() != self.control_root()
-            || !lock.protects_directory(&layout.data_root)
-        {
-            return Err(PortError::new(
-                PortErrorKind::InvalidLayout,
-                "require matching Linux Workspace lifecycle lock",
-            ));
-        }
-        lock.revalidate()?;
+        validate_data_root_lock(self, lock, layout)?;
         layout.revalidate()?;
         let target_path = PathBuf::from(OsStr::from_bytes(target.as_bytes()));
         let parent_path = target_path
@@ -317,6 +298,204 @@ impl LinuxHostAdapter {
         prepared.revalidate()?;
         layout.revalidate()?;
         Ok(prepared)
+    }
+
+    /// Removes only the empty, ownership-verified operation directories after
+    /// materialization; the ordinary target and historical proof remain.
+    pub fn clear_workspace_incomplete(
+        &self,
+        lock: &LinuxLockGuard,
+        layout: &LinuxDataRootLayout,
+        prepared: LinuxPreparedWorkspace,
+    ) -> Result<(), PortError> {
+        validate_data_root_lock(self, lock, layout)?;
+        layout.revalidate()?;
+        prepared.revalidate()?;
+        // Preflight both before removing either, so a routine NotEmpty refusal
+        // leaves the original incomplete layout intact.
+        for directory in [&prepared.staging, &prepared.trash] {
+            require_empty_directory(directory)?;
+        }
+        for directory in [&prepared.staging, &prepared.trash] {
+            validate_data_root_lock(self, lock, layout)?;
+            prepared.parent.revalidate()?;
+            directory.revalidate()?;
+            require_btrfs_mount(
+                directory,
+                prepared.ownership.volume_id,
+                prepared.ownership.mount_id,
+            )?;
+            require_private_operation_directory(directory)?;
+            require_empty_directory(directory)?;
+            let name = directory.path.file_name().ok_or_else(|| {
+                PortError::new(
+                    PortErrorKind::InvalidLayout,
+                    "Workspace operation directory has no name",
+                )
+            })?;
+            rustix::fs::unlinkat(&prepared.parent.fd, name, AtFlags::REMOVEDIR).map_err(
+                |error| io_error("remove completed Workspace operation directory", error),
+            )?;
+            sync_directory(&prepared.parent.fd)?;
+        }
+        prepared.root.revalidate()?;
+        require_btrfs_mount(
+            &prepared.root,
+            prepared.ownership.volume_id,
+            prepared.ownership.mount_id,
+        )?;
+        layout.revalidate()
+    }
+
+    /// Checks one registered ordinary target against its persistent creation
+    /// identity without taking a lifecycle lock or changing product state.
+    pub fn validate_ready_workspace(
+        &self,
+        layout: &LinuxDataRootLayout,
+        reservation: &WorkspaceReservation,
+    ) -> Result<AbsolutePath, PortError> {
+        layout.revalidate()?;
+        let ownership = read_workspace_ownership(&layout.metadata, reservation.workspace_id())?;
+        if reservation.instance_id() != layout.instance_id
+            || ownership.instance_id != reservation.instance_id()
+            || ownership.target_path != *reservation.target_path()
+            || ownership.volume_id != reservation.target_volume_id()
+            || reservation.source_volume_id() != reservation.target_volume_id()
+            || ownership.isolated_path.is_some()
+        {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace registration and ownership proof differ",
+            ));
+        }
+        let target_path = PathBuf::from(OsStr::from_bytes(reservation.target_path().as_bytes()));
+        let parent_path = target_path.parent().ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::InvalidLayout,
+                "registered target has no parent",
+            )
+        })?;
+        let parent = open_target_directory(parent_path)?;
+        if parent.identity != ownership.parent {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "registered Workspace parent identity changed",
+            ));
+        }
+        require_btrfs_mount(&parent, ownership.volume_id, ownership.mount_id)?;
+        let target_name = target_path.file_name().ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::InvalidLayout,
+                "registered target has no name",
+            )
+        })?;
+        match rustix::fs::statat(&parent.fd, target_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {
+                return Err(PortError::new(
+                    PortErrorKind::NotFound,
+                    "registered Ready target is missing",
+                ));
+            }
+            Err(error) => return Err(io_error("inspect registered Ready target", error)),
+            Ok(_) => {}
+        }
+        let root = open_target_directory(&target_path)?;
+        if root.identity != ownership.target {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "registered Workspace target identity changed",
+            ));
+        }
+        require_btrfs_mount(&root, ownership.volume_id, ownership.mount_id)?;
+        for operation in [&ownership.staging, &ownership.trash] {
+            let name = Path::new(OsStr::from_bytes(operation.path.as_bytes()))
+                .file_name()
+                .ok_or_else(|| {
+                    PortError::new(PortErrorKind::InvalidLayout, "operation path has no name")
+                })?;
+            require_missing_child(&parent, name)?;
+        }
+        if read_workspace_ownership(&layout.metadata, reservation.workspace_id())? != ownership {
+            return Err(PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Ready ownership proof changed during validation",
+            ));
+        }
+        root.revalidate()?;
+        layout.revalidate()?;
+        Ok(reservation.target_path().clone())
+    }
+}
+
+fn validate_data_root_lock(
+    adapter: &LinuxHostAdapter,
+    lock: &LinuxLockGuard,
+    layout: &LinuxDataRootLayout,
+) -> Result<(), PortError> {
+    if lock.scope() != LifecycleScope::DataRoot
+        || layout.data_root.path() != adapter.control_root()
+        || !lock.protects_directory(&layout.data_root)
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "require matching Linux Workspace lifecycle lock",
+        ));
+    }
+    lock.revalidate()
+}
+
+fn read_workspace_ownership(
+    metadata: &PrivateDirectory,
+    workspace_id: WorkspaceId,
+) -> Result<WorkspaceOwnership, PortError> {
+    let bytes =
+        read_private_document(metadata, &ownership_name(workspace_id))?.ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::InvalidLayout,
+                "Workspace ownership proof is missing",
+            )
+        })?;
+    let ownership = decode_workspace_ownership(&bytes).map_err(|error| {
+        PortError::new(
+            PortErrorKind::InvalidLayout,
+            "decode Workspace ownership proof",
+        )
+        .with_source(error)
+    })?;
+    if ownership.workspace_id != workspace_id {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Workspace ownership ID does not match",
+        ));
+    }
+    Ok(ownership)
+}
+
+fn require_empty_directory(directory: &TargetDirectory) -> Result<(), PortError> {
+    directory.revalidate()?;
+    let mut entries = rustix::fs::Dir::read_from(&directory.fd)
+        .map_err(|error| io_error("read Workspace operation directory", error))?;
+    for entry in &mut entries {
+        let entry = entry.map_err(|error| io_error("read Workspace operation entry", error))?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Err(PortError::new(
+                PortErrorKind::NotEmpty,
+                "Workspace operation directory is not empty",
+            ));
+        }
+    }
+    directory.revalidate()
+}
+
+fn require_missing_child(parent: &TargetDirectory, name: &OsStr) -> Result<(), PortError> {
+    parent.revalidate()?;
+    match rustix::fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => parent.revalidate(),
+        Err(error) => Err(io_error("inspect registered operation directory", error)),
+        Ok(_) => Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "operation directory remains beside Ready target",
+        )),
     }
 }
 

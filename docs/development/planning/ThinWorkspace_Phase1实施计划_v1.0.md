@@ -851,13 +851,15 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 | P1-L01 通用物化身份与持久编解码 | Core/Port 不再把唯一 CoW 候选写死为 APFS；旧 macOS 记录和测试保持可读 | ADR-0007 | R3 | In Progress |
 | P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | In Progress |
 | P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | In Progress |
-| P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | Todo |
+| P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | In Progress |
 | P1-L05 CLI 装配与真实机验收 | Debian `thinws` 全命令可编译并完成 Btrfs 黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | Todo |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
 P1-L02/L04 交界实施记录（2026-09-29）：Linux Adapter 已增量加入显式 Btrfs target 的创建时目录身份与版本 3 归属文档，归属仅存于 ext4 控制根；真实 Btrfs 测试覆盖普通空 target、预占 target/操作目录拒绝、ext4 target 拒绝及 target 被替换后的失效。路径 Probe 的可写目录检测从不可用的空路径 `accessat` 调整为持有目录 FD 下的 `.` 检查，真实 Btrfs 回归确认可写证据。此能力尚未接入完整 `BootstrapStore`、Application 或 CLI；Ready 查询、空间统计、安全删除与命令黑盒验收仍未完成，不调整任务 Done 状态。
 本次本地证据：Debian 11.7、ext4 控制测试根 `/home/yxw`、真实 Btrfs 测试根 `/media/yxw/thinws` 上，`cargo test -p thinws-adapter-linux --all-targets` 共 44 项通过；该包 `cargo clippy --all-targets --all-features -- -D warnings`、全仓 fmt、macOS 全仓普通测试与依赖方向检查通过。Linux `cargo check --workspace --all-targets` 仍因既有 macOS-only Adapter/P0 实验未条件编译而失败，CLI 尚不能在 Debian 构建；Linux VM 尚未安装 `cargo-mutants`，定向变异及本次归属解析 fuzz 未执行，故本记录不作为任务或小阶段放行。
+P1-L04 查询入口增量（2026-09-29）：已登记 Workspace 的创建收尾现在仅删除归属可证且为空的 staging/trash；Ready 路径查询只读比对 SQLite reservation 所持字段与版本 3 归属文档、Btrfs FSID/mount ID、父目录及 target 创建身份，并拒绝未清操作目录。真实 ext4 控制根＋Btrfs target 测试覆盖非空 staging/trash 拒绝、target 缺失/替换、父目录替换、登记卷不符及归属文档变动；另以真实 Btrfs `FICLONE` 完成“准备目录 → 物化 → 清理空操作目录 → 按登记重新查询”链路，副本改写不影响源。此处尚未接入 `BootstrapStore` trait 与 CLI；空间统计、删除、日志、完整门禁和黑盒命令仍待做，因此 L04 仅为 In Progress，不视为 L03 或 L04 收口。
+本次验证：Debian 11.7 的 `thinws-adapter-linux` 全目标 50 项测试与严格 Clippy、macOS 全 workspace 格式/严格 Clippy、依赖方向检查通过。macOS 全 workspace 普通测试首跑在未改动的 `real_cli_git_incomplete_refusal_exposes_the_specific_issue` 二次人工输出断言偶发得到 `E_WORKSPACE_BUSY`（退出码 23，预期 Git 检查不完整的 25）；该用例单独复跑以及全 workspace 第二次运行均通过。尚未定位该占用波动根因，不将首跑记为通过；Linux 定向变异/fuzz、Linux 全仓编译和 CLI 黑盒仍未完成。
 
 ---
 

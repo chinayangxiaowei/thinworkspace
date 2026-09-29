@@ -51,6 +51,181 @@ fn report_for_with_inode(
     .unwrap()
 }
 
+fn btrfs_report_for(requested: &str, volume_id: VolumeId) -> PathCapabilityReport {
+    btrfs_report_for_mount(requested, volume_id, Some(7), "btrfs")
+}
+
+fn btrfs_report_for_mount(
+    requested: &str,
+    volume_id: VolumeId,
+    mount_id: Option<u64>,
+    filesystem: &str,
+) -> PathCapabilityReport {
+    let requested = path(requested);
+    PathCapabilityReport::new(
+        requested.clone(),
+        PathResolution::ExistingDirectory,
+        requested.clone(),
+        Vec::new(),
+        vec![DirectoryIdentityEvidence::new(
+            requested,
+            FileIdentity::new(59, 256),
+        )],
+        FileSystemIdentity::new(filesystem, [1, 2], Evidence::Known(volume_id)),
+        mount_id.map_or(MountEvidence::new(0, true), |id| {
+            MountEvidence::new(0, true).with_mount_id(id)
+        }),
+        SupportState::Supported,
+        SupportState::Supported,
+        SupportState::Supported,
+    )
+    .unwrap()
+}
+
+#[test]
+fn btrfs_plan_requires_the_expected_filesystem_and_same_known_mount() {
+    let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
+    let build = |source: PathCapabilityReport| {
+        MaterializationPathReport::new(
+            source,
+            btrfs_report_for("/media/yxw/thinws/target", registered),
+            btrfs_report_for("/media/yxw/thinws/staging", registered),
+            btrfs_report_for("/media/yxw/thinws/trash", registered),
+            CandidateEvidence::new(
+                MaterializerKind::BtrfsReflink,
+                SupportState::Supported,
+                Vec::new(),
+            ),
+            CandidateEvidence::new(
+                MaterializerKind::FullCopy,
+                SupportState::Supported,
+                Vec::new(),
+            ),
+            ProbeEvidenceDigest::new([12; 32]),
+        )
+    };
+    for (source, expected) in [
+        (
+            btrfs_report_for_mount("/source", registered, Some(8), "btrfs"),
+            MaterializationPlanError::DifferentMount,
+        ),
+        (
+            btrfs_report_for_mount("/source", registered, None, "btrfs"),
+            MaterializationPlanError::UnknownMount,
+        ),
+        (
+            btrfs_report_for_mount("/source", registered, Some(7), "ext4"),
+            MaterializationPlanError::WrongFilesystem,
+        ),
+    ] {
+        assert_eq!(
+            MaterializationPlan::for_cow_clone(&build(source), FallbackPolicy::Deny),
+            Err(expected)
+        );
+    }
+
+    let all_ext4 = MaterializationPathReport::new(
+        btrfs_report_for_mount("/source", registered, Some(7), "ext4"),
+        btrfs_report_for_mount("/target", registered, Some(7), "ext4"),
+        btrfs_report_for_mount("/staging", registered, Some(7), "ext4"),
+        btrfs_report_for_mount("/trash", registered, Some(7), "ext4"),
+        CandidateEvidence::new(
+            MaterializerKind::BtrfsReflink,
+            SupportState::Supported,
+            Vec::new(),
+        ),
+        CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        ),
+        ProbeEvidenceDigest::new([19; 32]),
+    );
+    assert_eq!(
+        MaterializationPlan::for_cow_clone(&all_ext4, FallbackPolicy::Deny),
+        Err(MaterializationPlanError::WrongFilesystem)
+    );
+}
+
+#[test]
+fn btrfs_fallback_remains_explicit_and_same_mount_only() {
+    let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
+    let report = MaterializationPathReport::new(
+        btrfs_report_for("/source", registered),
+        btrfs_report_for("/target", registered),
+        btrfs_report_for("/staging", registered),
+        btrfs_report_for("/trash", registered),
+        CandidateEvidence::new(
+            MaterializerKind::BtrfsReflink,
+            SupportState::Unsupported,
+            vec!["clone_capability_unsupported".to_owned()],
+        ),
+        CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        ),
+        ProbeEvidenceDigest::new([13; 32]),
+    );
+    assert_eq!(
+        MaterializationPlan::for_full_copy_after_preflight(&report, FallbackPolicy::Deny),
+        Err(MaterializationPlanError::FallbackDenied)
+    );
+    let plan = MaterializationPlan::for_full_copy_after_preflight(
+        &report,
+        FallbackPolicy::AllowFullCopyOnCowUnsupported,
+    )
+    .unwrap();
+    assert_eq!(plan.selected_adapter(), MaterializerKind::FullCopy);
+    assert_eq!(
+        plan.fallback_reason(),
+        Some(FallbackReason::CloneUnsupportedAtPreflight)
+    );
+}
+
+fn btrfs_combined(volume_id: VolumeId) -> MaterializationPathReport {
+    MaterializationPathReport::new(
+        btrfs_report_for("/media/yxw/thinws/source", volume_id),
+        btrfs_report_for("/media/yxw/thinws/target", volume_id),
+        btrfs_report_for("/media/yxw/thinws/staging", volume_id),
+        btrfs_report_for("/media/yxw/thinws/trash", volume_id),
+        CandidateEvidence::new(
+            MaterializerKind::BtrfsReflink,
+            SupportState::Supported,
+            Vec::new(),
+        ),
+        CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Supported,
+            Vec::new(),
+        ),
+        ProbeEvidenceDigest::new([11; 32]),
+    )
+}
+
+#[test]
+fn btrfs_clone_plan_and_receipt_use_the_selected_backend() {
+    let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
+    let report = btrfs_combined(registered);
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
+    assert_eq!(plan.selected_adapter(), MaterializerKind::BtrfsReflink);
+    let digest = TreeDigest::new([4; 32]);
+    let receipt = MaterializationReceipt::successful_cow_clone(
+        &plan,
+        1,
+        1,
+        Vec::new(),
+        digest,
+        digest,
+        2,
+        12,
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(receipt.actual_adapter(), MaterializerKind::BtrfsReflink);
+    assert_eq!(receipt.cow_evidence(), CowEvidence::Confirmed);
+}
+
 fn combined(
     source_volume: VolumeId,
     target_volume: VolumeId,
@@ -116,7 +291,7 @@ fn platform_report_and_unknown_evidence_preserve_each_observed_fact() {
     assert_eq!(host.kernel_release(), "24.6.0");
     assert_eq!(host.architecture(), "arm64");
     assert_eq!(host.adapter(), "apfs-file-clone");
-    assert_eq!(host.apfs_clone(), SupportState::Supported);
+    assert_eq!(host.cow_clone(), SupportState::Supported);
 
     let known: Evidence<u8> = Evidence::Known(7);
     assert_eq!(known.unknown_reason(), None);
@@ -136,7 +311,7 @@ fn apfs_plan_requires_one_same_known_volume_and_keeps_the_probe_digest() {
     let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
     let report = combined(registered, registered, SupportState::Supported);
 
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     assert_eq!(plan.requested_mode(), MaterializationMode::CowClone);
     assert_eq!(plan.effective_mode(), MaterializationMode::CowClone);
     assert_eq!(plan.selected_adapter(), MaterializerKind::ApfsFileClone);
@@ -149,28 +324,28 @@ fn apfs_plan_requires_one_same_known_volume_and_keeps_the_probe_digest() {
 
     let other = volume("c25d1051-142f-423e-bcd2-1e07daa4246e");
     assert_eq!(
-        MaterializationPlan::for_apfs_clone(
+        MaterializationPlan::for_cow_clone(
             &combined(registered, other, SupportState::Supported),
             FallbackPolicy::Deny,
         ),
         Err(MaterializationPlanError::DifferentVolume)
     );
     assert_eq!(
-        MaterializationPlan::for_apfs_clone(
+        MaterializationPlan::for_cow_clone(
             &combined(registered, registered, SupportState::Unsupported),
             FallbackPolicy::Deny,
         ),
         Err(MaterializationPlanError::CandidateUnsupported)
     );
     assert_eq!(
-        MaterializationPlan::for_apfs_clone(
+        MaterializationPlan::for_cow_clone(
             &combined(registered, other, SupportState::Unsupported),
             FallbackPolicy::Deny,
         ),
         Err(MaterializationPlanError::DifferentVolume)
     );
 
-    let unknown = MaterializationPlan::for_apfs_clone(
+    let unknown = MaterializationPlan::for_cow_clone(
         &combined(registered, registered, SupportState::Unknown),
         FallbackPolicy::Deny,
     )
@@ -182,10 +357,10 @@ fn apfs_plan_requires_one_same_known_volume_and_keeps_the_probe_digest() {
 fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone() {
     let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
     let report = combined(registered, registered, SupportState::Supported);
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let digest = TreeDigest::new([3; 32]);
 
-    let empty = MaterializationReceipt::successful_apfs_clone(
+    let empty = MaterializationReceipt::successful_cow_clone(
         &plan,
         0,
         0,
@@ -202,7 +377,7 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
     assert_eq!(empty.target_volume_id(), Some(registered));
     assert_eq!(empty.elapsed_millis(), 4);
 
-    let cloned = MaterializationReceipt::successful_apfs_clone(
+    let cloned = MaterializationReceipt::successful_cow_clone(
         &plan,
         2,
         2,
@@ -220,7 +395,7 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
     assert_eq!(cloned.elapsed_millis(), 5);
 
     assert!(
-        MaterializationReceipt::successful_apfs_clone(
+        MaterializationReceipt::successful_cow_clone(
             &plan,
             2,
             1,
@@ -234,7 +409,7 @@ fn successful_clone_receipt_cannot_claim_cow_without_a_real_regular_file_clone()
         .is_err()
     );
 
-    let mismatched_manifest = MaterializationReceipt::successful_apfs_clone(
+    let mismatched_manifest = MaterializationReceipt::successful_cow_clone(
         &plan,
         1,
         1,
@@ -299,7 +474,7 @@ fn preflight_full_copy_requires_explicit_policy_and_only_clone_unsupported_evide
         eligible.target_root().clone(),
         eligible.staging().clone(),
         eligible.trash().clone(),
-        eligible.apfs_clone().clone(),
+        eligible.cow_clone().clone(),
         CandidateEvidence::new(
             MaterializerKind::ApfsFileClone,
             SupportState::Supported,
@@ -354,12 +529,10 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         &[],
         SupportState::Supported,
     );
-    let prior_plan = MaterializationPlan::for_apfs_clone(
-        &initial,
-        FallbackPolicy::AllowFullCopyOnCowUnsupported,
-    )
-    .unwrap();
-    let clean_failure = MaterializationReceipt::failed_apfs_clone(
+    let prior_plan =
+        MaterializationPlan::for_cow_clone(&initial, FallbackPolicy::AllowFullCopyOnCowUnsupported)
+            .unwrap();
+    let clean_failure = MaterializationReceipt::failed_cow_clone(
         &prior_plan,
         MaterializationFailureKind::CowUnavailable,
         Vec::new(),
@@ -426,7 +599,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         prior_plan.probe_evidence_digest()
     );
 
-    let unverified_source = MaterializationReceipt::failed_apfs_clone(
+    let unverified_source = MaterializationReceipt::failed_cow_clone(
         &prior_plan,
         MaterializationFailureKind::CowUnavailable,
         Vec::new(),
@@ -451,7 +624,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         MaterializationFailureKind::SourceChanged,
         MaterializationFailureKind::TargetChanged,
     ] {
-        let failed_clone = MaterializationReceipt::failed_apfs_clone(
+        let failed_clone = MaterializationReceipt::failed_cow_clone(
             &prior_plan,
             failure_kind,
             Vec::new(),
@@ -471,7 +644,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         );
     }
 
-    let incomplete = MaterializationReceipt::failed_apfs_clone(
+    let incomplete = MaterializationReceipt::failed_cow_clone(
         &prior_plan,
         MaterializationFailureKind::CowUnavailable,
         vec![thinws_core::CreatedObjectEvidence::new(
@@ -515,7 +688,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
             .with_quarantined(vec![retained_path]),
     ];
     for rollback in bad_rollbacks {
-        let failed_clone = MaterializationReceipt::failed_apfs_clone(
+        let failed_clone = MaterializationReceipt::failed_cow_clone(
             &prior_plan,
             MaterializationFailureKind::CowUnavailable,
             Vec::new(),
@@ -541,7 +714,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         );
     }
     for (target_modified, clone_calls) in [(true, 0), (false, 1)] {
-        let failed_clone = MaterializationReceipt::failed_apfs_clone(
+        let failed_clone = MaterializationReceipt::failed_cow_clone(
             &prior_plan,
             MaterializationFailureKind::CowUnavailable,
             Vec::new(),
@@ -572,7 +745,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         thinws_core::MaterializedEntryKind::RegularFile,
         Some(FileIdentity::new(1, 88)),
     );
-    let rolled_back = MaterializationReceipt::failed_apfs_clone(
+    let rolled_back = MaterializationReceipt::failed_cow_clone(
         &prior_plan,
         MaterializationFailureKind::CowUnavailable,
         vec![created.clone()],
@@ -636,8 +809,8 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
     assert_eq!(failed_copy.cow_evidence(), CowEvidence::NotUsed);
     assert_eq!(failed_copy.failed_attempts(), fallback.failed_attempts());
 
-    let denied_plan = MaterializationPlan::for_apfs_clone(&initial, FallbackPolicy::Deny).unwrap();
-    let denied_receipt = MaterializationReceipt::failed_apfs_clone(
+    let denied_plan = MaterializationPlan::for_cow_clone(&initial, FallbackPolicy::Deny).unwrap();
+    let denied_receipt = MaterializationReceipt::failed_cow_clone(
         &denied_plan,
         MaterializationFailureKind::CowUnavailable,
         Vec::new(),
@@ -680,7 +853,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         fresh.target_root().clone(),
         fresh.staging().clone(),
         fresh.trash().clone(),
-        fresh.apfs_clone().clone(),
+        fresh.cow_clone().clone(),
         fresh.full_copy().clone(),
         ProbeEvidenceDigest::new([11; 32]),
     );
@@ -703,7 +876,7 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         ),
         fresh.staging().clone(),
         fresh.trash().clone(),
-        fresh.apfs_clone().clone(),
+        fresh.cow_clone().clone(),
         fresh.full_copy().clone(),
         ProbeEvidenceDigest::new([12; 32]),
     );
@@ -725,11 +898,11 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         fresh.target_root().clone(),
         fresh.staging().clone(),
         fresh.trash().clone(),
-        fresh.apfs_clone().clone(),
+        fresh.cow_clone().clone(),
         fresh.full_copy().clone(),
         ProbeEvidenceDigest::new([13; 32]),
     );
-    let other_plan = MaterializationPlan::for_apfs_clone(
+    let other_plan = MaterializationPlan::for_cow_clone(
         &other_report,
         FallbackPolicy::AllowFullCopyOnCowUnsupported,
     )
@@ -762,7 +935,7 @@ fn full_copy_receipt_preserves_fallback_facts_without_claiming_cow() {
     let digest = TreeDigest::new([7; 32]);
 
     assert_eq!(
-        MaterializationReceipt::successful_apfs_clone(
+        MaterializationReceipt::successful_cow_clone(
             &plan,
             1,
             1,
@@ -899,10 +1072,10 @@ fn attempt_evidence_accessors_preserve_each_nondefault_measurement() {
 fn failed_receipt_distinguishes_a_modified_target_root_from_a_prewrite_failure() {
     let registered = volume("1a42c888-32e3-489c-9bfa-67fd640a94e8");
     let report = combined(registered, registered, SupportState::Supported);
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let rollback = RollbackEvidence::new(RollbackStatus::ConfirmedBaseline, Vec::new(), Vec::new());
 
-    let receipt = MaterializationReceipt::failed_apfs_clone(
+    let receipt = MaterializationReceipt::failed_cow_clone(
         &plan,
         MaterializationFailureKind::Filesystem,
         Vec::new(),

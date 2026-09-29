@@ -289,7 +289,7 @@ impl WorkspaceMaterializer for CleanCowUnavailable {
                 PortErrorKind::CapabilityUnavailable,
                 "injected CoW unavailable",
             ),
-            MaterializationReceipt::failed_apfs_clone(
+            MaterializationReceipt::failed_cow_clone(
                 plan,
                 MaterializationFailureKind::CowUnavailable,
                 Vec::new(),
@@ -325,7 +325,7 @@ fn source_digest(adapter: &MacOsHostAdapter, source: &Path, temp: &Path) -> Tree
     let report = adapter
         .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
         .unwrap();
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     ApfsCloneMaterializer::new(adapter.clone())
         .materialize(&request, &plan)
         .unwrap()

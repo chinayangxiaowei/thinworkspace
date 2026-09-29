@@ -4,7 +4,7 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Stable APFS volume identity in canonical lowercase UUID form.
+/// Stable platform filesystem/volume identity in canonical lowercase UUID form.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VolumeId(Uuid);
 

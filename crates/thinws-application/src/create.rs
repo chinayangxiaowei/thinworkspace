@@ -195,7 +195,7 @@ where
     B: BootstrapStore + LifecycleLock<Guard = <B as BootstrapStore>::LockGuard> + PlatformProbe,
     M: MetadataStoreFactory<<B as BootstrapStore>::DataRootLayout>,
 {
-    /// Previews current APFS materialization facts without any product-state write.
+    /// Previews current platform materialization facts without any product-state write.
     pub fn preview_create(&self, request: &CreateRequest) -> Result<CreatePreview, UseCaseError> {
         let identity = self
             .bootstrap
@@ -284,7 +284,7 @@ where
         })
     }
 
-    /// Creates an ordinary Workspace directory using injected APFS and Full Copy backends.
+    /// Creates an ordinary Workspace directory using injected CoW and Full Copy backends.
     pub fn create<C, F>(
         &self,
         request: CreateRequest,
@@ -295,8 +295,10 @@ where
         C: WorkspaceMaterializer,
         F: WorkspaceMaterializer,
     {
-        if clone_materializer.kind() != MaterializerKind::ApfsFileClone
-            || copy_materializer.kind() != MaterializerKind::FullCopy
+        if !matches!(
+            clone_materializer.kind(),
+            MaterializerKind::ApfsFileClone | MaterializerKind::BtrfsReflink
+        ) || copy_materializer.kind() != MaterializerKind::FullCopy
         {
             return Err(semantic_error(
                 ErrorCode::CapabilityUnavailable,
@@ -554,6 +556,14 @@ where
                 "materialization volume differs from reservation",
             ));
         }
+        if plan.selected_adapter() != MaterializerKind::FullCopy
+            && plan.selected_adapter() != clone_materializer.kind()
+        {
+            return Err(semantic_error(
+                ErrorCode::CapabilityUnavailable,
+                "selected CoW backend does not match the injected materializer",
+            ));
+        }
         let receipt = if plan.selected_adapter() == MaterializerKind::FullCopy {
             copy_materializer
                 .materialize(&materialize, &plan)
@@ -574,7 +584,7 @@ where
                         return Err(UseCaseError {
                             diagnostic: thinws_core::CoreError::new(
                                 ErrorCode::CowUnavailable,
-                                "APFS clone is unavailable and Full Copy was not authorized",
+                                "CoW clone is unavailable and Full Copy was not authorized",
                             ),
                             source: Some(Box::new(error)),
                             partial_receipts: Box::default(),
@@ -663,10 +673,10 @@ fn select_plan(
     } else {
         FallbackPolicy::Deny
     };
-    if report.apfs_clone().state() == SupportState::Unsupported && allow_full_copy {
+    if report.cow_clone().state() == SupportState::Unsupported && allow_full_copy {
         MaterializationPlan::for_full_copy_after_preflight(report, policy).map_err(map_plan_error)
     } else {
-        MaterializationPlan::for_apfs_clone(report, policy).map_err(map_plan_error)
+        MaterializationPlan::for_cow_clone(report, policy).map_err(map_plan_error)
     }
 }
 
@@ -916,18 +926,22 @@ fn map_plan_error(error: MaterializationPlanError) -> UseCaseError {
     match error {
         MaterializationPlanError::CandidateUnsupported => semantic_error(
             ErrorCode::CowUnavailable,
-            "APFS clone is unavailable and Full Copy was not authorized",
+            "CoW clone is unavailable and Full Copy was not authorized",
         ),
         MaterializationPlanError::UnknownVolume => semantic_error(
             ErrorCode::CapabilityUnavailable,
             "materialization volume identity is unknown",
         ),
-        MaterializationPlanError::NotApfs | MaterializationPlanError::DifferentVolume => {
-            semantic_error(
-                ErrorCode::TargetLayout,
-                "materialization paths are not on one APFS volume",
-            )
-        }
+        MaterializationPlanError::WrongFilesystem
+        | MaterializationPlanError::DifferentVolume
+        | MaterializationPlanError::DifferentMount => semantic_error(
+            ErrorCode::TargetLayout,
+            "materialization paths do not satisfy the selected filesystem layout",
+        ),
+        MaterializationPlanError::UnknownMount => semantic_error(
+            ErrorCode::CapabilityUnavailable,
+            "materialization mount identity is unknown",
+        ),
         _ => semantic_error(
             ErrorCode::Filesystem,
             "materialization plan cannot be completed",
@@ -940,7 +954,7 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
         UseCaseError {
             diagnostic: thinws_core::CoreError::new(
                 ErrorCode::CowUnavailable,
-                "APFS clone is unavailable and Full Copy was not authorized",
+                "CoW clone is unavailable and Full Copy was not authorized",
             ),
             source: Some(Box::new(error)),
             partial_receipts: Box::default(),
@@ -1146,7 +1160,7 @@ mod tests {
             child.mount(),
             child.readability(),
             child.writability(),
-            child.apfs_clone(),
+            child.cow_clone(),
         )
         .unwrap();
         assert!(!paths_overlap(
@@ -1312,9 +1326,16 @@ mod tests {
                 .code(),
             ErrorCode::CapabilityUnavailable
         );
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::UnknownMount)
+                .diagnostic()
+                .code(),
+            ErrorCode::CapabilityUnavailable
+        );
         for cause in [
-            MaterializationPlanError::NotApfs,
+            MaterializationPlanError::WrongFilesystem,
             MaterializationPlanError::DifferentVolume,
+            MaterializationPlanError::DifferentMount,
         ] {
             assert_eq!(
                 map_plan_error(cause).diagnostic().code(),

@@ -84,7 +84,7 @@ impl WorkspaceMaterializer for NonCowFailure {
     ) -> Result<MaterializationReceipt, MaterializationFailure> {
         Err(MaterializationFailure::new(
             PortError::new(PortErrorKind::Io, "injected non-CoW clone failure"),
-            MaterializationReceipt::failed_apfs_clone(
+            MaterializationReceipt::failed_cow_clone(
                 plan,
                 MaterializationFailureKind::Filesystem,
                 Vec::new(),
@@ -153,7 +153,7 @@ impl WorkspaceMaterializer for CleanCowUnavailable {
                 PortErrorKind::CapabilityUnavailable,
                 "injected CoW unavailable",
             ),
-            MaterializationReceipt::failed_apfs_clone(
+            MaterializationReceipt::failed_cow_clone(
                 plan,
                 MaterializationFailureKind::CowUnavailable,
                 Vec::new(),
@@ -390,7 +390,7 @@ fn p1_09_runtime_copy_requires_explicit_policy_and_a_clean_cow_failure() {
     let report = adapter
         .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&materialize))
         .unwrap();
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let source_digest = ApfsCloneMaterializer::new(adapter.clone())
         .materialize(&materialize, &plan)
         .unwrap()

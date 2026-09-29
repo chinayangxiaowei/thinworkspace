@@ -85,7 +85,7 @@ impl Backend {
 
     fn candidate_is_executable(self, report: &MaterializationPathReport) -> bool {
         match self {
-            Self::ApfsClone => report.apfs_clone().state() != SupportState::Unsupported,
+            Self::ApfsClone => report.cow_clone().state() != SupportState::Unsupported,
             Self::FullCopy => report.full_copy().state() == SupportState::Supported,
         }
     }
@@ -182,7 +182,7 @@ fn materialize_with_backend(
             let failure_kind = failed.error.kind;
             let port_error = failed.error.into_port_error();
             let receipt = match backend {
-                Backend::ApfsClone => MaterializationReceipt::failed_apfs_clone(
+                Backend::ApfsClone => MaterializationReceipt::failed_cow_clone(
                     plan,
                     failure_kind,
                     created,
@@ -463,7 +463,7 @@ fn materialize_inner(
         .map(TrackedCreated::evidence)
         .collect();
     let receipt = match backend {
-        Backend::ApfsClone => MaterializationReceipt::successful_apfs_clone(
+        Backend::ApfsClone => MaterializationReceipt::successful_cow_clone(
             plan,
             snapshot.manifest.regular_files,
             context.clone_calls,
@@ -2141,7 +2141,7 @@ mod tests {
         let report = adapter
             .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
             .unwrap();
-        let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+        let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
         (temp, request, plan, adapter)
     }
 
@@ -2152,14 +2152,14 @@ mod tests {
         let report = adapter
             .inspect_materialization_paths(&MaterializationPathProbeRequest::from(request))
             .unwrap();
-        let clone_plan = MaterializationPlan::for_apfs_clone(
+        let clone_plan = MaterializationPlan::for_cow_clone(
             &report,
             FallbackPolicy::AllowFullCopyOnCowUnsupported,
         )
         .unwrap();
         let source = open_bound_directory(request.source(), report.source()).unwrap();
         let source_digest = snapshot_tree(&source).unwrap().manifest.digest();
-        let failed_clone = MaterializationReceipt::failed_apfs_clone(
+        let failed_clone = MaterializationReceipt::failed_cow_clone(
             &clone_plan,
             MaterializationFailureKind::CowUnavailable,
             Vec::new(),
@@ -2266,7 +2266,7 @@ mod tests {
             report.target_root().clone(),
             report.staging().clone(),
             report.trash().clone(),
-            report.apfs_clone().clone(),
+            report.cow_clone().clone(),
             thinws_core::CandidateEvidence::new(
                 MaterializerKind::FullCopy,
                 SupportState::Unsupported,
@@ -2301,7 +2301,7 @@ mod tests {
                 mount,
                 original.readability(),
                 original.writability(),
-                original.apfs_clone(),
+                original.cow_clone(),
             )
             .unwrap()
         };
@@ -2945,7 +2945,7 @@ mod tests {
         let report = adapter
             .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
             .unwrap();
-        let plan = MaterializationPlan::for_apfs_clone(
+        let plan = MaterializationPlan::for_cow_clone(
             &report,
             FallbackPolicy::AllowFullCopyOnCowUnsupported,
         )
@@ -3020,7 +3020,7 @@ mod tests {
         let initial = adapter
             .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
             .unwrap();
-        let clone_plan = MaterializationPlan::for_apfs_clone(
+        let clone_plan = MaterializationPlan::for_cow_clone(
             &initial,
             FallbackPolicy::AllowFullCopyOnCowUnsupported,
         )

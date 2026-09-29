@@ -168,7 +168,7 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     } else {
         SupportState::Unsupported
     };
-    let apfs_clone = path_clone_support(&current, &filesystem);
+    let cow_clone = path_clone_support(&current, &filesystem);
 
     PathCapabilityReport::new(
         path.clone(),
@@ -180,7 +180,7 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         MountEvidence::new(raw_filesystem.mount_flags, mount_writable),
         readability,
         writability,
-        apfs_clone,
+        cow_clone,
     )
     .map_err(|error| probe_invalid("build path capability report", error))
 }
@@ -221,7 +221,7 @@ fn combined_clone_support(
                 support.unknown("volume_unknown");
             }
         }
-        support.record("clone_capability", report.apfs_clone());
+        support.record("clone_capability", report.cow_clone());
     }
 
     support.finish()
@@ -520,7 +520,7 @@ fn update_path_report(hasher: &mut blake3::Hasher, report: &PathCapabilityReport
     hasher.update(&[
         enum_byte(report.readability()),
         enum_byte(report.writability()),
-        enum_byte(report.apfs_clone()),
+        enum_byte(report.cow_clone()),
     ]);
 }
 
@@ -537,6 +537,7 @@ const fn materializer_kind_byte(kind: MaterializerKind) -> u8 {
     match kind {
         MaterializerKind::ApfsFileClone => 1,
         MaterializerKind::FullCopy => 2,
+        MaterializerKind::BtrfsReflink => 3,
     }
 }
 

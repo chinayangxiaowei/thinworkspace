@@ -247,7 +247,7 @@ impl WorkspaceMaterializer for PartialCloneFailure {
     ) -> Result<MaterializationReceipt, MaterializationFailure> {
         Err(MaterializationFailure::new(
             PortError::new(PortErrorKind::Io, "injected clone failure"),
-            MaterializationReceipt::failed_apfs_clone(
+            MaterializationReceipt::failed_cow_clone(
                 plan,
                 MaterializationFailureKind::Filesystem,
                 Vec::new(),

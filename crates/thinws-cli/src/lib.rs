@@ -1380,6 +1380,7 @@ const fn mode_name(mode: MaterializationMode) -> &'static str {
 const fn adapter_name(adapter: MaterializerKind) -> &'static str {
     match adapter {
         MaterializerKind::ApfsFileClone => "apfs-file-clone",
+        MaterializerKind::BtrfsReflink => "btrfs-reflink",
         MaterializerKind::FullCopy => "full-copy",
     }
 }

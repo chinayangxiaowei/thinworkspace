@@ -67,12 +67,12 @@ fn request_and_plan(
     let report = host
         .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
         .unwrap();
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     (request, plan)
 }
 
 #[test]
-fn real_apfs_clone_materializes_the_whole_tree_and_isolates_later_writes() {
+fn real_cow_clone_materializes_the_whole_tree_and_isolates_later_writes() {
     let temp = controlled_root("success-");
     let source = temp.path().join("source");
     let target = temp.path().join("target");

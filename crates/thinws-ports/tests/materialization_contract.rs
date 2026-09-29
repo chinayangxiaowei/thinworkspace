@@ -28,7 +28,7 @@ fn plan() -> MaterializationPlan {
         SupportState::Supported,
     )
     .unwrap();
-    MaterializationPlan::for_apfs_clone(
+    MaterializationPlan::for_cow_clone(
         &MaterializationPathReport::new(
             evidence.clone(),
             evidence.clone(),
@@ -53,7 +53,7 @@ fn plan() -> MaterializationPlan {
 
 #[test]
 fn materialization_failure_preserves_typed_error_and_partial_receipt() {
-    let receipt = MaterializationReceipt::failed_apfs_clone(
+    let receipt = MaterializationReceipt::failed_cow_clone(
         &plan(),
         MaterializationFailureKind::SourceChanged,
         Vec::new(),

@@ -21,7 +21,7 @@ pub struct HostCapabilityReport {
     kernel_release: String,
     architecture: String,
     adapter: String,
-    apfs_clone: SupportState,
+    cow_clone: SupportState,
 }
 
 impl HostCapabilityReport {
@@ -34,7 +34,7 @@ impl HostCapabilityReport {
         kernel_release: impl Into<String>,
         architecture: impl Into<String>,
         adapter: impl Into<String>,
-        apfs_clone: SupportState,
+        cow_clone: SupportState,
     ) -> Self {
         Self {
             platform: platform.into(),
@@ -42,7 +42,7 @@ impl HostCapabilityReport {
             kernel_release: kernel_release.into(),
             architecture: architecture.into(),
             adapter: adapter.into(),
-            apfs_clone,
+            cow_clone,
         }
     }
 
@@ -76,10 +76,10 @@ impl HostCapabilityReport {
         &self.adapter
     }
 
-    /// Returns host-level APFS clone-interface evidence.
+    /// Returns host-level evidence for the compiled CoW clone interface.
     #[must_use]
-    pub const fn apfs_clone(&self) -> SupportState {
-        self.apfs_clone
+    pub const fn cow_clone(&self) -> SupportState {
+        self.cow_clone
     }
 }
 
@@ -88,6 +88,8 @@ impl HostCapabilityReport {
 pub enum MaterializerKind {
     /// macOS APFS `fclonefileat` backend.
     ApfsFileClone,
+    /// Linux Btrfs `FICLONE` backend.
+    BtrfsReflink,
     /// Explicit byte-copy backend implemented by P1-07.
     FullCopy,
 }
@@ -113,9 +115,9 @@ pub enum FallbackPolicy {
 /// Stable reason why Core selected Full Copy for a CoW request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FallbackReason {
-    /// Read-only probe evidence proved that APFS clone was unsupported.
+    /// Read-only probe evidence proved that the selected CoW clone was unsupported.
     CloneUnsupportedAtPreflight,
-    /// A real APFS clone attempt reported CoW unavailable and was safely rolled back.
+    /// A real CoW clone attempt reported unavailability and was safely rolled back.
     CloneUnavailableAtRuntime,
 }
 
@@ -172,7 +174,7 @@ pub enum MaterializedEntryKind {
     SymbolicLink,
 }
 
-/// Stable reason why an APFS attempt did not complete.
+/// Stable reason why a materialization attempt did not complete.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaterializationFailureKind {
     /// The frozen path or capability evidence changed before or during execution.
@@ -327,7 +329,7 @@ impl FileSystemIdentity {
         self.fsid
     }
 
-    /// Returns the APFS Volume UUID evidence.
+    /// Returns the platform's stable filesystem/volume identity evidence.
     #[must_use]
     pub const fn volume_id(&self) -> &Evidence<VolumeId> {
         &self.volume_id
@@ -339,6 +341,7 @@ impl FileSystemIdentity {
 pub struct MountEvidence {
     raw_flags: u32,
     writable: bool,
+    mount_id: Option<u64>,
 }
 
 impl MountEvidence {
@@ -348,7 +351,21 @@ impl MountEvidence {
         Self {
             raw_flags,
             writable,
+            mount_id: None,
         }
+    }
+
+    /// Binds a Linux mount ID obtained from the held descriptor.
+    #[must_use]
+    pub const fn with_mount_id(mut self, mount_id: u64) -> Self {
+        self.mount_id = Some(mount_id);
+        self
+    }
+
+    /// Returns a Linux mount ID when the platform supplied one.
+    #[must_use]
+    pub const fn mount_id(self) -> Option<u64> {
+        self.mount_id
     }
 
     /// Returns unmodified platform mount flags.
@@ -450,7 +467,7 @@ pub struct PathCapabilityReport {
     mount: MountEvidence,
     readability: SupportState,
     writability: SupportState,
-    apfs_clone: SupportState,
+    cow_clone: SupportState,
 }
 
 impl PathCapabilityReport {
@@ -466,7 +483,7 @@ impl PathCapabilityReport {
         mount: MountEvidence,
         readability: SupportState,
         writability: SupportState,
-        apfs_clone: SupportState,
+        cow_clone: SupportState,
     ) -> Result<Self, PathCapabilityReportError> {
         if ancestry.is_empty() {
             return Err(PathCapabilityReportError::MissingAncestry);
@@ -488,7 +505,7 @@ impl PathCapabilityReport {
             mount,
             readability,
             writability,
-            apfs_clone,
+            cow_clone,
         })
     }
 
@@ -546,10 +563,10 @@ impl PathCapabilityReport {
         self.writability
     }
 
-    /// Returns per-path APFS clone preflight evidence.
+    /// Returns per-path CoW clone preflight evidence.
     #[must_use]
-    pub const fn apfs_clone(&self) -> SupportState {
-        self.apfs_clone
+    pub const fn cow_clone(&self) -> SupportState {
+        self.cow_clone
     }
 }
 
@@ -574,7 +591,7 @@ pub struct MaterializationPathReport {
     target_root: PathCapabilityReport,
     staging: PathCapabilityReport,
     trash: PathCapabilityReport,
-    apfs_clone: CandidateEvidence,
+    cow_clone: CandidateEvidence,
     full_copy: CandidateEvidence,
     evidence_digest: ProbeEvidenceDigest,
 }
@@ -587,7 +604,7 @@ impl MaterializationPathReport {
         target_root: PathCapabilityReport,
         staging: PathCapabilityReport,
         trash: PathCapabilityReport,
-        apfs_clone: CandidateEvidence,
+        cow_clone: CandidateEvidence,
         full_copy: CandidateEvidence,
         evidence_digest: ProbeEvidenceDigest,
     ) -> Self {
@@ -596,7 +613,7 @@ impl MaterializationPathReport {
             target_root,
             staging,
             trash,
-            apfs_clone,
+            cow_clone,
             full_copy,
             evidence_digest,
         }
@@ -626,10 +643,10 @@ impl MaterializationPathReport {
         &self.trash
     }
 
-    /// Returns APFS candidate evidence.
+    /// Returns CoW candidate evidence.
     #[must_use]
-    pub const fn apfs_clone(&self) -> &CandidateEvidence {
-        &self.apfs_clone
+    pub const fn cow_clone(&self) -> &CandidateEvidence {
+        &self.cow_clone
     }
 
     /// Returns Full Copy candidate evidence.
@@ -645,22 +662,28 @@ impl MaterializationPathReport {
     }
 }
 
-/// An APFS plan could not be derived from the supplied facts.
+/// A materialization plan could not be derived from the supplied facts.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum MaterializationPlanError {
     /// Candidate evidence was for another backend.
-    #[error("candidate evidence does not describe APFS file clone")]
+    #[error("candidate evidence does not describe a CoW clone backend")]
     WrongCandidate,
-    /// Preflight proved that APFS clone is unavailable.
-    #[error("APFS file clone is unsupported for this path combination")]
+    /// Preflight proved that the selected CoW clone is unavailable.
+    #[error("CoW clone is unsupported for this path combination")]
     CandidateUnsupported,
-    /// A required APFS Volume UUID was unknown.
+    /// A required filesystem/volume identity was unknown.
     #[error("materialization path volume identity is unknown")]
     UnknownVolume,
-    /// At least one role is not on APFS.
-    #[error("materialization path is not on APFS")]
-    NotApfs,
-    /// The four path roles do not belong to one APFS Volume.
+    /// At least one path has the wrong filesystem type for the selected backend.
+    #[error("materialization path has the wrong filesystem type")]
+    WrongFilesystem,
+    /// A required Linux mount ID was unknown.
+    #[error("materialization path mount identity is unknown")]
+    UnknownMount,
+    /// The four path roles are not on one required Linux mount.
+    #[error("materialization paths are on different mounts")]
+    DifferentMount,
+    /// The four path roles do not belong to one required filesystem/volume.
     #[error("materialization paths are on different volumes")]
     DifferentVolume,
     /// Full Copy candidate evidence was for another backend.
@@ -793,22 +816,21 @@ pub struct MaterializationPlan {
 }
 
 impl MaterializationPlan {
-    /// Applies the Phase 1 APFS-clone policy to one probe report.
-    pub fn for_apfs_clone(
+    /// Applies the selected CoW backend's same-filesystem policy to one probe report.
+    pub fn for_cow_clone(
         report: &MaterializationPathReport,
         fallback_policy: FallbackPolicy,
     ) -> Result<Self, MaterializationPlanError> {
-        if report.apfs_clone.kind() != MaterializerKind::ApfsFileClone {
-            return Err(MaterializationPlanError::WrongCandidate);
-        }
-        let (source_volume_id, target_volume_id) = phase1_volume_layout(report)?;
-        if report.apfs_clone.state() == SupportState::Unsupported {
+        let backend = report.cow_clone.kind();
+        require_cow_backend(backend)?;
+        let (source_volume_id, target_volume_id) = phase1_volume_layout(report, backend)?;
+        if report.cow_clone.state() == SupportState::Unsupported {
             return Err(MaterializationPlanError::CandidateUnsupported);
         }
         Ok(Self {
             requested_mode: MaterializationMode::CowClone,
             effective_mode: MaterializationMode::CowClone,
-            selected_adapter: MaterializerKind::ApfsFileClone,
+            selected_adapter: backend,
             fallback_policy,
             probe_evidence_digest: report.evidence_digest(),
             path_evidence: path_evidence(report),
@@ -830,10 +852,11 @@ impl MaterializationPlan {
     ) -> Result<Self, MaterializationPlanError> {
         require_fallback_policy(fallback_policy)?;
         require_candidate_kinds(report)?;
-        let (source_volume_id, target_volume_id) = phase1_volume_layout(report)?;
+        let (source_volume_id, target_volume_id) =
+            phase1_volume_layout(report, report.cow_clone.kind())?;
         require_full_copy_supported(report)?;
-        if report.apfs_clone.state() != SupportState::Unsupported
-            || report.apfs_clone.reasons() != ["clone_capability_unsupported"]
+        if report.cow_clone.state() != SupportState::Unsupported
+            || report.cow_clone.reasons() != ["clone_capability_unsupported"]
         {
             return Err(MaterializationPlanError::FallbackNotEligible);
         }
@@ -847,7 +870,7 @@ impl MaterializationPlan {
         ))
     }
 
-    /// Replans after one safely rolled-back APFS clone-unavailable attempt.
+    /// Replans after one safely rolled-back CoW clone-unavailable attempt.
     pub fn for_full_copy_after_cow_unavailable(
         fresh_report: &MaterializationPathReport,
         prior_plan: &Self,
@@ -857,7 +880,7 @@ impl MaterializationPlan {
         require_candidate_kinds(fresh_report)?;
         if prior_plan.requested_mode != MaterializationMode::CowClone
             || prior_plan.effective_mode != MaterializationMode::CowClone
-            || prior_plan.selected_adapter != MaterializerKind::ApfsFileClone
+            || prior_plan.selected_adapter != fresh_report.cow_clone.kind()
             || prior_plan.fallback_reason.is_some()
             || !prior_plan.failed_attempts.is_empty()
             || !receipt_matches_plan(prior_receipt, prior_plan)
@@ -876,7 +899,8 @@ impl MaterializationPlan {
         if !report_paths_match_plan(fresh_report, prior_plan) {
             return Err(MaterializationPlanError::PreviousAttemptMismatch);
         }
-        let (source_volume_id, target_volume_id) = phase1_volume_layout(fresh_report)?;
+        let (source_volume_id, target_volume_id) =
+            phase1_volume_layout(fresh_report, prior_plan.selected_adapter)?;
         if source_volume_id != prior_plan.source_volume_id
             || target_volume_id != prior_plan.target_volume_id
         {
@@ -993,13 +1017,13 @@ impl MaterializationPlan {
         &self.trash_path
     }
 
-    /// Returns the source APFS Volume UUID.
+    /// Returns the source filesystem/volume identity selected by the backend.
     #[must_use]
     pub const fn source_volume_id(&self) -> VolumeId {
         self.source_volume_id
     }
 
-    /// Returns the target APFS Volume UUID.
+    /// Returns the target filesystem/volume identity selected by the backend.
     #[must_use]
     pub const fn target_volume_id(&self) -> VolumeId {
         self.target_volume_id
@@ -1029,13 +1053,18 @@ fn require_fallback_policy(policy: FallbackPolicy) -> Result<(), Materialization
 fn require_candidate_kinds(
     report: &MaterializationPathReport,
 ) -> Result<(), MaterializationPlanError> {
-    if report.apfs_clone.kind() != MaterializerKind::ApfsFileClone {
-        return Err(MaterializationPlanError::WrongCandidate);
-    }
+    require_cow_backend(report.cow_clone.kind())?;
     if report.full_copy.kind() != MaterializerKind::FullCopy {
         return Err(MaterializationPlanError::WrongFullCopyCandidate);
     }
     Ok(())
+}
+
+fn require_cow_backend(kind: MaterializerKind) -> Result<(), MaterializationPlanError> {
+    match kind {
+        MaterializerKind::ApfsFileClone | MaterializerKind::BtrfsReflink => Ok(()),
+        MaterializerKind::FullCopy => Err(MaterializationPlanError::WrongCandidate),
+    }
 }
 
 fn require_full_copy_supported(
@@ -1050,16 +1079,52 @@ fn require_full_copy_supported(
 
 fn phase1_volume_layout(
     report: &MaterializationPathReport,
+    backend: MaterializerKind,
 ) -> Result<(VolumeId, VolumeId), MaterializationPlanError> {
-    let source_volume_id = volume_id(report.source())?;
-    let target_volume_id = volume_id(report.target_root())?;
-    let staging_volume_id = volume_id(report.staging())?;
-    let trash_volume_id = volume_id(report.trash())?;
+    require_cow_backend(backend)?;
+    let paths = [
+        report.source(),
+        report.target_root(),
+        report.staging(),
+        report.trash(),
+    ];
+    let source_type = paths[0].filesystem().type_name();
+    let expected_type = match backend {
+        MaterializerKind::ApfsFileClone => "apfs",
+        MaterializerKind::BtrfsReflink => "btrfs",
+        MaterializerKind::FullCopy => return Err(MaterializationPlanError::WrongCandidate),
+    };
+    if source_type != expected_type
+        || paths[1..]
+            .iter()
+            .any(|path| path.filesystem().type_name() != source_type)
+    {
+        return Err(MaterializationPlanError::WrongFilesystem);
+    }
+    let source_volume_id = volume_id(paths[0])?;
+    let target_volume_id = volume_id(paths[1])?;
+    let staging_volume_id = volume_id(paths[2])?;
+    let trash_volume_id = volume_id(paths[3])?;
     if [target_volume_id, staging_volume_id, trash_volume_id]
         .into_iter()
         .any(|volume_id| volume_id != source_volume_id)
     {
         return Err(MaterializationPlanError::DifferentVolume);
+    }
+    if backend == MaterializerKind::BtrfsReflink {
+        let first = paths[0]
+            .mount()
+            .mount_id()
+            .ok_or(MaterializationPlanError::UnknownMount)?;
+        for path in &paths[1..] {
+            let mount_id = path
+                .mount()
+                .mount_id()
+                .ok_or(MaterializationPlanError::UnknownMount)?;
+            if mount_id != first {
+                return Err(MaterializationPlanError::DifferentMount);
+            }
+        }
     }
     Ok((source_volume_id, target_volume_id))
 }
@@ -1127,9 +1192,6 @@ fn receipt_restored_baseline(receipt: &MaterializationReceipt) -> bool {
 }
 
 fn volume_id(report: &PathCapabilityReport) -> Result<VolumeId, MaterializationPlanError> {
-    if report.filesystem().type_name() != "apfs" {
-        return Err(MaterializationPlanError::NotApfs);
-    }
     report
         .filesystem()
         .volume_id()
@@ -1342,10 +1404,10 @@ impl MaterializeRequest {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum MaterializationReceiptError {
     /// Successful clone counts do not cover every ordinary file.
-    #[error("successful APFS receipt requires one successful clone per ordinary file")]
+    #[error("successful CoW receipt requires one successful clone per ordinary file")]
     CloneCountMismatch,
     /// A successful receipt must bind identical promised source and target trees.
-    #[error("successful APFS receipt requires matching source and target manifests")]
+    #[error("successful CoW receipt requires matching source and target manifests")]
     ManifestMismatch,
     /// The receipt constructor did not match the selected plan backend.
     #[error("materialization receipt backend does not match the selected plan")]
@@ -1379,7 +1441,7 @@ pub struct MaterializationReceipt {
     failed_attempts: Vec<FailedMaterializationAttempt>,
 }
 
-/// Facts observed during an APFS attempt, including partial or failed attempts.
+/// Facts observed during a materialization attempt, including partial or failed attempts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MaterializationAttemptEvidence {
     logical_bytes: Option<u64>,
@@ -1449,9 +1511,9 @@ impl MaterializationAttemptEvidence {
 }
 
 impl MaterializationReceipt {
-    /// Builds a successful APFS clone receipt and enforces its CoW claim.
+    /// Builds a successful clone receipt and enforces its CoW claim.
     #[allow(clippy::too_many_arguments)]
-    pub fn successful_apfs_clone(
+    pub fn successful_cow_clone(
         plan: &MaterializationPlan,
         regular_file_count: u64,
         clone_calls_succeeded: u64,
@@ -1462,13 +1524,9 @@ impl MaterializationReceipt {
         logical_bytes: u64,
         physical_bytes: Option<u64>,
     ) -> Result<Self, MaterializationReceiptError> {
-        if !matches!(
-            (plan.selected_adapter(), plan.effective_mode()),
-            (
-                MaterializerKind::ApfsFileClone,
-                MaterializationMode::CowClone
-            )
-        ) {
+        if require_cow_backend(plan.selected_adapter()).is_err()
+            || plan.effective_mode() != MaterializationMode::CowClone
+        {
             return Err(MaterializationReceiptError::AdapterMismatch);
         }
         if regular_file_count != clone_calls_succeeded {
@@ -1487,7 +1545,7 @@ impl MaterializationReceipt {
             requested_mode: plan.requested_mode(),
             effective_mode: plan.effective_mode(),
             actual_mode: MaterializationMode::CowClone,
-            actual_adapter: MaterializerKind::ApfsFileClone,
+            actual_adapter: plan.selected_adapter(),
             outcome: MaterializationOutcome::Succeeded,
             cow_evidence,
             source_volume_id: Some(plan.source_volume_id()),
@@ -1508,9 +1566,9 @@ impl MaterializationReceipt {
         })
     }
 
-    /// Builds a failed or partial APFS receipt without claiming CoW.
+    /// Builds a failed or partial CoW receipt without claiming CoW completion.
     #[must_use]
-    pub fn failed_apfs_clone(
+    pub fn failed_cow_clone(
         plan: &MaterializationPlan,
         failure_kind: MaterializationFailureKind,
         created: Vec<CreatedObjectEvidence>,
@@ -1529,7 +1587,7 @@ impl MaterializationReceipt {
             requested_mode: plan.requested_mode(),
             effective_mode: plan.effective_mode(),
             actual_mode: MaterializationMode::CowClone,
-            actual_adapter: MaterializerKind::ApfsFileClone,
+            actual_adapter: plan.selected_adapter(),
             outcome,
             cow_evidence: CowEvidence::Unknown,
             source_volume_id: Some(plan.source_volume_id()),

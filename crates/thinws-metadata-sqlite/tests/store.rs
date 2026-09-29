@@ -414,9 +414,9 @@ fn p1_17_workspace_volume_is_independent_of_control_volume() {
         Vec::new(),
         10,
     );
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let digest = TreeDigest::new([4; 32]);
-    let receipt = MaterializationReceipt::successful_apfs_clone(
+    let receipt = MaterializationReceipt::successful_cow_clone(
         &plan,
         1,
         1,
@@ -544,9 +544,9 @@ fn successful_receipt(volume_id: VolumeId) -> (MaterializationPlan, Materializat
         vec![],
         9,
     );
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let digest = TreeDigest::new([3; 32]);
-    let receipt = MaterializationReceipt::successful_apfs_clone(
+    let receipt = MaterializationReceipt::successful_cow_clone(
         &plan,
         1,
         1,
@@ -586,7 +586,7 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
         WorkspaceState::Creating
     );
     let at = UnixMillis::new(reserved.created_at().get() + 1).unwrap();
-    let failed = MaterializationReceipt::failed_apfs_clone(
+    let failed = MaterializationReceipt::failed_cow_clone(
         &plan,
         MaterializationFailureKind::Filesystem,
         Vec::new(),
@@ -620,7 +620,7 @@ fn p1_09_final_receipt_and_ready_are_one_transaction() {
         10,
     );
     let different_plan =
-        MaterializationPlan::for_apfs_clone(&different_probe, FallbackPolicy::Deny).unwrap();
+        MaterializationPlan::for_cow_clone(&different_probe, FallbackPolicy::Deny).unwrap();
     assert!(
         store
             .complete_materialization(id, &different_plan, &receipt, at)
@@ -889,9 +889,9 @@ fn p1_09_full_copy_receipt_requires_workspace_permission() {
         vec![],
         12,
     );
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     let digest = TreeDigest::new([5; 32]);
-    let receipt = MaterializationReceipt::successful_apfs_clone(
+    let receipt = MaterializationReceipt::successful_cow_clone(
         &plan,
         1,
         1,
@@ -933,7 +933,7 @@ fn p1_15_runtime_fallback_persists_failed_attempt_and_created_identity() {
         vec![],
         9,
     );
-    let clone_plan = MaterializationPlan::for_apfs_clone(
+    let clone_plan = MaterializationPlan::for_cow_clone(
         &original_report,
         FallbackPolicy::AllowFullCopyOnCowUnsupported,
     )
@@ -945,7 +945,7 @@ fn p1_15_runtime_fallback_persists_failed_attempt_and_created_identity() {
         Some(FileIdentity::new(11, 23)),
     );
     let digest = TreeDigest::new([7; 32]);
-    let failed = MaterializationReceipt::failed_apfs_clone(
+    let failed = MaterializationReceipt::failed_cow_clone(
         &clone_plan,
         MaterializationFailureKind::CowUnavailable,
         vec![created.clone()],

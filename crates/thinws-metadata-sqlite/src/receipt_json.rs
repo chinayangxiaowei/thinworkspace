@@ -64,7 +64,7 @@ pub(super) fn decode_final_summary(
             (actual_mode, adapter, cow, fallback_reason),
             (
                 MaterializationMode::CowClone,
-                MaterializerKind::ApfsFileClone,
+                MaterializerKind::ApfsFileClone | MaterializerKind::BtrfsReflink,
                 CowEvidence::Confirmed | CowEvidence::NotUsed,
                 None
             ) | (
@@ -111,6 +111,7 @@ fn decode_mode(value: &str) -> Result<MaterializationMode, PortError> {
 fn decode_adapter(value: &str) -> Result<MaterializerKind, PortError> {
     match value {
         "apfs_file_clone" => Ok(MaterializerKind::ApfsFileClone),
+        "btrfs_reflink" => Ok(MaterializerKind::BtrfsReflink),
         "full_copy" => Ok(MaterializerKind::FullCopy),
         _ => Err(invalid_receipt()),
     }
@@ -235,6 +236,7 @@ fn mode(value: MaterializationMode) -> &'static str {
 fn adapter(value: MaterializerKind) -> &'static str {
     match value {
         MaterializerKind::ApfsFileClone => "apfs_file_clone",
+        MaterializerKind::BtrfsReflink => "btrfs_reflink",
         MaterializerKind::FullCopy => "full_copy",
     }
 }
@@ -280,7 +282,7 @@ fn failure(value: MaterializationFailureKind) -> &'static str {
 mod tests {
     use std::str::FromStr;
 
-    use thinws_core::VolumeId;
+    use thinws_core::{MaterializerKind, VolumeId};
     use thinws_ports::PortErrorKind;
 
     use super::{RECEIPT_SCHEMA_VERSION, decode_final_summary};
@@ -309,6 +311,12 @@ mod tests {
             decode_final_summary(RECEIPT_SCHEMA_VERSION, &value.to_string(), volume)
         };
         assert!(decode(&valid).is_ok());
+        let mut btrfs = valid.clone();
+        btrfs["actual_adapter"] = serde_json::json!("btrfs_reflink");
+        assert_eq!(
+            decode(&btrfs).unwrap().adapter(),
+            MaterializerKind::BtrfsReflink
+        );
         assert_eq!(
             decode_final_summary(2, &valid.to_string(), volume)
                 .unwrap_err()

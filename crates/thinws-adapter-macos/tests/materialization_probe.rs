@@ -38,7 +38,7 @@ fn probe() -> MacOsHostAdapter {
 }
 
 #[test]
-fn combined_probe_proves_a_same_volume_apfs_clone_plan_without_executing_it() {
+fn combined_probe_proves_a_same_volume_cow_clone_plan_without_executing_it() {
     let temp = controlled_root("same-volume-");
     let source = temp.path().join("source");
     let target = temp.path().join("target");
@@ -57,10 +57,10 @@ fn combined_probe_proves_a_same_volume_apfs_clone_plan_without_executing_it() {
         ))
         .unwrap();
 
-    assert_eq!(report.apfs_clone().state(), SupportState::Supported);
+    assert_eq!(report.cow_clone().state(), SupportState::Supported);
     assert_eq!(report.full_copy().state(), SupportState::Supported);
     assert_ne!(report.evidence_digest().as_bytes(), [0; 32]);
-    let plan = MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny).unwrap();
+    let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
     assert_eq!(plan.source_volume_id(), plan.target_volume_id());
 }
 
@@ -147,7 +147,7 @@ fn missing_target_sibling_does_not_falsely_overlap_staging_or_trash() {
         report.target_root().resolution(),
         PathResolution::MissingTarget
     );
-    assert_eq!(report.apfs_clone().state(), SupportState::Supported);
+    assert_eq!(report.cow_clone().state(), SupportState::Supported);
     assert!(!target.exists());
 }
 
@@ -211,10 +211,10 @@ fn source_and_target_containment_disables_the_clone_candidate() {
         ))
         .unwrap();
 
-    assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
     assert_eq!(report.full_copy().state(), SupportState::Unsupported);
     assert_eq!(
-        MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny),
+        MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny),
         Err(MaterializationPlanError::CandidateUnsupported)
     );
 }
@@ -250,10 +250,10 @@ fn every_pair_of_materialization_roles_rejects_overlap() {
             ))
             .unwrap();
 
-        assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+        assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
         assert!(
             report
-                .apfs_clone()
+                .cow_clone()
                 .reasons()
                 .iter()
                 .any(|reason| reason == expected_reason),
@@ -297,10 +297,10 @@ fn configured_real_cross_volume_report_is_unsupported_not_same_volume() {
         report.source().filesystem().volume_id().known(),
         report.target_root().filesystem().volume_id().known()
     );
-    assert_eq!(report.apfs_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
     assert_eq!(report.full_copy().state(), SupportState::Supported);
     assert_eq!(
-        MaterializationPlan::for_apfs_clone(&report, FallbackPolicy::Deny),
+        MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny),
         Err(MaterializationPlanError::DifferentVolume)
     );
     assert_eq!(

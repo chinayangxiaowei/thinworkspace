@@ -57,6 +57,37 @@ fn real_shared_source_is_not_a_btrfs_clone_candidate() {
 }
 
 #[test]
+fn real_ext4_source_to_btrfs_target_is_not_a_clone_candidate() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+        .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test root");
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+        .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+    let source_fixture = tempfile::Builder::new()
+        .prefix("thinws-linux-ext4-source-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let target_fixture = tempfile::Builder::new()
+        .prefix("thinws-linux-btrfs-target-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let source = source_fixture.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let request = MaterializationPathProbeRequest::new(
+        absolute(&source),
+        absolute(&target_fixture.path().join("target")),
+        absolute(&target_fixture.path().join("staging")),
+        absolute(&target_fixture.path().join("trash")),
+    );
+    let report = LinuxPlatformProbe
+        .inspect_materialization_paths(&request)
+        .unwrap();
+    assert_eq!(report.source().filesystem().type_name(), "ext4");
+    assert_eq!(report.target_root().filesystem().type_name(), "btrfs");
+    assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
+}
+
+#[test]
 fn path_probe_refuses_symlinked_components() {
     let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
         .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs test mount");

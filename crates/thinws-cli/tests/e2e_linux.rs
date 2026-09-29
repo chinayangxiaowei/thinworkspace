@@ -3,6 +3,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -95,6 +96,13 @@ fn debian_cli_completes_an_ext4_control_and_btrfs_workspace_lifecycle() {
         created["data"]["materialization"]["adapter"],
         "btrfs-reflink"
     );
+    let (status, repeated) = execute_json(&control, create());
+    assert_eq!(status, 0, "{repeated}");
+    assert_eq!(repeated["data"]["result"], "already-ready");
+    assert_eq!(
+        repeated["data"]["workspace_id"],
+        created["data"]["workspace_id"]
+    );
     assert_eq!(fs::read(target.join("note.txt")).unwrap(), b"source");
     fs::write(target.join("note.txt"), b"changed").unwrap();
     assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"source");
@@ -151,7 +159,7 @@ fn debian_cli_completes_an_ext4_control_and_btrfs_workspace_lifecycle() {
 }
 
 #[test]
-fn shared_source_never_falls_back_to_full_copy_on_linux() {
+fn non_btrfs_sources_never_fall_back_to_full_copy_on_linux() {
     let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
     let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
     let shared_file = env::var_os("THINWS_LINUX_OTHER_TEST_FILE").unwrap();
@@ -193,6 +201,33 @@ fn shared_source_never_falls_back_to_full_copy_on_linux() {
     assert_ne!(status, 0, "{rejected}");
     assert_eq!(rejected["error"]["code"], "E_TARGET_LAYOUT");
     assert!(!target.exists());
+    let ext4_source = control_fixture.path().join("ext4-source");
+    fs::create_dir(&ext4_source).unwrap();
+    fs::write(ext4_source.join("note.txt"), b"source remains").unwrap();
+    let ext4_target = data_fixture.path().join("ext4-copy");
+    let (status, rejected) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            ext4_source.as_os_str().to_owned(),
+            "--target".into(),
+            ext4_target.as_os_str().to_owned(),
+            "--name".into(),
+            "ext4-crossfs".into(),
+            "--allow-copy".into(),
+        ],
+    );
+    assert_ne!(status, 0, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "E_TARGET_LAYOUT");
+    assert!(!ext4_target.exists());
+    assert_eq!(
+        fs::read(ext4_source.join("note.txt")).unwrap(),
+        b"source remains"
+    );
     let (status, listed) = execute_json(
         &control,
         vec![
@@ -535,6 +570,28 @@ fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() 
         String::from_utf8_lossy(&created.stderr)
     );
     assert_eq!(fs::read(target.join("example.txt")).unwrap(), b"contents");
+    let nested_target = target.join("nested target");
+    for dry_run in [true, false] {
+        let mut args = vec![
+            "--json".as_ref(),
+            "workspace".as_ref(),
+            "create".as_ref(),
+            "--source".as_ref(),
+            source.as_os_str(),
+            "--target".as_ref(),
+            nested_target.as_os_str(),
+            "--name".as_ref(),
+            "nested-copy".as_ref(),
+        ];
+        if dry_run {
+            args.push("--dry-run".as_ref());
+        }
+        let rejected = invoke(&args);
+        assert_eq!(rejected.status.code(), Some(42));
+        let response: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "E_TARGET_CONFLICT");
+        assert!(!nested_target.exists());
+    }
     let path = invoke(&[
         "workspace".as_ref(),
         "path".as_ref(),
@@ -612,6 +669,26 @@ fn missing_registered_target_stays_registered_even_with_force() {
     assert_eq!(status, 37, "{refused}");
     assert_eq!(refused["error"]["code"], "E_TARGET_MISSING");
     assert_eq!(fs::read(moved.join("keep.txt")).unwrap(), b"preserve");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("foreign.txt"), b"not a workspace").unwrap();
+    let (status, refused) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "missing-copy".into(),
+            "--force".into(),
+        ],
+    );
+    assert_eq!(status, 38, "{refused}");
+    assert_eq!(refused["error"]["code"], "E_TARGET_IDENTITY");
+    assert_eq!(
+        fs::read(target.join("foreign.txt")).unwrap(),
+        b"not a workspace"
+    );
+    assert_eq!(fs::read(moved.join("keep.txt")).unwrap(), b"preserve");
     let (status, listed) = execute_json(
         &control,
         vec![
@@ -688,4 +765,168 @@ fn confirmed_external_process_use_blocks_even_forced_removal() {
     assert_eq!(status, 23, "{refused}");
     assert_eq!(refused["error"]["code"], "E_WORKSPACE_BUSY");
     assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"preserve");
+}
+
+#[test]
+fn target_inside_an_active_workspace_is_rejected_on_linux() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
+    let control_fixture = Builder::new()
+        .prefix("thinws-cli-linux-control-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let data_fixture = Builder::new()
+        .prefix("thinws-cli-linux-overlap-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let control = control_fixture.path().join(".thinws");
+    let source = data_fixture.path().join("source");
+    let parent_target = data_fixture.path().join("parent-target");
+    let child_target = parent_target.join("child-target");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("sentinel.txt"), b"source remains").unwrap();
+    assert_eq!(
+        execute_json(
+            &control,
+            vec!["thinws".into(), "--json".into(), "init".into()]
+        )
+        .0,
+        0
+    );
+    let create = |name: &str, target: &Path, dry_run: bool| {
+        let mut args = vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
+            "--name".into(),
+            name.into(),
+        ];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+        execute_json(&control, args)
+    };
+    let (status, created) = create("parent", &parent_target, false);
+    assert_eq!(status, 0, "{created}");
+
+    for dry_run in [true, false] {
+        let (status, rejected) = create("child", &child_target, dry_run);
+        assert_eq!(status, 42, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "E_TARGET_CONFLICT");
+        assert!(!child_target.exists());
+    }
+    let (status, listed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{listed}");
+    assert_eq!(listed["data"]["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read(parent_target.join("sentinel.txt")).unwrap(),
+        b"source remains"
+    );
+}
+
+#[test]
+fn target_inside_an_active_removal_isolation_is_rejected_on_linux() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
+    let control_fixture = Builder::new()
+        .prefix("thinws-cli-linux-control-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let data_fixture = Builder::new()
+        .prefix("thinws-cli-linux-isolation-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let control = control_fixture.path().join(".thinws");
+    let source = data_fixture.path().join("source");
+    let target = data_fixture.path().join("parent-target");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("sentinel.txt"), b"source remains").unwrap();
+    assert_eq!(
+        execute_json(
+            &control,
+            vec!["thinws".into(), "--json".into(), "init".into()]
+        )
+        .0,
+        0
+    );
+    let create = |name: &str, destination: &Path, dry_run: bool| {
+        let mut args = vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            destination.as_os_str().to_owned(),
+            "--name".into(),
+            name.into(),
+        ];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+        execute_json(&control, args)
+    };
+    let (status, created) = create("parent", &target, false);
+    assert_eq!(status, 0, "{created}");
+    let id = created["data"]["workspace_id"].as_str().unwrap();
+    let nested = target.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("file.txt"), b"keep in isolation").unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o000)).unwrap();
+    let (remove_status, failed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "parent".into(),
+            "--force".into(),
+        ],
+    );
+    let isolated = data_fixture.path().join(format!(".thinws-remove-{id}"));
+    assert_ne!(remove_status, 0, "{failed}");
+    assert!(isolated.is_dir(), "{failed}");
+    assert!(!target.exists());
+
+    let child = isolated.join("child-target");
+    let attempts: Vec<_> = [true, false]
+        .into_iter()
+        .map(|dry_run| create("child", &child, dry_run))
+        .collect();
+    fs::set_permissions(isolated.join("nested"), fs::Permissions::from_mode(0o700)).unwrap();
+    for (status, rejected) in attempts {
+        assert_eq!(status, 42, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "E_TARGET_CONFLICT");
+    }
+    assert!(!child.exists());
+    let (status, listed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{listed}");
+    assert_eq!(listed["data"]["workspaces"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read(isolated.join("nested/file.txt")).unwrap(),
+        b"keep in isolation"
+    );
 }

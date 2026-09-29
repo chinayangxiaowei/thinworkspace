@@ -813,12 +813,27 @@ fn target_inside_an_active_workspace_is_rejected_on_linux() {
     };
     let (status, created) = create("parent", &parent_target, false);
     assert_eq!(status, 0, "{created}");
+    let id = created["data"]["workspace_id"].as_str().unwrap();
 
     for dry_run in [true, false] {
         let (status, rejected) = create("child", &child_target, dry_run);
         assert_eq!(status, 42, "{rejected}");
         assert_eq!(rejected["error"]["code"], "E_TARGET_CONFLICT");
         assert!(!child_target.exists());
+    }
+    for protected in [
+        format!(".thinws-staging-{id}"),
+        format!(".thinws-trash-{id}"),
+        format!(".thinws-remove-{id}"),
+    ] {
+        let protected_target = data_fixture.path().join(protected);
+        assert!(!protected_target.exists());
+        for dry_run in [true, false] {
+            let (status, rejected) = create("protected", &protected_target, dry_run);
+            assert_eq!(status, 42, "{rejected}");
+            assert_eq!(rejected["error"]["code"], "E_TARGET_CONFLICT");
+            assert!(!protected_target.exists());
+        }
     }
     let (status, listed) = execute_json(
         &control,

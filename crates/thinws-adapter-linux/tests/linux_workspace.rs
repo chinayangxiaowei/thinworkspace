@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use thinws_adapter_linux::{BtrfsReflinkMaterializer, LinuxHostAdapter, LinuxPlatformProbe};
 use thinws_core::{
-    AbsolutePath, CowEvidence, FallbackPolicy, InstallationIdentity, InstanceId,
-    MaterializationOutcome, MaterializationPlan, MaterializeRequest, UnixMillis, WorkspaceId,
-    WorkspaceName, WorkspaceReservation,
+    AbsolutePath, CowEvidence, FallbackPolicy, GitState, InstallationIdentity, InstanceId,
+    MaterializationOutcome, MaterializationPlan, MaterializeRequest, OperationId, RemovalMode,
+    UnixMillis, WorkspaceId, WorkspaceName, WorkspaceReservation,
 };
 use thinws_ports::{
     LifecycleLock, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
-    PreparedWorkspaceEvidence, WorkspaceMaterializer, WorkspaceSpace,
+    PreparedWorkspaceEvidence, RemovalLogEvent, RemovalLogRecord, WorkspaceMaterializer,
+    WorkspaceRemoval, WorkspaceSpace,
 };
 
 fn absolute(path: &Path) -> AbsolutePath {
@@ -568,4 +569,257 @@ fn invalid_ready_target_is_an_error_not_an_unknown_space_estimate() {
             .kind(),
         PortErrorKind::InvalidLayout
     );
+}
+
+#[test]
+fn removal_lookup_only_returns_the_registered_btrfs_target() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap(),
+        Some(absolute(&target))
+    );
+    std::fs::rename(&target, target_fixture.path().join("displaced")).unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap(),
+        None
+    );
+    std::fs::create_dir(&target).unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert!(target.is_dir());
+}
+
+#[test]
+fn removal_lookup_refuses_an_unregistered_isolation_sibling() {
+    let (_control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let isolated = target_fixture
+        .path()
+        .join(format!(".thinws-remove-{workspace_id}"));
+    std::fs::create_dir(&isolated).unwrap();
+    std::fs::write(isolated.join("keep"), b"foreign").unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert_eq!(std::fs::read(isolated.join("keep")).unwrap(), b"foreign");
+}
+
+#[test]
+fn removal_lookup_accepts_only_the_durably_registered_isolated_target() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    let registered = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let isolated = target_fixture
+        .path()
+        .join(format!(".thinws-remove-{workspace_id}"));
+    let ownership_path = control
+        .path()
+        .join(format!("control/metadata/ownership-{workspace_id}.toml"));
+    let document = std::fs::read_to_string(&ownership_path).unwrap();
+    let path_hex = isolated
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::fs::write(
+        &ownership_path,
+        format!("{document}isolated_path_hex = \"{path_hex}\"\n"),
+    )
+    .unwrap();
+    std::fs::rename(&target, &isolated).unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap(),
+        Some(absolute(&isolated))
+    );
+    std::fs::create_dir(&target).unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &registered)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+}
+
+#[test]
+fn force_cleanup_log_is_durable_outside_the_btrfs_copy_and_separates_a_short_tail() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: "op_01890a5d-ac96-774b-bd5b-55c7b8d09f51"
+            .parse::<OperationId>()
+            .unwrap(),
+        workspace_id,
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: false,
+        repositories: &[],
+        process_use: None,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    let path = adapter.append_removal_log(&lock, &layout, &record).unwrap();
+    let expected = control.path().join("control/logs/operations.jsonl");
+    assert_eq!(path, absolute(&expected));
+    assert!(!target.join("operations.jsonl").exists());
+    let first = std::fs::read_to_string(&expected).unwrap();
+    let first_event: serde_json::Value = serde_json::from_str(first.trim_end()).unwrap();
+    assert_eq!(first_event["event"], "started");
+    assert_eq!(first_event["force"], true);
+    assert_eq!(first_event["workspace_id"], workspace_id.to_string());
+    std::fs::write(&expected, b"short-tail").unwrap();
+    let completed = RemovalLogRecord {
+        event: RemovalLogEvent::Completed,
+        outcome: Some(WorkspaceRemoval::Removed { root_entries: 2 }),
+        ..record
+    };
+    adapter
+        .append_removal_log(&lock, &layout, &completed)
+        .unwrap();
+    let contents = std::fs::read_to_string(&expected).unwrap();
+    let lines = contents.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "short-tail");
+    let last: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(last["event"], "completed");
+    assert_eq!(last["result"], "removed");
+    assert_eq!(last["removed_root_entries"], 2);
+}
+
+#[test]
+fn invalid_cleanup_log_event_does_not_create_the_log() {
+    let (control, _target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: "op_01890a5d-ac96-774b-bd5b-55c7b8d09f51"
+            .parse::<OperationId>()
+            .unwrap(),
+        workspace_id: "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+            .parse::<WorkspaceId>()
+            .unwrap(),
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: true,
+        repositories: &[],
+        process_use: None,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    assert_eq!(
+        adapter
+            .append_removal_log(&lock, &layout, &record)
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidData
+    );
+    assert!(
+        !control
+            .path()
+            .join("control/logs/operations.jsonl")
+            .exists()
+    );
+}
+
+#[test]
+fn cleanup_log_refuses_a_link_without_writing_its_destination() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let foreign = target_fixture.path().join("foreign-log");
+    std::fs::write(&foreign, b"keep").unwrap();
+    symlink(
+        &foreign,
+        control.path().join("control/logs/operations.jsonl"),
+    )
+    .unwrap();
+    let record = RemovalLogRecord {
+        occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+        operation_id: "op_01890a5d-ac96-774b-bd5b-55c7b8d09f51"
+            .parse::<OperationId>()
+            .unwrap(),
+        workspace_id: "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+            .parse::<WorkspaceId>()
+            .unwrap(),
+        event: RemovalLogEvent::Started,
+        mode: RemovalMode::Force,
+        git_state: GitState::Unknown,
+        git_check_complete: false,
+        repositories: &[],
+        process_use: None,
+        protection: None,
+        error_code: None,
+        outcome: None,
+    };
+    assert!(adapter.append_removal_log(&lock, &layout, &record).is_err());
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"keep");
 }

@@ -19,7 +19,7 @@ use crate::lock::{
 pub struct LinuxDataRootLayout {
     pub(crate) data_root: PrivateDirectory,
     pub(crate) metadata: PrivateDirectory,
-    logs: PrivateDirectory,
+    pub(crate) logs: PrivateDirectory,
     database_file: File,
     database_identity: (u64, u64),
     database_path: AbsolutePath,

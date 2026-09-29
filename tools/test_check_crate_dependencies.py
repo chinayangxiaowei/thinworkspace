@@ -28,6 +28,7 @@ class CrateDependencyDirectionTests(unittest.TestCase):
                 "linux-raw-sys",
                 "rustix",
                 "serde",
+                "serde_json",
                 "toml",
                 "uuid",
                 "thinws-core",

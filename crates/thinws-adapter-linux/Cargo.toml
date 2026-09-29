@@ -12,6 +12,7 @@ libc.workspace = true
 linux-raw-sys.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thinws-core = { path = "../thinws-core" }
 thinws-ports = { path = "../thinws-ports" }
 toml.workspace = true

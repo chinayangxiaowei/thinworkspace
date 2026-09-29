@@ -555,6 +555,7 @@ dependencies = [
  "linux-raw-sys",
  "rustix",
  "serde",
+ "serde_json",
  "tempfile",
  "thinws-core",
  "thinws-metadata-sqlite",

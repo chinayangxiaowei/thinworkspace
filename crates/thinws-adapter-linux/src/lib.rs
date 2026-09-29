@@ -45,6 +45,9 @@ mod workspace;
 mod space;
 
 #[cfg(target_os = "linux")]
+mod operation_log;
+
+#[cfg(target_os = "linux")]
 pub use lock::{LinuxHostAdapter, LinuxLockGuard};
 
 #[cfg(target_os = "linux")]

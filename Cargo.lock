@@ -585,6 +585,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
+ "thinws-adapter-linux",
  "thinws-adapter-macos",
  "thinws-core",
  "thinws-metadata-sqlite",

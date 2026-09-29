@@ -18,5 +18,8 @@ thinws-metadata-sqlite = { path = "../thinws-metadata-sqlite" }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 thinws-adapter-macos = { path = "../thinws-adapter-macos" }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+thinws-adapter-linux = { path = "../thinws-adapter-linux" }
+
 [lints]
 workspace = true

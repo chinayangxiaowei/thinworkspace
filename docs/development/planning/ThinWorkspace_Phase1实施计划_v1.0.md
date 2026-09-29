@@ -875,6 +875,12 @@ P1-L05 定向变异结果（2026-09-29）：上述首次批次完整执行 84 �
 
 P1-L03 Btrfs 文件属性增量（2026-09-29）：在真实 Btrfs 测试根通过 `chattr +C` 创建 NOCOW 来源文件，证实路径级 Probe 可预检合格但该普通文件的 `FICLONE` 在 Debian 5.10 上实际失败；物化返回 `CowUnavailable`、确认回滚至空 target，来源内容保持不变。此为实际文件属性失败边界，不扩展为全部内核或所有 NOCOW 组合的保证；对应集成测试依赖测试主机提供 `chattr` 且允许在专用 Btrfs 根设置 NOCOW。
 
+P1-L05 创建编排定向变异计划（2026-09-29 20:56 UTC）：候选为本地 `main` 的 `73f727d`，主 Agent 在 Debian 11.7/ext4 控制根＋Btrfs 工作区执行；工具 `cargo-mutants 27.1.0`，仅 1 job，筛选 `thinws-application/src/create.rs` 中 `create_cow_only`、`create_impl`、`create_reserved` 共 23 个变异，以 Application＋CLI 测试包验证，结果写入 `/media/yxw/thinws/mutants-p1-l05-create/`。参考前一同类定向批次 50–84 秒，首次查看估计 2–3 分钟；此范围不代替小阶段或阶段全量变异。
+
+P1-L05 创建编排首批结果及跨平台核验计划（2026-09-29）：上述 Debian 批次完整执行 67 秒，23 个变异中 6 caught、4 unviable、13 missed；主要未捕获项为创建入口后端校验、同名 Ready 复用身份以及预留后的路径/物化错误分支。现有 Application 集成测试部分只在 macOS 编译，因此先以同一候选 `73f727d` 在 macOS 15.7.2/APFS、`cargo-mutants 27.1.0`、1 job，对同一 23 个变异运行 Application 测试包，结果写入 `/Volumes/data/thinws-mutants-p1-l05-create-mac/`；参考 Debian 67 秒并考虑真实 APFS 测试，首次查看估计 3–5 分钟。两平台结果逐项比较后再决定 Linux 需补的测试，不能用 macOS 的捕获结果掩盖 Linux 特有失败边界。
+
+P1-L05 创建编排 macOS 对照结果（2026-09-29）：完整执行 71 秒，同一 23 个变异为 17 caught、4 unviable、2 missed，输出位于上述 macOS 结果目录。共享的两个关键存活项是同名请求的 `allow_full_copy` 差异条件，以及已选择 CoW Adapter 与注入执行器种类不一致的保护。Linux 首批的另外 11 个 missed 由 macOS 专属 Application 测试捕获，但不据此宣称 Linux 各失败边界已获真实平台验证；针对共享两项先补 Linux Application 集成测试，再按影响范围定向复测。
+
 ---
 
 ## 五、依赖摘要

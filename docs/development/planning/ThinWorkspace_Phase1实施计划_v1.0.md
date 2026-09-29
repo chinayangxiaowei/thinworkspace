@@ -756,7 +756,7 @@ P1-15 技术候选收口（2026-09-27 UTC）：最终实现/测试提交为 `4e6
 | P1-20 CLI 与工具联动 | 手册参数、JSON/错误码、help、Skill、性能与 CI 工具同步 | P1-17–P1-19 | R3 | Done |
 | P1-21 新布局收口 | 受影响变异/fuzz、真实 APFS 多卷、Release 黑盒、供应链、独立本地审核与人工结构测试入口 | P1-17–P1-20 | R4 | Done |
 
-本轮只在维护者指定的本地 checkout 实施、提交与审核，不创建线上 PR、不推送，也不使用子 Agent 开发。独立只读审核可使用 GPT-6 Astra / `xhigh`。用户已有旧控制目录、旧 data root 与已安装的旧 `thinws` 二进制不在清理或自动替换范围内。新 `init` 的测试须使用隔离 HOME，防止触碰真实 `~/.thinws`。
+本轮研发与审核按维护者当时要求只在指定的本地 `main` checkout 直接实施，不创建线上 PR，研发期间不推送，也不使用子 Agent 开发。这是《任务流程》§13.1 的维护者指定分支例外，起点 `7d74977c328516116083fb60b430a959f7d43904`、审核代码提交 `2f8ad11204a8806c9a7880d97741f2efae1832c9` 及文档收口提交 `ef278ed8313f861bc476dd778ab7ae43edd2bd39` 见下文；本地审核与验证未豁免。独立只读审核可使用 GPT-6 Astra / `xhigh`。用户已有旧控制目录、旧 data root 与当时已安装的旧 `thinws` 二进制不在本轮代码任务的清理或自动替换范围内。新 `init` 的测试须使用隔离 HOME，防止触碰真实 `~/.thinws`。后续用户另行要求的本机安装与推送见本节末尾的时间顺序记录。
 
 收口断言：两个不同 APFS 卷上各自的 source/target 同卷组合成功，source/target 跨卷（含 `--allow-copy`）拒绝；目标已存在、重复 target、路径别名/符号链接、目标卷卸载和路径替换均不误写误删；普通/force 清理在 target 缺失或身份不符时保留行、名称及日志，归属可证且内容清理完成时才写 tombstone；新命令不访问旧布局；新候选全量普通门禁与受影响专项门禁通过。完成这些仍不等于 Phase 1 人工放行。
 
@@ -836,7 +836,9 @@ Release CoW 性能基线（同日、本机非并发 I/O）：运行 `PYTHONDONTW
 
 第二次审核修复的 Release 候选重新构建成功，`target/release/thinws` SHA-256 为 `f01b2748c7fb18429be70f9caa74e223a1f378c3aa4d96b348aaa61f4f32aa72`。首次 `cargo test --quiet --locked --release --workspace --all-targets` 在既有 `e2e_remove::real_cli_git_incomplete_refusal_exposes_the_specific_issue` 的第二次人类输出断言中偶发 exit 101：期望 25，实得 23；该用例单独运行通过，立即重跑相同全 workspace Release 命令退出 0，随后 Release `e2e_remove` 整个套件连续 10 次均退出 0。未找到稳定复现或与本轮创建路径变更的连接，保留首次失败记录与这项低频不确定性，不写成“从未失败”。新 Release 二进制在隔离 HOME、本机模拟 GitHub Actions 条件下通过 init/create/path/remove CoW 黑盒，非线上 CI；一次性 `/private/tmp/thinws-release-e2e-jr66vqhw` 夹具经确认无符号链接后按确切路径删除。最终 fmt、严格 Clippy、全 workspace Debug 测试、Release 全 workspace 重跑、crate 依赖方向及差异检查均退出 0；规定模型的最终精确提交审核结果见下段。
 
-P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `2f8ad11204a8806c9a7880d97741f2efae1832c9`、完整范围 `7d74977..2f8ad11` 进行只读独立终审，结论 **Approve**，此前三项创建/查询/删除展示问题与两项新发现的隔离目录和 APFS 别名问题均已闭合，未发现新的阻断问题。审核者独立枚举当前完整新布局生产差异的 333 个互异变异名称，并对照本节十一批原始 caught/unviable 结果逐项求差，**333/333 匹配、0 缺口**；unviable 不冒称行为测试捕获。当前本地 `main` 已包含已审核提交，无线上 PR、push 或已安装旧二进制替换。本节记录的真实 APFS 多卷/离线删除、Release 黑盒、四项短预算 fuzz、供应链缓存核查与普通门禁组成 P1-21 的技术候选证据；首次 Release 偶发 23/25 差异原因未明，后续人工结构测试应留意，不因重复通过抹去。**P1-17–P1-21 的 Done 仅表示本轮新布局任务级技术交付及人工测试入口就绪，不表示 Phase 1 阶段放行**：阶段级全 workspace 变异、所有 fuzz target 的记录化长预算、线上 CI、在线最新 advisory 核查、正式签名/公证、维护者结构测试及人工签字尚未完成；不打 tag、不进入 Phase 2。
+P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对精确提交 `2f8ad11204a8806c9a7880d97741f2efae1832c9`、完整范围 `7d74977..2f8ad11` 进行只读独立终审，结论 **Approve**，此前三项创建/查询/删除展示问题与两项新发现的隔离目录和 APFS 别名问题均已闭合，未发现新的阻断问题。审核者独立枚举当前完整新布局生产差异的 333 个互异变异名称，并对照本节十一批原始 caught/unviable 结果逐项求差，**333/333 匹配、0 缺口**；unviable 不冒称行为测试捕获。该审核收口时本地 `main` 已包含已审核提交，尚无线上 PR、push 或已安装旧二进制替换。本节记录的真实 APFS 多卷/离线删除、Release 黑盒、四项短预算 fuzz、供应链缓存核查与普通门禁组成 P1-21 的技术候选证据；首次 Release 偶发 23/25 差异原因未明，后续人工结构测试应留意，不因重复通过抹去。**P1-17–P1-21 的 Done 仅表示本轮新布局任务级技术交付及人工测试入口就绪，不表示 Phase 1 阶段放行**：阶段级全 workspace 变异、所有 fuzz target 的记录化长预算、线上 CI、在线最新 advisory 核查、正式签名/公证、维护者结构测试及人工签字尚未完成；不打 tag、不进入 Phase 2。
+
+收口后维护者另行授权的本机试用与远端同步（2026-09-28）：对未改变源码的已审核候选执行 `cargo build --locked --release --workspace`，将 SHA-256 为 `f01b2748c7fb18429be70f9caa74e223a1f378c3aa4d96b348aaa61f4f32aa72` 的 arm64 二进制安装到用户 `~/.local/bin/thinws`，保留原二进制备份；核对已安装字节与构建产物一致、`--version` 与必填 `--target` 帮助。随后按用户单独指令把本地 `main` 快进推送到 `origin/main`，远端为 `ef278ed8313f861bc476dd778ab7ae43edd2bd39`。这些后续操作不追溯改写前述任务审核时“未推送、未替换已安装二进制”的事实，也不是正式发行：未执行线上 CI、签名/公证、阶段级全量门禁或人工放行；仍为 `Unreleased`，不打 tag。
 
 ---
 

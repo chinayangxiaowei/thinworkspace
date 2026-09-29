@@ -5,7 +5,7 @@ description: Use the thinws CLI from any project to create and work in a space-e
 
 # 使用 thinws 工作区
 
-先运行 `command -v thinws`、`thinws --version` 和 `thinws --help`，确认命令已安装且与下列格式一致。若不一致，暂停不确定的写入或清理操作，向用户说明实际版本和差异。
+先运行 `command -v thinws`、`thinws --version`、`thinws --help` 和 `thinws workspace create --help`。创建帮助的 Usage 必须包含必填的 `--target <TARGET>`；首发前新旧二进制可能显示相同版本号，不能只凭 `--version` 判断。若命令格式不一致，暂停写入或清理操作，向用户说明实际版本和差异。
 
 ## 什么时候使用
 
@@ -41,6 +41,6 @@ description: Use the thinws CLI from any project to create and work in a space-e
 4. 用 `thinws workspace path <NAME>` 取得路径，在该**普通目录**直接运行编辑器、编译器和项目命令。常见路径可用 `cd "$(thinws workspace path <NAME>)"`；路径本身可能含换行时，改读 `thinws --json workspace status <NAME>` 的 `path_hex`，不要按行解析。不存在 `thinws workspace exec`。
 5. 工作中可用 `thinws workspace status <NAME>` 查询。镜像包含 `.git`、未跟踪/ignored 文件和构建产物，但不会创建分支或自动交付；绝对符号链接、Git worktree 的外部 `.git` 指针仍可能触达原位置，工作区不是 Sandbox。status 的 Git 摘要只检查已跟踪内容；`unknown` 不是 clean，空间数字也不是删除后可释放量。
 6. 结束前按任务要求保存成果。检查需要保留的已跟踪、未跟踪和 ignored 文件；如果使用 Git，按任务范围提交，并确认 commit/产物已经以用户授权的方式保存在**副本之外**。只存在于副本 `.git` 中的 commit、branch 或 stash 会随副本删除；不要因本 Skill 自动 push 或创建 PR。
-7. 只有任务要求清理且成果核对完毕，才停止占用进程、离开工作区并运行普通 `remove`。它会删除整个副本，包括未跟踪和 ignored 文件，而这两类内容不会触发平台的 dirty 提示。`E_WORKSPACE_DIRTY`、`E_GIT_CHECK_INCOMPLETE` 时保留现场处理；`E_WORKSPACE_BUSY` 时停止占用进程。`--force` 仅在用户明确授权丢弃该**确切**工作区后使用；它不能绕过目标存在性、归属、路径、卷身份或已确认占用保护。目标缺失、卷离线或身份不符时，普通和强制清理都保留登记，不能靠手工删目录解除关联。
+7. 只有任务要求清理且成果核对完毕，才停止占用进程、离开工作区并运行普通 `remove`。它会删除整个副本，包括未跟踪和 ignored 文件，而这两类内容不会触发平台的 dirty 提示。`E_WORKSPACE_DIRTY`、`E_GIT_CHECK_INCOMPLETE` 时保留现场处理；`E_WORKSPACE_BUSY` 时停止占用进程。`--force` 仅在用户明确授权丢弃该**确切**工作区后使用；它不能绕过目标存在性、归属、路径、卷身份或已确认占用保护。目标缺失、卷离线或身份不符时，普通和强制清理都保留登记，不能靠手工删目录解除关联。成功删除后 `~/.thinws` 中的历史归属文件仍保留，不表示工作区还在，也不要按文件名自行清理。
 
 报告给用户：源目录、工作区名称/ID/路径、实际物化模式、成果保存位置、工作区保留或清理结果，以及任何错误码或未完成状态。`thinws gc`、自动恢复和执行包装不属于这些命令；不要凭目录存在、Git clean 或清理成功推断成果已经交付。

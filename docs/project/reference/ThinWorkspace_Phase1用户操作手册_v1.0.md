@@ -210,7 +210,7 @@ thinws workspace remove auth-refresh --force
 
 force 明确授权丢弃副本内容，绕过 tracked dirty 和 Git 检查不完整；不要求填写理由、提供 commit、联网或取得主管在线批准。无额外交互确认，脚本中的显式 flag 就是清理意图。
 
-force 不绕过实例/目标归属、卷身份、路径安全、目标存在性和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。登记 target 存在但归属证据缺失、损坏或目录被替换时必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。删除中若 target 已移动到同一目标父目录下的受控隔离位置，只有仍能证明它与登记 target 是同一目录时才可继续。预检时原位置和已登记隔离位置均不存在，即使 `--force` 也返回 E_TARGET_MISSING，保留登记、名称与诊断信息，本次预检不会启动删除；删除已开始后目标消失的边界见下文。正常成功时删除整个已登记 target 及对应隔离残留；`~/.thinws` 内日志保留。
+force 不绕过实例/目标归属、卷身份、路径安全、目标存在性和已确认进程占用，不跟随符号链接或 Git 指针删除工作区外的内容。登记 target 存在但归属证据缺失、损坏或目录被替换时必须拒绝删除；不能仅凭当前同名目录、属主或权限推定它是原副本。删除中若 target 已移动到同一目标父目录下的受控隔离位置，只有仍能证明它与登记 target 是同一目录时才可继续。预检时原位置和已登记隔离位置均不存在，即使 `--force` 也返回 E_TARGET_MISSING，保留登记、名称与诊断信息，本次预检不会启动删除；删除已开始后目标消失的边界见下文。正常成功时删除整个已登记 target 及对应隔离残留。
 
 ```text
 Workspace removed
@@ -224,6 +224,8 @@ Delivery verification: not performed
 普通 Git 检查拒绝后可改用 force。删除已开始但未完成时，不自动续做；只能由用户再次显式执行 `remove --force`，在重新验证原位置与已登记隔离位置的受控目录归属及当前占用后清理剩余内容，包括 `.git`。两处冲突或均缺失时拒绝，不擅自择一，也不解除关联。
 
 ### 6.3 日志与结果边界
+
+普通或强制清理成功后，`~/.thinws` 中的日志、最小删除记录及 `metadata/ownership-<workspace-id>.toml` 归属文档仍保留。归属文档是历史资料，不表示仍有活动工作区，也不使 `workspace list` 重新列出已删除项；首版没有自动清理历史归属文档的命令。
 
 检查异常、普通拒绝和显式 force 写入 `~/.thinws/logs/operations.jsonl`。预检流程正常返回检查结果后，Git 或进程占用保护策略拒绝清理（包括 force 仍不能绕过的已确认占用）时记录 `refused`；目标缺失、归属或路径等预检本身失败，以及非 Ready 工作区未使用 force 时记录 `failed`。这些结果都不宣称删除已开始；允许执行时记录 `started` 和结果。删除 Workspace 后日志仍保留；发生中断时可能只有开始记录，不能视为成功。日志不可写时清理尚未开始则返回 E_FILESYSTEM 并保留目录。
 
@@ -415,7 +417,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 
 | 运行组合 | 首发资格 |
 |---|---|
-| macOS 15.7.2、Apple Silicon arm64、每次 source/target 同一 APFS 卷；按需使用 Apple Git 2.39.5 | 新布局须重新完成真实机验收，当前未放行 |
+| macOS 15.7.2、Apple Silicon arm64、每次 source/target 同一 APFS 卷；按需使用 Apple Git 2.39.5 | 新布局已有本机真实 APFS 技术候选验证；阶段门禁与人工验收未完成，当前未放行 |
 | 其他 macOS/Git 版本或 Intel x86_64 | 未完成该组合的真实机资格验证，不纳入首发承诺 |
 | Linux、Windows 或 source/target 非 APFS 卷 | Phase 1 未实现 |
 

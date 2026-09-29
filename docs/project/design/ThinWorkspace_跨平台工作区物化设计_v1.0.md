@@ -262,7 +262,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 本设计的实现至少需要以下证据，具体执行时机以《任务流程》为准：
 
 - 真实平台上的同卷成功与跨卷拒绝；
-- 后续 Linux Adapter 接入时，须覆盖 Btrfs/XFS 合格路径、ext4/`prl_fs`/XFS `reflink=0` 拒绝、同类型不同文件系统拒绝、Btrfs 文件属性不兼容和低于 5.18 内核跨挂载点场景；不得用 Full Copy 成功代替 reflink 成功；
+- 当前 Linux/Btrfs Adapter 验收须覆盖同一挂载的 Btrfs 合格路径、ext4/`prl_fs` 拒绝、不同文件系统或不同挂载拒绝、Btrfs 文件属性不兼容及低于 5.18 内核的跨挂载点场景；不得用 Full Copy 成功代替 reflink 成功。XFS 合格路径与 `reflink=0` 拒绝属于将来 XFS Adapter 的验收，不作为本次 Btrfs CLI 适配的放行条件；
 - Linux Btrfs 真实文件系统测试由 `THINWS_LINUX_BTRFS_TEST_ROOT` 显式指定已存在、可写、无路径符号链接的绝对目录；测试先确认实际文件系统为 Btrfs，只在该目录内创建并清理随机命名的私有子目录，不删除配置的根目录，也不默认使用系统临时目录或源码共享目录。未配置或验证失败须记为未执行/失败，不得冒充真实 Btrfs 已通过。先用 `python3 -B tools/linux_btrfs_preflight.py` 在该环境下验证；此变量仅属于测试工具，不是产品 CLI 配置。后续 Linux Adapter 的真实物化测试沿用该测试根约定；
 - supported/unsupported/unknown 三种 Probe 结果；
 - Probe 后路径、挂载点或 symlink 被替换的竞态；

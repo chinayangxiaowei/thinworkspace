@@ -6,11 +6,11 @@
 
 本文决定现有单机 CLI 是否接入 Linux/Btrfs，以及接入时不能削弱的产品边界。具体 Probe、物化和失败回执由《跨平台工作区物化设计》维护；生命周期与归属由《Phase 1 单机 CLI 详细设计》维护；公开命令及支持资格由用户手册维护。
 
-本文不宣称当前 Linux CLI 已可运行，不定义新的命令、JSON 字段、SQLite DDL 或 Linux 系统调用封装清单。实验通过不等于产品放行。
+本文记录立项决策，不维护 Linux CLI 的实时实施状态，也不定义新的命令、JSON 字段、SQLite DDL 或 Linux 系统调用封装清单。实验通过不等于产品放行；当前支持资格以用户手册为准。
 
 ## 背景
 
-当前 `thinws-cli` 无条件依赖 macOS Adapter，在 Debian 上无法编译；Core、Application 和持久 Receipt 中还存在 APFS 专用候选名称与判断。真实 Debian 5.10/Btrfs 实验已证明同挂载普通文件 `FICLONE` 成功、写后隔离、目录与 `prl_fs` 输入拒绝，但尚未验证完整 Workspace 生命周期。这些证据不足以把 Linux 加入用户支持矩阵。
+立项时 `thinws-cli` 无条件依赖 macOS Adapter，在 Debian 上无法编译；Core、Application 和持久 Receipt 中还存在 APFS 专用候选名称与判断。当时的真实 Debian 5.10/Btrfs 实验已证明同挂载普通文件 `FICLONE` 成功、写后隔离、目录与 `prl_fs` 输入拒绝，但尚未验证完整 Workspace 生命周期。这些立项证据不足以把 Linux 加入用户支持矩阵。
 
 ## 决策
 

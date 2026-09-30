@@ -13,6 +13,7 @@
 - 从仓库根目录执行命令；Docker Desktop 使用 Linux 容器，并允许本机可信镜像以 `--privileged` 创建 loop 挂载。`--privileged` 权限较大，仅用于本机隔离测试，不挂载 Docker socket、用户 HOME、凭据或其他宿主目录。
 - 仓库以只读 `/work` 挂载；两个同名 target 挂载指向同一个 Docker 命名卷，让 Cargo 的 `/target` 和少数旧测试使用的 `/work/target` 均可写，避免测试写入宿主仓库。Cargo registry 另用命名卷缓存。
 - `tools/docker-linux-btrfs/run.sh` 仅在一次性容器内部创建稀疏 Btrfs/ext4 镜像并挂载，预检 Btrfs reflink，随后以普通用户运行传入的命令。退出时卸载；`docker run --rm` 删除容器及其临时镜像文件，不删除两个命名缓存卷。
+- 镜像内含 `btrfs-progs`。需要真实子卷的测试以普通用户在临时 Btrfs 夹具内创建空子卷，并用 `rmdir` 清理；该挂载布局下普通用户执行 `btrfs subvolume delete` 可能返回 `EPERM`，不能把夹具清理失败当作产品删除失败。
 - 该环境是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核，既不是原定 Debian 11.7/5.10 VM，也不提供 Parallels `prl_fs`。它能验证真实 Btrfs/ext4、Linux 编译和大部分生命周期行为；内核版本、`prl_fs`、VM 挂载拓扑及维护者人工验收仍需在原定环境完成。
 
 ## 构建与运行

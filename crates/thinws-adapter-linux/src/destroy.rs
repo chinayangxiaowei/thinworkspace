@@ -153,6 +153,7 @@ mod tests {
     use std::fs;
     use std::os::fd::OwnedFd;
     use std::path::Path;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rustix::fs::{Mode, open};
@@ -263,6 +264,29 @@ mod tests {
             PortErrorKind::InvalidLayout
         );
         assert_eq!(fs::read(copy.join("nested/leaf")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn different_device_child_on_same_mount_is_not_in_deletion_scope() {
+        let (fixture, fd, identity, mount) = fixture();
+        let subvolume = fixture.path().join("copy/subvolume");
+        let created = Command::new("btrfs")
+            .args(["subvolume", "create"])
+            .arg(&subvolume)
+            .output()
+            .unwrap();
+        assert!(created.status.success());
+        let child = node_at(&fd, OsStr::new("subvolume"))
+            .map_err(|error| error.into_port_error())
+            .unwrap();
+        let child_mount = mount_id_at(&fd, OsStr::new("subvolume"))
+            .map_err(|error| error.into_port_error())
+            .unwrap();
+        let result = checked_entry(&fd, OsStr::new("subvolume"), identity, mount);
+        fs::remove_dir(&subvolume).unwrap();
+        assert_ne!(child.device, identity.device());
+        assert_eq!(child_mount, mount);
+        assert_eq!(result.unwrap_err().kind(), PortErrorKind::InvalidLayout);
     }
 
     #[test]

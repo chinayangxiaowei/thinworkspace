@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_workspace_requires_each_registered_identity_and_path() {
+    fn prepared_and_ready_workspace_reject_individual_proof_mismatches() {
         let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
             .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
         let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
@@ -1330,6 +1330,68 @@ mod tests {
             prepared.trash_root = original.trash.path.clone();
             std::fs::write(&proof, encode_workspace_ownership(&original).unwrap()).unwrap();
             prepared.revalidate().unwrap();
+        }
+
+        adapter
+            .clear_workspace_incomplete(&lock, &layout, prepared)
+            .unwrap();
+        let registered = WorkspaceReservation::new(
+            workspace_id,
+            identity.instance_id(),
+            "ready-check".parse::<WorkspaceName>().unwrap(),
+            absolute(target_fixture.path()).unwrap(),
+            absolute(&target).unwrap(),
+            original.volume_id,
+            original.volume_id,
+            false,
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        );
+        assert_eq!(
+            adapter
+                .validate_ready_workspace(&layout, &registered)
+                .unwrap(),
+            absolute(&target).unwrap()
+        );
+        for case in 0..3 {
+            let mut altered = original.clone();
+            match case {
+                0 => {
+                    altered.instance_id = "01890a5d-ac96-774b-bd5b-55c7b8d09f38"
+                        .parse::<InstanceId>()
+                        .unwrap()
+                }
+                1 => {
+                    altered.target_path =
+                        absolute(&target_fixture.path().join("other-copy")).unwrap()
+                }
+                2 => {
+                    altered.isolated_path = Some(
+                        absolute(
+                            &target_fixture
+                                .path()
+                                .join(format!(".thinws-remove-{workspace_id}")),
+                        )
+                        .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(&proof, encode_workspace_ownership(&altered).unwrap()).unwrap();
+            assert_eq!(
+                adapter
+                    .validate_ready_workspace(&layout, &registered)
+                    .unwrap_err()
+                    .kind(),
+                PortErrorKind::InvalidLayout,
+                "mismatched Ready proof case {case} must be refused"
+            );
+            std::fs::write(&proof, encode_workspace_ownership(&original).unwrap()).unwrap();
+            assert_eq!(
+                adapter
+                    .validate_ready_workspace(&layout, &registered)
+                    .unwrap(),
+                absolute(&target).unwrap()
+            );
         }
     }
 

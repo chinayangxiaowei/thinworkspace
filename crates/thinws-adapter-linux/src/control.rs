@@ -113,7 +113,7 @@ pub(crate) fn read_private_document(
     let fd = match rustix::fs::openat(
         &directory.fd,
         name,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        private_document_open_flags(),
         Mode::empty(),
     ) {
         Ok(fd) => fd,
@@ -173,7 +173,26 @@ pub(crate) fn read_private_document(
             )
             .with_source(error)
         })?;
-    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+    if document_changed(&before, &after, &named) {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "private control document changed during read",
+        ));
+    }
+    revalidate_private_directory(directory)?;
+    Ok(Some(bytes))
+}
+
+fn private_document_open_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK
+}
+
+fn document_changed(
+    before: &rustix::fs::Stat,
+    after: &rustix::fs::Stat,
+    named: &rustix::fs::Stat,
+) -> bool {
+    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
         || (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
         || before.st_size != after.st_size
         || after.st_mode != named.st_mode
@@ -183,14 +202,6 @@ pub(crate) fn read_private_document(
         || before.st_mtime_nsec != after.st_mtime_nsec
         || before.st_ctime != after.st_ctime
         || before.st_ctime_nsec != after.st_ctime_nsec
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "private control document changed during read",
-        ));
-    }
-    revalidate_private_directory(directory)?;
-    Ok(Some(bytes))
 }
 
 pub(crate) fn document_error(error: DocumentError) -> PortError {
@@ -284,4 +295,184 @@ pub(crate) fn control_filesystem_identity(
     })?;
     revalidate_private_directory(directory)?;
     Ok((volume, mount_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, PrivateDirectory) {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-private-document-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = prepare_private_directory(&fixture.path().join("control")).unwrap();
+        (fixture, directory)
+    }
+
+    #[test]
+    fn private_document_rejects_each_unsafe_leaf_metadata_condition() {
+        let (_fixture, directory) = fixture();
+        let leaf = directory.path().join("config.toml");
+        std::fs::write(&leaf, b"safe").unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_private_document(&directory, "config.toml").unwrap(),
+            Some(b"safe".to_vec())
+        );
+
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            read_private_document(&directory, "config.toml")
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let extra_link = directory.path().join("extra-link");
+        std::fs::hard_link(&leaf, &extra_link).unwrap();
+        assert_eq!(
+            read_private_document(&directory, "config.toml")
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::remove_file(extra_link).unwrap();
+
+        std::fs::remove_file(&leaf).unwrap();
+        std::fs::create_dir(&leaf).unwrap();
+        assert_eq!(
+            read_private_document(&directory, "config.toml")
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn private_document_open_flags_enforce_syscall_safety_boundary() {
+        let flags = private_document_open_flags();
+        assert!(flags.contains(OFlags::CLOEXEC));
+        assert!(flags.contains(OFlags::NOFOLLOW));
+        assert!(flags.contains(OFlags::NONBLOCK));
+        assert_eq!(flags & OFlags::ACCMODE, OFlags::RDONLY);
+    }
+
+    #[test]
+    fn private_document_reads_one_byte_past_the_decode_limit() {
+        let (_fixture, directory) = fixture();
+        let leaf = directory.path().join("config.toml");
+        let bytes = vec![b' '; MAX_DOCUMENT_BYTES + 10];
+        std::fs::write(&leaf, &bytes).unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let observed = read_private_document(&directory, "config.toml")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.len(), MAX_DOCUMENT_BYTES + 1);
+        assert_eq!(observed, bytes[..MAX_DOCUMENT_BYTES + 1]);
+        assert_eq!(decode_config(&observed), Err(DocumentError::TooLarge));
+    }
+
+    #[test]
+    fn unclaimed_control_root_checks_each_lock_leaf_condition() {
+        let (fixture, directory) = fixture();
+        require_unclaimed_control_root(&directory).unwrap();
+        let leaf = directory.path().join("lifecycle.lock");
+        std::fs::write(&leaf, b"").unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        require_unclaimed_control_root(&directory).unwrap();
+
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            require_unclaimed_control_root(&directory)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let extra_link = fixture.path().join("extra-link");
+        std::fs::hard_link(&leaf, &extra_link).unwrap();
+        assert_eq!(
+            require_unclaimed_control_root(&directory)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::remove_file(extra_link).unwrap();
+        require_unclaimed_control_root(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_filesystem_identity_rejects_a_different_existing_directory() {
+        let (fixture, directory) = fixture();
+        let other = fixture.path().join("other");
+        prepare_private_directory(&other).unwrap();
+        let other = AbsolutePath::try_from_bytes(other.as_os_str().as_bytes().to_vec()).unwrap();
+        assert_eq!(
+            control_filesystem_identity(&directory, &other)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn unsupported_document_version_keeps_its_error_class() {
+        assert_eq!(
+            document_error(DocumentError::UnsupportedVersion).kind(),
+            PortErrorKind::UnsupportedVersion
+        );
+        assert_eq!(
+            document_error(DocumentError::InvalidToml).kind(),
+            PortErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn document_snapshot_rejects_each_independent_postread_change() {
+        let (_fixture, directory) = fixture();
+        let leaf = directory.path().join("config.toml");
+        std::fs::write(&leaf, b"safe").unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = File::open(&leaf).unwrap();
+        let before = rustix::fs::fstat(file.as_fd()).unwrap();
+        let after = rustix::fs::fstat(file.as_fd()).unwrap();
+        let named =
+            rustix::fs::statat(&directory.fd, "config.toml", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        assert!(!document_changed(&before, &after, &named));
+
+        let changed_after = |change: fn(&mut rustix::fs::Stat)| {
+            let mut after = rustix::fs::fstat(file.as_fd()).unwrap();
+            change(&mut after);
+            assert!(document_changed(&before, &after, &named));
+        };
+        changed_after(|snapshot| snapshot.st_dev = snapshot.st_dev.wrapping_add(1));
+        changed_after(|snapshot| snapshot.st_ino = snapshot.st_ino.wrapping_add(1));
+        changed_after(|snapshot| snapshot.st_size += 1);
+        changed_after(|snapshot| snapshot.st_mtime += 1);
+        changed_after(|snapshot| snapshot.st_mtime_nsec += 1);
+        changed_after(|snapshot| snapshot.st_ctime += 1);
+        changed_after(|snapshot| snapshot.st_ctime_nsec += 1);
+
+        let changed_named = |change: fn(&mut rustix::fs::Stat)| {
+            let mut named =
+                rustix::fs::statat(&directory.fd, "config.toml", AtFlags::SYMLINK_NOFOLLOW)
+                    .unwrap();
+            change(&mut named);
+            assert!(document_changed(&before, &after, &named));
+        };
+        changed_named(|snapshot| snapshot.st_dev = snapshot.st_dev.wrapping_add(1));
+        changed_named(|snapshot| snapshot.st_ino = snapshot.st_ino.wrapping_add(1));
+        changed_named(|snapshot| snapshot.st_mode ^= 0o100);
+        changed_named(|snapshot| snapshot.st_uid = snapshot.st_uid.wrapping_add(1));
+        changed_named(|snapshot| snapshot.st_nlink += 1);
+    }
 }

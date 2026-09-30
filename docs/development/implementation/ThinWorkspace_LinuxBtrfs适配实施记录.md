@@ -192,3 +192,11 @@ Git 测试夹具补测（2026-09-30）：把上述单个回归用例的总预算
 全仓门禁夹具修复（2026-09-30）：日志模块补测后 Debian 全仓 Clippy/test 均退出 0；macOS Clippy 退出 0，但首次全仓测试在无关的 P0 清理实验 `retained_fixture` 处失败 3 项，原因是保留夹具仅以进程号和进程内计数命名，多轮运行后进程号复用撞上旧目录，`create` 返回 AlreadyExists。未删除旧夹具或改产品行为；只将该 P0 测试夹具改为 `tempfile` 唯一目录并 `keep` 留存，显式设为 `0700` 保持原权限约束。第一次局部复测因 `tempfile` 的默认目录权限为 `0755` 而失败，补权限后 `cargo test -p thinws-p0-cleanup --lib` 9 passed；首次失败和修正过程均保留，不冒称首次全仓门禁通过。`Cargo.lock` 仅为既有 workspace 依赖 `tempfile` 增加该实验包的 dev-dependency 条目；两平台全仓门禁需对修正后的候选重跑。
 
 日志补测与夹具修复最终门禁（2026-09-30）：在包含两项改动的同一候选上，macOS 与 Debian 11.7 的 `cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 均退出 0；`cargo fmt --all -- --check` 与 `git diff --check` 退出 0。Debian 测试使用 ext4 控制根和真实 Btrfs 工作区夹具。macOS 首次失败仍在上段如实保留，最终通过不改变 Linux 日志模块两项等价候选待审核或整个 Adapter 包级变异尚未收口的事实。
+
+本地提交（2026-09-30）：Linux 清理日志测试与 P0 保留夹具命名稳定性修复提交为 `d3ab661`，保持本地 `main`，未 push 或创建 PR。
+
+Linux 归属文档边界补测计划（2026-09-30）：历史完整 Adapter 报告中 `document.rs` 有 9 项 missed，集中在目录 inode/birthtime 组合、大小上限和十六进制位运算。主 Agent 在 `d3ab661` 上只增加模块测试：四种历史目录身份各自的零 inode、负秒和纳秒越界，零秒与最大合法纳秒；编码、解码恰为 64 KiB 可通过、超出 1 字节拒绝；错误显示保留分类。Debian 文档模块 7 项普通测试通过；生产逻辑、持久格式和 CLI 未变。rustfmt 后 `document.rs` SHA-256 为 `882081e825e0e258b5c984a6c35e39f9a9bd11408d976c9dafb7f41a9e90ce6a`。按旧漏检位置重新列举 18 项定向变异（含相邻项），以 Debian/ext4＋Btrfs、Linux Adapter/Application/CLI 三包、单 worker、隔离 ext4 编译目标、`--timeout 180` 运行，输出至 `/media/psf/data/code/thinws-mutants-linux-document-boundary-fix/`。参考前批 38 项约 4 分钟，本批首次主动查看约启动后 3 分钟；运行时冻结文档模块源码与测试。此范围不能替代全模块或完整 Adapter 包级收口。
+
+归属文档变异结果（2026-09-30）：18 项约 3 分钟完成，16 caught、1 missed、1 unviable、0 timeout，退出码 2；`outcomes.json` SHA-256 为 `5424e8912a433a5f7432c50d2772ab3481c729354f00411eecf625d92d930915`。旧报告中目录身份、大小上限与错误显示的 8 项存活已捕获；唯一剩余为 `decode_hex` 中 `|→^`。左操作数是已左移 4 位的高半字节、低操作数只占低 4 位，按位与恒为 0，因此该处 OR 与 XOR 结果完全一致；这仍是待 Reviewer 接受的等价候选，不能记作 caught。格式与 diff 检查退出 0，普通测试/严格 Clippy 待提交前复测。
+
+归属文档补测提交前门禁（2026-09-30）：Debian 11.7 配置 ext4 控制根、真实 Btrfs 工作区与跨文件系统只读对照后，`cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 均退出 0；macOS 同两条命令退出 0；`cargo fmt --all -- --check` 与 `git diff --check` 退出 0。没有重跑全量 Adapter 变异或长预算 fuzz；上述一项等价候选仍待审核，L01–L05 状态不变。

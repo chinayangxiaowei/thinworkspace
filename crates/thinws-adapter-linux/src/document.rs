@@ -511,4 +511,103 @@ mod tests {
         );
         assert!(decode_workspace_ownership(seed).is_ok());
     }
+
+    #[test]
+    fn ownership_rejects_each_invalid_historical_identity_field() {
+        let seed = include_str!(
+            "../../../fuzz/corpus/thinws_platform_ownership_document/valid-linux-ownership"
+        );
+        for (field, original) in [
+            ("target_parent_inode", "100"),
+            ("target_inode", "101"),
+            ("staging_inode", "102"),
+            ("trash_inode", "103"),
+        ] {
+            let invalid = seed.replace(&format!("{field} = {original}"), &format!("{field} = 0"));
+            assert_eq!(
+                decode_workspace_ownership(invalid.as_bytes()),
+                Err(DocumentError::InvalidIdentity),
+                "{field}"
+            );
+        }
+        for field in [
+            "target_parent_birth_seconds",
+            "target_birth_seconds",
+            "staging_birth_seconds",
+            "trash_birth_seconds",
+        ] {
+            let invalid = seed.replace(&format!("{field} = 1700000000"), &format!("{field} = -1"));
+            assert_eq!(
+                decode_workspace_ownership(invalid.as_bytes()),
+                Err(DocumentError::InvalidIdentity),
+                "{field}"
+            );
+        }
+        for (field, original) in [
+            ("target_parent_birth_nanoseconds", "10"),
+            ("target_birth_nanoseconds", "11"),
+            ("staging_birth_nanoseconds", "12"),
+            ("trash_birth_nanoseconds", "12"),
+        ] {
+            let invalid = seed.replace(
+                &format!("{field} = {original}"),
+                &format!("{field} = 1000000000"),
+            );
+            assert_eq!(
+                decode_workspace_ownership(invalid.as_bytes()),
+                Err(DocumentError::InvalidIdentity),
+                "{field}"
+            );
+        }
+        let zero_seconds = seed.replace(
+            "target_birth_seconds = 1700000000",
+            "target_birth_seconds = 0",
+        );
+        assert!(decode_workspace_ownership(zero_seconds.as_bytes()).is_ok());
+        let max_nanoseconds = seed.replace(
+            "target_birth_nanoseconds = 11",
+            "target_birth_nanoseconds = 999999999",
+        );
+        assert!(decode_workspace_ownership(max_nanoseconds.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn document_size_limit_accepts_exactly_the_boundary_and_rejects_one_more_byte() {
+        #[derive(serde::Serialize)]
+        struct Padding {
+            value: String,
+        }
+
+        let base = encode_toml(&Padding {
+            value: String::new(),
+        })
+        .unwrap();
+        let exact_padding = MAX_DOCUMENT_BYTES - base.len();
+        let exact = encode_toml(&Padding {
+            value: "a".repeat(exact_padding),
+        })
+        .unwrap();
+        assert_eq!(exact.len(), MAX_DOCUMENT_BYTES);
+        assert!(decode_toml::<toml::Value>(&exact).is_ok());
+        assert_eq!(
+            encode_toml(&Padding {
+                value: "a".repeat(exact_padding + 1),
+            }),
+            Err(DocumentError::TooLarge)
+        );
+        let mut too_large = exact;
+        too_large.push(b' ');
+        assert_eq!(
+            decode_toml::<toml::Value>(&too_large),
+            Err(DocumentError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn document_error_display_identifies_the_failed_boundary() {
+        assert_eq!(
+            DocumentError::InvalidIdentity.to_string(),
+            "invalid control document (InvalidIdentity)"
+        );
+    }
 }

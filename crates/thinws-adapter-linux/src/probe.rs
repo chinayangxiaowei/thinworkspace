@@ -201,22 +201,7 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         MountEvidence::new(statfs.f_flags as u32, mount_writable),
         |id| MountEvidence::new(statfs.f_flags as u32, mount_writable).with_mount_id(id),
     );
-    let read = access_state(rustix::fs::accessat(
-        &fd,
-        ".",
-        Access::READ_OK | Access::EXEC_OK,
-        AtFlags::EACCESS,
-    ));
-    let write = if mount_writable {
-        access_state(rustix::fs::accessat(
-            &fd,
-            ".",
-            Access::WRITE_OK | Access::EXEC_OK,
-            AtFlags::EACCESS,
-        ))
-    } else {
-        SupportState::Unsupported
-    };
+    let (read, write) = directory_access(&fd, mount_writable);
     let cow = match fs_type {
         // The ioctl result and per-file flags are not known until execution.
         "btrfs" | "unknown" => SupportState::Unknown,
@@ -235,6 +220,26 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
         cow,
     )
     .map_err(|error| port_invalid("build path report", error))
+}
+
+fn directory_access(directory: &OwnedFd, mount_writable: bool) -> (SupportState, SupportState) {
+    let read = access_state(rustix::fs::accessat(
+        directory,
+        ".",
+        Access::READ_OK | Access::EXEC_OK,
+        AtFlags::EACCESS,
+    ));
+    let write = if mount_writable {
+        access_state(rustix::fs::accessat(
+            directory,
+            ".",
+            Access::WRITE_OK | Access::EXEC_OK,
+            AtFlags::EACCESS,
+        ))
+    } else {
+        SupportState::Unsupported
+    };
+    (read, write)
 }
 
 fn known_mount_id(mask: u32, id: u64) -> Option<u64> {
@@ -999,6 +1004,30 @@ mod tests {
         let no_search_report = no_search_report.unwrap();
         assert_eq!(no_search_report.readability(), SupportState::Unsupported);
         assert_eq!(no_search_report.writability(), SupportState::Unsupported);
+    }
+
+    #[test]
+    fn already_open_search_only_directory_is_not_reported_readable_or_writable() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs mount");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-probe-search-only-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = fixture.path().join("search-only");
+        fs::create_dir(&directory).unwrap();
+        let fd = rustix::fs::open(&directory, DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o100)).unwrap();
+        let exists = rustix::fs::accessat(&fd, ".", Access::EXISTS, AtFlags::EACCESS);
+        let observed = directory_access(&fd, true);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            exists.is_ok(),
+            "search permission should permit the existence probe"
+        );
+        assert_eq!(observed.0, SupportState::Unsupported);
+        assert_eq!(observed.1, SupportState::Unsupported);
     }
 
     #[test]

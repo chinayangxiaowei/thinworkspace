@@ -283,13 +283,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs::{self, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-
-    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn retained_fixture() -> PathBuf {
         #[cfg(target_os = "linux")]
@@ -303,15 +300,13 @@ mod tests {
             .nth(3)
             .expect("cleanup crate is nested below the repository root")
             .join("target");
-        let path = fixture_parent.join(format!(
-            "p007-removal-log-{}-{}",
-            std::process::id(),
-            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
+        let path = tempfile::Builder::new()
+            .prefix("p007-removal-log-")
+            .tempdir_in(fixture_parent)
             .expect("create retained P0-07 fixture");
+        fs::set_permissions(path.path(), fs::Permissions::from_mode(0o700))
+            .expect("make retained P0-07 fixture private");
+        let path = path.keep();
         let metadata = path.metadata().expect("read retained fixture identity");
         assert_eq!(metadata.mode() & 0o777, 0o700);
         eprintln!(

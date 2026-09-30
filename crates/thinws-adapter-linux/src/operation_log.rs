@@ -195,3 +195,166 @@ fn io_error(
 ) -> PortError {
     PortError::new(PortErrorKind::Io, operation).with_source(error)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::path::PathBuf;
+
+    use thinws_core::{ErrorCode, OperationId, RepositoryState, UnixMillis, WorkspaceId};
+    use thinws_ports::RepositoryInspection;
+
+    use super::*;
+    use crate::lock::prepare_private_directory;
+
+    fn fixture() -> (tempfile::TempDir, PrivateDirectory) {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-operation-log-")
+            .tempdir_in(root)
+            .unwrap();
+        let logs = prepare_private_directory(&fixture.path().join("logs")).unwrap();
+        (fixture, logs)
+    }
+
+    fn record() -> RemovalLogRecord<'static> {
+        RemovalLogRecord {
+            occurred_at: UnixMillis::new(1_700_000_000_123).unwrap(),
+            operation_id: "op_01890a5d-ac96-774b-bd5b-55c7b8d09f51"
+                .parse::<OperationId>()
+                .unwrap(),
+            workspace_id: "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+                .parse::<WorkspaceId>()
+                .unwrap(),
+            event: RemovalLogEvent::Started,
+            mode: RemovalMode::Force,
+            git_state: GitState::Unknown,
+            git_check_complete: false,
+            repositories: &[],
+            process_use: None,
+            protection: None,
+            error_code: None,
+            outcome: None,
+        }
+    }
+
+    fn assert_invalid(logs: &PrivateDirectory, record: &RemovalLogRecord<'_>) {
+        assert_eq!(
+            append_removal_record(logs, record).unwrap_err().kind(),
+            PortErrorKind::InvalidData
+        );
+        assert!(!logs.path().join(LOG_NAME).exists());
+    }
+
+    #[test]
+    fn every_event_field_is_checked_independently_before_log_creation() {
+        let (_fixture, logs) = fixture();
+        let mut record = record();
+
+        record.event = RemovalLogEvent::Refused;
+        record.error_code = Some(ErrorCode::WorkspaceBusy);
+        assert_invalid(&logs, &record);
+        record.error_code = None;
+        record.protection = Some(RemovalRefusal::ConfirmedInUse);
+        assert_invalid(&logs, &record);
+        record.error_code = Some(ErrorCode::WorkspaceBusy);
+        record.outcome = Some(WorkspaceRemoval::AlreadyAbsent);
+        assert_invalid(&logs, &record);
+
+        record = self::record();
+        record.protection = Some(RemovalRefusal::TrackedChanges);
+        assert_invalid(&logs, &record);
+        record = self::record();
+        record.error_code = Some(ErrorCode::WorkspaceDirty);
+        assert_invalid(&logs, &record);
+        record = self::record();
+        record.outcome = Some(WorkspaceRemoval::AlreadyAbsent);
+        assert_invalid(&logs, &record);
+
+        record.event = RemovalLogEvent::Completed;
+        record.outcome = None;
+        assert_invalid(&logs, &record);
+        record.outcome = Some(WorkspaceRemoval::AlreadyAbsent);
+        record.error_code = Some(ErrorCode::Filesystem);
+        assert_invalid(&logs, &record);
+        record.error_code = None;
+        record.protection = Some(RemovalRefusal::GitCheckIncomplete);
+        assert_invalid(&logs, &record);
+
+        record = self::record();
+        record.event = RemovalLogEvent::Failed;
+        assert_invalid(&logs, &record);
+        record.error_code = Some(ErrorCode::Filesystem);
+        record.outcome = Some(WorkspaceRemoval::AlreadyAbsent);
+        assert_invalid(&logs, &record);
+    }
+
+    #[test]
+    fn incomplete_git_and_complete_clean_are_both_valid_log_evidence() {
+        let (_fixture, logs) = fixture();
+        let mut record = record();
+        append_removal_record(&logs, &record).unwrap();
+        record.git_state = GitState::Clean;
+        record.git_check_complete = true;
+        append_removal_record(&logs, &record).unwrap();
+        let contents = std::fs::read_to_string(logs.path().join(LOG_NAME)).unwrap();
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[0]).unwrap()["git_state"],
+            "unknown"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[1]).unwrap()["git_state"],
+            "clean"
+        );
+    }
+
+    #[test]
+    fn relative_parent_repository_is_rejected_before_log_creation() {
+        let (_fixture, logs) = fixture();
+        let repositories = [RepositoryInspection::new(
+            PathBuf::from("nested/../escape"),
+            RepositoryState::Clean,
+            vec![],
+        )];
+        let mut record = record();
+        record.repositories = &repositories;
+        assert_invalid(&logs, &record);
+    }
+
+    #[test]
+    fn cleanup_log_names_and_byte_encoding_are_exact() {
+        assert_eq!(event_name(RemovalLogEvent::Refused), "refused");
+        assert_eq!(event_name(RemovalLogEvent::Started), "started");
+        assert_eq!(event_name(RemovalLogEvent::Completed), "completed");
+        assert_eq!(event_name(RemovalLogEvent::Failed), "failed");
+        assert_eq!(git_state_name(GitState::NotApplicable), "not-applicable");
+        assert_eq!(git_state_name(GitState::Clean), "clean");
+        assert_eq!(git_state_name(GitState::Dirty), "dirty");
+        assert_eq!(git_state_name(GitState::Unknown), "unknown");
+        assert_eq!(process_use_name(ProcessUse::NoEvidence), "no-evidence");
+        assert_eq!(
+            process_use_name(ProcessUse::ScanIncomplete),
+            "scan-incomplete"
+        );
+        assert_eq!(
+            process_use_name(ProcessUse::ConfirmedInUse),
+            "confirmed-in-use"
+        );
+        assert_eq!(
+            refusal_name(RemovalRefusal::ConfirmedInUse),
+            "confirmed-in-use"
+        );
+        assert_eq!(
+            refusal_name(RemovalRefusal::GitCheckIncomplete),
+            "git-check-incomplete"
+        );
+        assert_eq!(
+            refusal_name(RemovalRefusal::TrackedChanges),
+            "tracked-changes"
+        );
+        assert_eq!(hex_bytes(&[0x00, 0x0f, 0x10, 0xa5, 0xff]), "000f10a5ff");
+    }
+}

@@ -635,6 +635,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
  "thinws-core",
 ]
 

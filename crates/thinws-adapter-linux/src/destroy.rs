@@ -266,10 +266,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires THINWS_LINUX_BIND_MOUNT_CHILD on a distinct bind mount of the same Btrfs filesystem"]
     fn same_device_child_on_different_mount_is_not_in_deletion_scope() {
-        let Some(child_path) = env::var_os("THINWS_LINUX_BIND_MOUNT_CHILD") else {
-            return;
-        };
+        let child_path = env::var_os("THINWS_LINUX_BIND_MOUNT_CHILD")
+            .expect("set THINWS_LINUX_BIND_MOUNT_CHILD to the bind-mounted Btrfs child");
         let child_path = Path::new(&child_path);
         let parent = directory(child_path.parent().unwrap());
         let expected = node(&parent)

@@ -15,6 +15,13 @@ use crate::document::{decode_marker, encode_config, encode_marker};
 use crate::lock::{PrivateDirectory, open_private_directory, revalidate_private_directory};
 use crate::{LinuxDataRootLayout, LinuxHostAdapter, LinuxLockGuard, LinuxPreparedDataRoot};
 
+const DATABASE_CREATE_FLAGS: OFlags = OFlags::CREATE
+    .union(OFlags::EXCL)
+    .union(OFlags::RDWR)
+    .union(OFlags::CLOEXEC)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK);
+
 /// Same-process proof of one newly published initializing marker.
 pub struct LinuxInitializingProof {
     directory: PrivateDirectory,
@@ -146,9 +153,7 @@ impl LinuxHostAdapter {
             })?;
         let displaced = read_private_document(&proof.directory, &temporary.name)?
             .ok_or_else(|| PortError::new(PortErrorKind::InvalidLayout, "old marker is missing"))?;
-        if decode_marker(&published).map_err(document_error)? != ready
-            || decode_marker(&displaced).map_err(document_error)? != proof.marker
-        {
+        if !exchanged_marker_contents_match(&published, &displaced, &ready, &proof.marker)? {
             return Err(PortError::new(
                 PortErrorKind::InvalidLayout,
                 "exchanged Linux marker content changed",
@@ -241,6 +246,18 @@ impl LinuxHostAdapter {
     }
 }
 
+fn exchanged_marker_contents_match(
+    published: &[u8],
+    displaced: &[u8],
+    ready: &RootMarker,
+    initializing: &RootMarker,
+) -> Result<bool, PortError> {
+    Ok(
+        !(decode_marker(published).map_err(document_error)? != *ready
+            || decode_marker(displaced).map_err(document_error)? != *initializing),
+    )
+}
+
 fn create_private_child(
     parent: &PrivateDirectory,
     name: &str,
@@ -316,12 +333,7 @@ fn create_database_file(metadata: &PrivateDirectory) -> Result<File, PortError> 
     let fd = rustix::fs::openat(
         &metadata.fd,
         "state.db",
-        OFlags::CREATE
-            | OFlags::EXCL
-            | OFlags::RDWR
-            | OFlags::CLOEXEC
-            | OFlags::NOFOLLOW
-            | OFlags::NONBLOCK,
+        DATABASE_CREATE_FLAGS,
         Mode::from_bits_retain(0o600),
     )
     .map_err(|error| {
@@ -534,8 +546,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
+    use std::str::FromStr;
 
     use tempfile::TempDir;
+    use thinws_core::{AbsolutePath, InstanceId, VolumeId};
 
     use super::*;
 
@@ -556,6 +570,110 @@ mod tests {
     fn identity(path: &Path) -> (u64, u64) {
         let metadata = fs::metadata(path).unwrap();
         (metadata.dev(), metadata.ino())
+    }
+
+    #[test]
+    fn exchanged_marker_requires_both_independent_contents() {
+        let identity = InstallationIdentity::new(
+            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
+            AbsolutePath::try_from_bytes(b"/home/test/.thinws".to_vec()).unwrap(),
+            VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        let initializing = RootMarker::new(identity.clone(), RootMarkerState::Initializing);
+        let ready = RootMarker::new(identity, RootMarkerState::Ready);
+        let initializing_bytes = encode_marker(&initializing).unwrap();
+        let ready_bytes = encode_marker(&ready).unwrap();
+        assert!(
+            exchanged_marker_contents_match(
+                &ready_bytes,
+                &initializing_bytes,
+                &ready,
+                &initializing,
+            )
+            .unwrap()
+        );
+        assert!(
+            !exchanged_marker_contents_match(
+                &initializing_bytes,
+                &initializing_bytes,
+                &ready,
+                &initializing,
+            )
+            .unwrap()
+        );
+        assert!(
+            !exchanged_marker_contents_match(&ready_bytes, &ready_bytes, &ready, &initializing,)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_control_child_is_not_replaced_or_misclassified() {
+        let (fixture, directory) = private_fixture("thinws-linux-child-conflict-");
+        let existing = fixture.path().join("metadata");
+        fs::create_dir(&existing).unwrap();
+        fs::write(existing.join("foreign"), b"keep").unwrap();
+        assert_eq!(
+            create_private_child(&directory, "metadata")
+                .err()
+                .unwrap()
+                .kind(),
+            PortErrorKind::NotEmpty
+        );
+        assert_eq!(fs::read(existing.join("foreign")).unwrap(), b"keep");
+        assert!(fs::read_dir(fixture.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".thinws-dir.tmp-")
+        }));
+    }
+
+    #[test]
+    fn database_creation_requires_private_create_new_descriptor_flags() {
+        for flag in [
+            OFlags::CREATE,
+            OFlags::EXCL,
+            OFlags::RDWR,
+            OFlags::CLOEXEC,
+            OFlags::NOFOLLOW,
+            OFlags::NONBLOCK,
+        ] {
+            assert!(DATABASE_CREATE_FLAGS.contains(flag), "missing {flag:?}");
+        }
+        let (fixture, directory) = private_fixture("thinws-linux-db-create-");
+        let file = create_database_file(&directory).unwrap();
+        let path = fixture.path().join("state.db");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert!(
+            rustix::io::fcntl_getfd(&file)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        let open_flags = rustix::fs::fcntl_getfl(&file).unwrap();
+        assert!(open_flags.contains(OFlags::RDWR));
+        assert!(open_flags.contains(OFlags::NONBLOCK));
+    }
+
+    #[test]
+    fn database_creation_does_not_open_existing_file_or_symlink() {
+        let (fixture, directory) = private_fixture("thinws-linux-db-existing-");
+        let path = fixture.path().join("state.db");
+        fs::write(&path, b"foreign").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(create_database_file(&directory).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"foreign");
+
+        fs::remove_file(&path).unwrap();
+        let destination = fixture.path().join("destination");
+        fs::write(&destination, b"outside").unwrap();
+        std::os::unix::fs::symlink(&destination, &path).unwrap();
+        assert!(create_database_file(&directory).is_err());
+        assert_eq!(fs::read(destination).unwrap(), b"outside");
     }
 
     #[test]

@@ -372,6 +372,31 @@ mod tests {
     }
 
     #[test]
+    fn proc_stat_identity_selects_the_exact_start_time_after_a_name_with_parentheses() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-proc-stat-")
+            .tempdir_in(root)
+            .unwrap();
+        fs::write(
+            fixture.path().join("status"),
+            b"Name:\tworker\nUid:\t1000\t1001\t1002\t1003\n",
+        )
+        .unwrap();
+        let stat = format!("123 (worker ) background) S {}424242 9\n", "1 ".repeat(18));
+        fs::write(fixture.path().join("stat"), stat).unwrap();
+
+        assert_eq!(
+            read_process_identity(fixture.path()),
+            Some(ProcessIdentity {
+                uid: 1001,
+                start_ticks: 424242,
+            })
+        );
+    }
+
+    #[test]
     fn changed_process_start_time_cannot_confirm_use() {
         let self_dir = PathBuf::from(format!("/proc/{}", std::process::id()));
         let identity = read_process_identity(&self_dir).unwrap();

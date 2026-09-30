@@ -1,6 +1,6 @@
 # ADR-0007：Phase 1 Linux/Btrfs CLI 适配
 
-**状态：Accepted｜日期：2026-09-29｜适用范围：Phase 1 的 Linux/Btrfs 扩展**
+**状态：Accepted｜日期：2026-09-29，资格基线修订：2026-09-30｜适用范围：Phase 1 的 Linux/Btrfs 扩展**
 
 ## 职责与非职责
 
@@ -14,7 +14,7 @@
 
 ## 决策
 
-1. 在 Phase 1 的同步、单机、普通目录模型内增加 Linux/Btrfs Adapter。Linux 首个资格组合仅为 Debian VM 中可重复验证的 Btrfs；不同时承诺 XFS、OverlayFS、ext4 reflink 或跨文件系统 Full Copy。
+1. 在 Phase 1 的同步、单机、普通目录模型内增加 Linux/Btrfs Adapter。Linux 首个资格组合为现有 aarch64 VM 实测的 Debian 12 bookworm、`5.10.0-24-arm64` 内核与真实 Btrfs；不同时承诺 XFS、OverlayFS、ext4 reflink 或跨文件系统 Full Copy。维护者于 2026-09-30 确认使用该 VM 作为验收基线：VM 名称仍含“11.7”，但机内实测为 Debian 12；名称不作为系统版本证据。Debian 11 容器测试只作补充，不扩大支持矩阵。
 2. Linux 也使用固定的 `~/.thinws` 控制目录，可位于经身份校验的 ext4 等非 Btrfs 本机文件系统；控制目录不参与 source/target reflink 同挂载判断。source、target parent、staging、trash 必须位于本次经证据确认可执行的同一 Btrfs 挂载布局。`prl_fs` 共享源码到 Btrfs target 的组合必须拒绝，而不是暗中完整复制。
 3. 保留现有七个 Port、状态机、强制清理授权和公开命令形状。Core/Application 不按操作系统分支；平台身份、文件系统特性、no-follow 访问、`FICLONE`、无覆盖发布和进程占用探测由 Linux Adapter 提供。不得复用 APFS UUID 或仅凭两个路径都是 Btrfs 推断同卷。
 4. Linux 的持久归属必须有可重验的文件系统与目录身份；身份不足、挂载变化、birthtime 缺失或控制目录布局无法证明时安全失败。任何持久格式更改须明确版本化，不静默读取或迁移不兼容数据。Linux 删除必须与 macOS 一样先确认登记 target 存在、身份匹配和占用边界；`--force` 不越过这些检查。

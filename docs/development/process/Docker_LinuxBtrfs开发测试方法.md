@@ -6,15 +6,15 @@
 
 ## 非职责
 
-测试种类、范围和完成门槛仍由《任务流程》决定；Linux 产品资格、平台语义和公开契约仍由对应设计、ADR-0007 与用户手册决定。本文不把 Docker Desktop 宣称为 Debian 11.7 VM，也不改变发布支持矩阵。
+测试种类、范围和完成门槛仍由《任务流程》决定；Linux 产品资格、平台语义和公开契约仍由对应设计、ADR-0007 与用户手册决定。本文不把 Docker Desktop 宣称为目标 Debian 12 VM，也不改变发布支持矩阵。
 
 ## 前提与边界
 
 - 从仓库根目录执行命令；Docker Desktop 使用 Linux 容器，并允许本机可信镜像以 `--privileged` 创建 loop 挂载。`--privileged` 权限较大，仅用于本机隔离测试，不挂载 Docker socket、用户 HOME、凭据或其他宿主目录。
-- 常规开发命令把仓库以只读 `/work` 挂载；两个同名 target 挂载指向同一个 Docker 命名卷，让 Cargo 的 `/target` 和少数旧测试使用的 `/work/target` 均可写，避免测试写入宿主仓库。Cargo registry 另用命名卷缓存；宿主 bind mount 失效时采用下文的一次性容器源码快照。Debian 11 运行测试则只读挂载既有 musl 产物，另用随容器删除的匿名空卷满足 runner 的 `/work/target` 前提。
+- 常规开发命令把仓库以只读 `/work` 挂载；两个同名 target 挂载指向同一个 Docker 命名卷，让 Cargo 的 `/target` 和测试程序内嵌的 `/work/target` 路径均指向同一产物，避免测试写入宿主仓库。Cargo registry 另用命名卷缓存；宿主 bind mount 失效时采用下文的一次性容器源码快照。Debian 11 补充测试也须把同一 musl 产物卷挂到这两个路径；runner 会对 `/work/target` 执行 `chown`，因此该挂载必须可写，不使用匿名空卷或只读挂载。
 - `tools/docker-linux-btrfs/run.sh` 仅在一次性容器内部创建稀疏 Btrfs/ext4 镜像并挂载，预检 Btrfs reflink，随后以普通用户运行传入的命令。退出时卸载；`docker run --rm` 删除容器及其临时镜像文件，不删除挂载的命名缓存卷。
 - 镜像内含 `btrfs-progs`。需要真实子卷的测试以普通用户在临时 Btrfs 夹具内创建空子卷，并用 `rmdir` 清理；该挂载布局下普通用户执行 `btrfs subvolume delete` 可能返回 `EPERM`，不能把夹具清理失败当作产品删除失败。
-- 默认开发镜像是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核；下文的运行镜像换成 Debian 11 用户态，但仍共用 LinuxKit 内核。两者都不是原定 Debian 11.7/5.10 VM，也不提供 Parallels `prl_fs`。容器能验证真实 Btrfs/ext4、Linux 编译及生命周期行为；内核版本、`prl_fs`、VM 挂载拓扑及维护者人工验收仍需在原定环境完成。
+- 默认开发镜像是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核；下文的运行镜像换成 Debian 11 用户态，但仍共用 LinuxKit 内核。两者都不是当前资格基线的 Debian 12/5.10 VM，也不提供 Parallels `prl_fs`。容器能验证真实 Btrfs/ext4、Linux 编译及生命周期行为；目标内核、`prl_fs`、VM 挂载拓扑及维护者人工验收仍需在目标环境完成。
 - 本文的 Linux Release 目标是 ARM64 musl；示例按本机 Docker 的 `linux/arm64` 镜像运行。其他架构不能直接沿用 `musl-gcc` 与 `aarch64-unknown-linux-musl` 的组合，必须另行验证交叉链接器和目标运行环境。
 
 ## 构建与运行
@@ -101,7 +101,7 @@ docker build -f tools/docker-linux-btrfs/Dockerfile.debian11-runtime \
 docker run --rm --privileged \
   -v "$PWD":/work:ro \
   -v thinws-linux-musl-target:/target:ro \
-  -v /work/target \
+  -v thinws-linux-musl-target:/work/target \
   thinws-linux-btrfs-runtime:debian11 \
   sh /work/tools/docker-linux-btrfs/run.sh \
   sh -c '
@@ -115,7 +115,7 @@ docker run --rm --privileged \
   '
 ```
 
-该命令运行的是 musl Release 模式编出的 CLI 测试程序，不在 Debian 11 容器内重新编译；它实际启动同一目标目录中的 `thinws` 二进制。预检必须打印 `Btrfs reflink confirmed`，`e2e_linux` 套件全部通过且容器退出码为 0。若宿主 bind mount 故障，沿用上文的 `docker create`＋`git archive HEAD`＋`docker cp` 快照法，替换为这里的运行镜像、只读产物卷、匿名目标卷与测试命令；不要把失败的挂载当成产品测试结果。
+该命令运行的是 musl Release 模式编出的 CLI 测试程序，不在 Debian 11 容器内重新编译；它实际启动编译时内嵌的 `/work/target/aarch64-unknown-linux-musl/release/thinws`。预检必须打印 `Btrfs reflink confirmed`，`e2e_linux` 套件全部通过且容器退出码为 0。若宿主 bind mount 故障，沿用上文的 `docker create`＋`git archive HEAD`＋`docker cp` 快照法，保留这里的运行镜像、同一产物卷的双路径挂载与测试命令；不要把失败的挂载当成产品测试结果。
 
 需要在 macOS 宿主取得 Linux 产物时，可从停止的一次性容器复制到仓库忽略的 `target/linux-musl/thinws`；不要覆盖本机 macOS 的 `target/release/thinws`，也不要把 Linux ELF 安装到 macOS 用户 bin：
 
@@ -129,8 +129,8 @@ docker rm "$container_id"
 shasum -a 256 target/linux-musl/thinws
 ```
 
-Debian 11 容器冒烟及黑盒测试只证明该用户态与 Docker LinuxKit 内核下的行为，不证明 Debian 11.7/5.10 VM、`prl_fs` 或实际挂载拓扑资格；静态 musl 也不使不支持的文件系统自动具备 reflink。原定 VM 的全命令黑盒与维护者人工验收仍须补齐。
+Debian 11 容器冒烟及黑盒测试只证明该用户态与 Docker LinuxKit 内核下的行为，不证明目标 Debian 12/5.10 VM、`prl_fs` 或实际挂载拓扑资格；静态 musl 也不使不支持的文件系统自动具备 reflink。目标 VM 的全命令黑盒已单独通过，剩余质量门禁与维护者人工验收仍须补齐。
 
 ## 证据使用
 
-记录 Docker 镜像、内核、文件系统预检、执行命令、退出码和候选提交或 diff。Docker 结果可补充 Linux 开发证据，但不能替代《Phase 1 实施计划》P1-L05 所要求的 Debian VM 全命令黑盒验收。变异测试仍按《任务流程》使用与普通验证隔离的编译目标，并处理存活变异；此处的普通测试命名卷不得直接复用为变异编译缓存。
+记录 Docker 镜像、内核、文件系统预检、执行命令、退出码和候选提交或 diff。Docker 结果可补充 Linux 开发证据，但不能替代《Phase 1 实施计划》P1-L05 所要求的目标 Debian VM 全命令黑盒验收。变异测试仍按《任务流程》使用与普通验证隔离的编译目标，并处理存活变异；此处的普通测试命名卷不得直接复用为变异编译缓存。

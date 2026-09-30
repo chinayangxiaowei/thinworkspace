@@ -852,11 +852,11 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 | P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | In Progress |
 | P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | In Progress |
 | P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | In Progress |
-| P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在 Debian 11.7 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Progress |
+| P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在实际运行 Debian 12 bookworm 的 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Progress |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。ARM64 静态 musl 候选已在 Docker 真实 Btrfs 和 Debian 11 用户态容器运行完整 Linux CLI 黑盒套件。原 Parallels VM 已重新可访问，真实 Btrfs 主盘重新挂载且本轮 CLI/Adapter 黑盒及同盘跨挂载测试通过；但名为“Debian GNU Linux 11.7”的该 VM 机内实测仍为 Debian 12 用户态、`5.10.0-24-arm64` 内核，不能记作要求的 Debian 11.7 整机资格。L01–L05 仍为 In Progress：完整受影响范围变异证据尚未闭合、原定版本资格与人工验收尚未完成；此前共用构建缓存的定向变异计数不得用于放行。逐次命令、计数、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
+当前证据：维护者已将 Linux 资格基线从原计划的 Debian 11.7 改为现有 VM 实测的 Debian 12 bookworm/aarch64、`5.10.0-24-arm64` 内核；VM 名称不作为版本证据。Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。当前 ARM64 静态 musl 候选已在 Docker 真实 Btrfs、Debian 11 用户态容器及该 Debian 12 VM 上运行完整 Linux CLI 黑盒套件，VM 结果为 10/10。L01–L05 仍为 In Progress：完整受影响范围变异证据、规定审核及人工验收尚未闭合；此前共用构建缓存的定向变异计数不得用于放行。逐次命令、计数、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
 
 ---
 

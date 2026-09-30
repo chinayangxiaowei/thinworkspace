@@ -34,7 +34,7 @@ thinws init
 thinws doctor
 ```
 
-macOS 首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；Linux 扩展正在 Debian 11.7、真实 Btrfs 上验证。两者的资格状态见第十二节，不因命令可编译而自动放行。Git 仅用于按需检查，缺少 Git 不影响目录物化。
+macOS 首发验收目标为 arm64 macOS 15.7.2、APFS 和 Apple Git 2.39.5；Linux 扩展以 Debian 12 bookworm VM、真实 Btrfs 为验收基线。两者的资格状态见第十二节，不因命令可编译而自动放行。Git 仅用于按需检查，缺少 Git 不影响目录物化。
 
 init 只建立固定的用户控制目录 `~/.thinws`；已完整初始化且身份一致时重复执行幂等。中断初始化留下的非空未归属控制目录不自动接管，需用户核对后在平台之外显式处理。没有 `--data-root`、reset 或 migrate。
 
@@ -419,7 +419,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 |---|---|
 | macOS 15.7.2、Apple Silicon arm64、每次 source/target 同一 APFS 卷；按需使用 Apple Git 2.39.5 | 新布局已有本机真实 APFS 技术候选验证；阶段门禁与人工验收未完成，当前未放行 |
 | 其他 macOS/Git 版本或 Intel x86_64 | 未完成该组合的真实机资格验证，不纳入首发承诺 |
-| Debian 11.7、aarch64、ext4 控制目录、source/target 同一真实 Btrfs 挂载 | CLI 及真实生命周期正在验证；尚未完成全部质量门禁和人工验收，不列为正式支持 |
+| Debian 12 bookworm、`5.10.0-24-arm64` 内核、aarch64、ext4 控制目录、source/target 同一真实 Btrfs 挂载 | 现有 VM 的静态 Release CLI 生命周期黑盒 10/10 已通过；其余适用质量门禁与人工验收未完成，不列为正式支持 |
 | 其他 Linux 文件系统/发行版、Windows 或 source/target 跨卷/跨挂载 | 当前未实现或未完成资格验证 |
 
 已知限制按本手册各节的详细契约执行：每次来源与指定 target 必须同一 APFS 卷（macOS）或同一 Btrfs 挂载（当前 Linux 扩展），`~/.thinws` 可在其他卷或文件系统；`--allow-copy` 不是跨卷开关，Linux 当前没有 Full Copy 后端（第四节）。普通路径可直接使用，但没有用户命令包装、构建缓存策略或 Sandbox（第一、二、六节）；Git 只用于按需的已跟踪变更检查，不代办分支、提交或 PR，未跟踪内容会随副本清理（第五至七节）；没有 GC、自动回收或中断续做，外部进程占用扫描也只能提供尽力证据（第六、八、九节）。系统 Git 不可用时，创建仍可进行，但依赖 Git 检查的普通清理可能因检查不完整而拒绝；是否显式强制清理仍由用户决定，且强制清理仍须验证目标存在与身份。

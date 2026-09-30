@@ -4,6 +4,8 @@
 
 本文保留 P1-L01–L05 的逐次实施、真实平台验证、失败与补测证据，供收口核对。当前任务状态与依赖只以[Phase 1 实施计划](../planning/ThinWorkspace_Phase1实施计划_v1.0.md)为准；本文不定义产品行为、接口、错误码、质量门槛，也不代替人工阶段放行。
 
+版本核对说明（2026-09-30）：早期以 VM 名称写作“Debian 11.7”的测试记录不能证明机内系统版本；后续 `/etc/os-release` 实测该 VM 为 Debian 12 bookworm。维护者已明确批准以现有 Debian 12 VM 作为 Linux 首个资格基线，现行要求见 ADR-0007、实施计划与用户手册。历史测试计数和当时的环境描述原样保留，不将 Debian 11 容器结果或旧 VM 名称改写为 Debian 12 整机证据。
+
 ## 实施与验证时序
 
 P1-L02/L04 交界实施记录（2026-09-29）：Linux Adapter 已增量加入显式 Btrfs target 的创建时目录身份与版本 3 归属文档，归属仅存于 ext4 控制根；真实 Btrfs 测试覆盖普通空 target、预占 target/操作目录拒绝、ext4 target 拒绝及 target 被替换后的失效。路径 Probe 的可写目录检测从不可用的空路径 `accessat` 调整为持有目录 FD 下的 `.` 检查，真实 Btrfs 回归确认可写证据。此能力尚未接入完整 `BootstrapStore`、Application 或 CLI；Ready 查询、空间统计、安全删除与命令黑盒验收仍未完成，不调整任务 Done 状态。

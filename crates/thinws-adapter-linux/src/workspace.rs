@@ -1380,6 +1380,24 @@ mod tests {
     }
 
     #[test]
+    fn path_containment_requires_a_component_boundary() {
+        for (parent, child, expected) in [
+            (b"/".as_slice(), b"/work".as_slice(), true),
+            (b"/work".as_slice(), b"/work".as_slice(), true),
+            (b"/work".as_slice(), b"/work/project".as_slice(), true),
+            (b"/work".as_slice(), b"/worker".as_slice(), false),
+            (b"/work/project".as_slice(), b"/work".as_slice(), false),
+            (b"/work".as_slice(), b"/else/project".as_slice(), false),
+        ] {
+            assert_eq!(
+                contains_path(parent, child),
+                expected,
+                "parent={parent:?}, child={child:?}"
+            );
+        }
+    }
+
+    #[test]
     fn operation_directory_rejects_a_mode_change_without_other_identity_changes() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");

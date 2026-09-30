@@ -435,10 +435,14 @@ fn digest_file(file: OwnedFd, expected: Node) -> Result<(u64, [u8; 32]), TreeFai
         hasher.update(&buffer[..count]);
         length = length.saturating_add(count as u64);
     }
-    if node(&file)? != expected || length != expected.size {
+    if !file_snapshot_matches(node(&file)?, expected, length) {
         return Err(TreeFailure::source_changed());
     }
     Ok((length, *hasher.finalize().as_bytes()))
+}
+
+fn file_snapshot_matches(current: Node, expected: Node, length: u64) -> bool {
+    current == expected && length == expected.size
 }
 
 fn update_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -453,6 +457,9 @@ fn update_time(hasher: &mut blake3::Hasher, (seconds, nanoseconds): (i64, i64)) 
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+
     use super::*;
 
     fn manifest() -> TreeManifest {
@@ -532,5 +539,59 @@ mod tests {
         let mut changed = source.clone();
         changed.entries[0].mtime = Some((1_700_000_001, 234_567_891));
         assert_ne!(changed.digest(), source.digest());
+    }
+
+    #[test]
+    fn file_digest_records_actual_bytes_and_length_across_read_chunks() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-tree-digest-")
+            .tempdir_in(root)
+            .unwrap();
+        let bytes = (0..65_553).map(|index| index as u8).collect::<Vec<_>>();
+        fs::write(fixture.path().join("file"), &bytes).unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let file = open_file(&directory, OsStr::new("file"))
+            .map_err(TreeFailure::into_port_error)
+            .unwrap();
+        let expected = node(&file).map_err(TreeFailure::into_port_error).unwrap();
+        let (length, digest) = digest_file(file, expected)
+            .map_err(TreeFailure::into_port_error)
+            .unwrap();
+        assert_eq!(length, bytes.len() as u64);
+        assert_eq!(digest, *blake3::hash(&bytes).as_bytes());
+    }
+
+    #[test]
+    fn filesystem_error_preserves_no_space_classification() {
+        let no_space = TreeFailure::io("test", std::io::Error::from_raw_os_error(libc::ENOSPC));
+        assert_eq!(no_space.kind, MaterializationFailureKind::NoSpace);
+        let ordinary = TreeFailure::io("test", std::io::Error::from_raw_os_error(libc::EIO));
+        assert_eq!(ordinary.kind, MaterializationFailureKind::Filesystem);
+    }
+
+    #[test]
+    fn completed_file_requires_both_unchanged_identity_and_read_length() {
+        let expected = Node {
+            device: 1,
+            inode: 2,
+            kind: NodeKind::File,
+            mode: 0o644,
+            size: 3,
+            blocks: 8,
+            mtime_seconds: 1_700_000_001,
+            mtime_nanoseconds: 234_567_890,
+        };
+        assert!(file_snapshot_matches(expected, expected, 3));
+        assert!(!file_snapshot_matches(
+            Node {
+                mtime_nanoseconds: expected.mtime_nanoseconds + 1,
+                ..expected
+            },
+            expected,
+            3
+        ));
+        assert!(!file_snapshot_matches(expected, expected, 2));
     }
 }

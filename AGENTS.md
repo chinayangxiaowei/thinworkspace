@@ -112,7 +112,7 @@
 | Workspace 创建、删除、未完成状态或空间统计 | Phase 1 详细设计的状态机、查询、未完成状态与空间统计章节；开发规范相关章节 |
 | init、`~/.thinws` 控制目录、SQLite schema、归属证据或 lifecycle lock | Phase 1 详细设计的实例、持久化与并发章节；ADR-0006；技术栈的 SQLite 与本机锁章节 |
 | APFS、Btrfs、CoW、跨卷、路径或符号链接 | 跨平台物化设计相关完整章节；技术栈的对应平台选型章节 |
-| Linux/Btrfs 适配、`FICLONE` 或 Linux CLI 装配 | ADR-0007；跨平台物化设计 §3、§5、§6.1、§9；技术栈的 Adapter 与测试章节 |
+| Linux/Btrfs 适配、`FICLONE` 或 Linux CLI 装配 | ADR-0007；跨平台物化设计 §3、§5、§6.1、§9；技术栈的 Adapter 与测试章节；使用 Docker 测试时追加[Docker Linux/Btrfs 开发测试方法](docs/development/process/Docker_LinuxBtrfs开发测试方法.md) |
 | Git、子仓库、branch、worktree 或旧 Base 路线 | Phase 1 详细设计的只读 Git 检查章节、ADR-0002；技术栈和开发规范相关章节；交付追加任务流程 §13.1 |
 | 强制清理、异常日志、commit 交付与主管验收 | 用户手册的清理契约；详细设计的清理/失败边界章节；开发规范 §13；任务流程 §13.1 |
 | 内部子进程、超时或外部进程占用检查 | Phase 1 详细设计的外部进程占用章节；用户手册的删除契约；技术栈和开发规范相关章节 |

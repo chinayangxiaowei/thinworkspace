@@ -53,6 +53,7 @@
 
 - [开发规范](development/process/开发规范.md)
 - [任务流程](development/process/任务流程.md)
+- [Docker Linux/Btrfs 开发测试方法](development/process/Docker_LinuxBtrfs开发测试方法.md)：在 macOS 上以临时真实文件系统夹具运行 Linux 开发门禁；不替代 Debian VM 资格验收。
 
 ### 规划
 

@@ -1242,6 +1242,98 @@ mod tests {
     }
 
     #[test]
+    fn prepared_workspace_requires_each_registered_identity_and_path() {
+        let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let control_fixture = tempfile::Builder::new()
+            .prefix("thinws-prepared-proof-control-")
+            .tempdir_in(control_root)
+            .unwrap();
+        let target_fixture = tempfile::Builder::new()
+            .prefix("thinws-prepared-proof-target-")
+            .tempdir_in(target_root)
+            .unwrap();
+        let control = control_fixture.path().join("control");
+        for path in [&control, &control.join("metadata"), &control.join("logs")] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let database = control.join("metadata/state.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let control_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&control).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let identity = InstallationIdentity::new(
+            "01890a5d-ac96-774b-bd5b-55c7b8d09f36"
+                .parse::<InstanceId>()
+                .unwrap(),
+            absolute(&control).unwrap(),
+            control_volume,
+        );
+        let layout = adapter.validate_layout(&identity).unwrap();
+        let lock = adapter
+            .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+            .unwrap();
+        let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f37"
+            .parse::<WorkspaceId>()
+            .unwrap();
+        let target = target_fixture.path().join("working-copy");
+        let mut prepared = adapter
+            .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target).unwrap())
+            .unwrap();
+        let original = prepared.ownership.clone();
+        let proof = control.join(format!("metadata/ownership-{workspace_id}.toml"));
+        prepared.revalidate().unwrap();
+
+        for case in 0..7 {
+            let mut altered = original.clone();
+            match case {
+                0 => altered.parent.inode += 1,
+                1 => altered.target.inode += 1,
+                2 => altered.staging.identity.inode += 1,
+                3 => altered.trash.identity.inode += 1,
+                4 => {
+                    prepared.target_root =
+                        absolute(&target_fixture.path().join("other-target")).unwrap()
+                }
+                5 => {
+                    prepared.staging_root =
+                        absolute(&target_fixture.path().join("other-staging")).unwrap()
+                }
+                6 => {
+                    prepared.trash_root =
+                        absolute(&target_fixture.path().join("other-trash")).unwrap()
+                }
+                _ => unreachable!(),
+            }
+            prepared.ownership = altered.clone();
+            std::fs::write(&proof, encode_workspace_ownership(&altered).unwrap()).unwrap();
+            assert_eq!(
+                prepared.revalidate().unwrap_err().kind(),
+                PortErrorKind::InvalidLayout,
+                "mismatched evidence case {case} must be refused"
+            );
+
+            prepared.ownership = original.clone();
+            prepared.target_root = original.target_path.clone();
+            prepared.staging_root = original.staging.path.clone();
+            prepared.trash_root = original.trash.path.clone();
+            std::fs::write(&proof, encode_workspace_ownership(&original).unwrap()).unwrap();
+            prepared.revalidate().unwrap();
+        }
+    }
+
+    #[test]
     fn selected_target_evidence_requires_each_field_to_match() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");

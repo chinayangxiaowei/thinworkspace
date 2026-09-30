@@ -450,3 +450,87 @@ fn update_time(hasher: &mut blake3::Hasher, (seconds, nanoseconds): (i64, i64)) 
     hasher.update(&seconds.to_le_bytes());
     hasher.update(&nanoseconds.to_le_bytes());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest() -> TreeManifest {
+        TreeManifest {
+            root_mode: 0o755,
+            root_mtime: (1_700_000_000, 123_456_789),
+            entries: vec![ManifestEntry {
+                path: b"file".to_vec(),
+                kind: NodeKind::File,
+                mode: Some(0o644),
+                mtime: Some((1_700_000_001, 234_567_890)),
+                length: 3,
+                digest: Some(*blake3::hash(b"abc").as_bytes()),
+            }],
+            regular_files: 1,
+            logical_bytes: 3,
+            physical_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn node_mtime_preserves_seconds_and_nanoseconds() {
+        let node = Node {
+            device: 1,
+            inode: 2,
+            kind: NodeKind::File,
+            mode: 0o644,
+            size: 3,
+            blocks: 8,
+            mtime_seconds: 1_700_000_001,
+            mtime_nanoseconds: 234_567_890,
+        };
+        assert_eq!(node.mtime(), (1_700_000_001, 234_567_890));
+    }
+
+    #[test]
+    fn promised_manifest_requires_each_guaranteed_field() {
+        let source = manifest();
+        assert!(source.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.root_mode ^= 0o100;
+        assert!(!changed.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.root_mtime.1 += 1;
+        assert!(!changed.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.entries[0].path = b"else".to_vec();
+        assert!(!changed.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.regular_files += 1;
+        assert!(!changed.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.logical_bytes += 1;
+        assert!(!changed.matches_promised(&source));
+
+        let mut changed = source.clone();
+        changed.physical_bytes += 4096;
+        assert!(changed.matches_promised(&source));
+    }
+
+    #[test]
+    fn manifest_digest_binds_path_and_mtime() {
+        let source = manifest();
+        let mut changed = source.clone();
+        changed.entries[0].path = b"else".to_vec();
+        assert_ne!(changed.digest(), source.digest());
+
+        let mut changed = source.clone();
+        changed.root_mtime.1 += 1;
+        assert_ne!(changed.digest(), source.digest());
+
+        let mut changed = source.clone();
+        changed.entries[0].mtime = Some((1_700_000_001, 234_567_891));
+        assert_ne!(changed.digest(), source.digest());
+    }
+}

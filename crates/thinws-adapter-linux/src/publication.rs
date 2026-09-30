@@ -358,7 +358,21 @@ pub(crate) fn validate_private_file(
             )
             .with_source(error)
         })?;
-    if (held.st_dev, held.st_ino) != expected
+    if !private_file_facts_match(&held, &named, expected) {
+        return Err(PortError::new(
+            PortErrorKind::InvalidLayout,
+            "Linux private file identity or mode changed",
+        ));
+    }
+    revalidate_private_directory(parent)
+}
+
+fn private_file_facts_match(
+    held: &rustix::fs::Stat,
+    named: &rustix::fs::Stat,
+    expected: (u64, u64),
+) -> bool {
+    !((held.st_dev, held.st_ino) != expected
         || (named.st_dev, named.st_ino) != expected
         || held.st_mode & libc::S_IFMT != libc::S_IFREG
         || named.st_mode & libc::S_IFMT != libc::S_IFREG
@@ -367,14 +381,7 @@ pub(crate) fn validate_private_file(
         || held.st_uid != rustix::process::geteuid().as_raw()
         || named.st_uid != held.st_uid
         || held.st_nlink != 1
-        || named.st_nlink != 1
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "Linux private file identity or mode changed",
-        ));
-    }
-    revalidate_private_directory(parent)
+        || named.st_nlink != 1)
 }
 
 pub(crate) fn sync_directory(directory: &OwnedFd) -> Result<(), PortError> {
@@ -518,5 +525,162 @@ impl Drop for PrivateTemp {
             let _ = rustix::fs::unlinkat(&self.parent, self.name.as_str(), AtFlags::empty());
             let _ = sync_directory(&self.parent);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn private_fixture(prefix: &str) -> (TempDir, PrivateDirectory) {
+        let fixture = if let Some(root) = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT") {
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in(root)
+                .unwrap()
+        } else {
+            tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
+        };
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_private_directory(fixture.path()).unwrap();
+        (fixture, directory)
+    }
+
+    fn identity(path: &Path) -> (u64, u64) {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
+    #[test]
+    fn private_file_snapshot_rejects_each_independent_held_and_named_fact() {
+        let (fixture, _directory) = private_fixture("thinws-linux-private-facts-");
+        let path = fixture.path().join("document");
+        fs::write(&path, b"owned").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let file = File::open(&path).unwrap();
+        let snapshot = || rustix::fs::fstat(file.as_fd()).unwrap();
+        let expected = identity(&path);
+        assert!(private_file_facts_match(&snapshot(), &snapshot(), expected));
+
+        let mut changed = snapshot();
+        changed.st_dev = expected.0 + 1;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+
+        let mut changed = snapshot();
+        changed.st_ino = expected.1 + 1;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+
+        let mut changed = snapshot();
+        changed.st_mode = (changed.st_mode & !libc::S_IFMT) | libc::S_IFDIR;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+
+        let mut changed = snapshot();
+        changed.st_mode |= 0o040;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+
+        let mut changed = snapshot();
+        changed.st_uid += 1;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+
+        let mut changed = snapshot();
+        changed.st_nlink = 2;
+        assert!(!private_file_facts_match(&changed, &snapshot(), expected));
+        assert!(!private_file_facts_match(&snapshot(), &changed, expected));
+    }
+
+    #[test]
+    fn private_file_validation_rejects_identity_mode_link_and_name_changes() {
+        let (fixture, directory) = private_fixture("thinws-linux-private-file-");
+        let path = fixture.path().join("document");
+        fs::write(&path, b"owned").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let file = File::open(&path).unwrap();
+        let expected = identity(&path);
+        validate_private_file(&directory, &file, "document", expected).unwrap();
+
+        let wrong = (expected.0, expected.1 + 1);
+        assert_eq!(
+            validate_private_file(&directory, &file, "document", wrong)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            validate_private_file(&directory, &file, "document", expected)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let alias = fixture.path().join("alias");
+        fs::hard_link(&path, &alias).unwrap();
+        assert_eq!(
+            validate_private_file(&directory, &file, "document", expected)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        fs::remove_file(alias).unwrap();
+        validate_private_file(&directory, &file, "document", expected).unwrap();
+
+        fs::rename(&path, fixture.path().join("held-document")).unwrap();
+        fs::write(&path, b"foreign").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            validate_private_file(&directory, &file, "document", expected)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn staged_document_cleanup_removes_only_the_original_named_file() {
+        let (fixture, directory) = private_fixture("thinws-linux-temp-cleanup-");
+        let temporary = PrivateTemp::create(&directory, "document", b"owned").unwrap();
+        let original = fixture.path().join(temporary.name());
+        assert_eq!(fs::read(&original).unwrap(), b"owned");
+        drop(temporary);
+        assert!(!original.exists());
+
+        let temporary = PrivateTemp::create(&directory, "document", b"owned").unwrap();
+        let named = fixture.path().join(temporary.name());
+        let held = fixture.path().join("held-temp");
+        fs::rename(&named, &held).unwrap();
+        fs::write(&named, b"foreign").unwrap();
+        drop(temporary);
+        assert_eq!(fs::read(&named).unwrap(), b"foreign");
+        assert_eq!(fs::read(&held).unwrap(), b"owned");
+    }
+
+    #[test]
+    fn no_replace_publication_preserves_an_existing_document_and_cleans_staging() {
+        let (fixture, directory) = private_fixture("thinws-linux-temp-conflict-");
+        let existing = fixture.path().join("document");
+        fs::write(&existing, b"foreign").unwrap();
+        let temporary = PrivateTemp::create(&directory, "document", b"owned").unwrap();
+        let staged = fixture.path().join(temporary.name());
+        assert_eq!(
+            temporary.publish_noreplace("document").unwrap_err().kind(),
+            PortErrorKind::Conflict
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"foreign");
+        assert!(!staged.exists());
     }
 }

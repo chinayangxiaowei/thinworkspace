@@ -3,7 +3,7 @@
 use std::env;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thinws_adapter_linux::LinuxHostAdapter;
 use thinws_core::AbsolutePath;
@@ -26,13 +26,13 @@ fn lock_is_bounded_and_revalidates_its_parent_and_leaf() {
         .unwrap();
     assert_eq!(guard.scope(), LifecycleScope::Bootstrap);
     guard.revalidate().unwrap();
+    let timeout = Duration::from_millis(30);
+    let started = Instant::now();
     assert_eq!(
-        adapter
-            .acquire_bootstrap(Duration::from_millis(10))
-            .unwrap_err()
-            .kind(),
+        adapter.acquire_bootstrap(timeout).unwrap_err().kind(),
         PortErrorKind::Timeout,
     );
+    assert!(started.elapsed() >= timeout);
     drop(guard);
     let control_path =
         AbsolutePath::try_from_bytes(control.as_os_str().as_encoded_bytes().to_vec()).unwrap();

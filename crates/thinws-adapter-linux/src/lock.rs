@@ -332,21 +332,27 @@ pub(crate) fn revalidate_private_directory(directory: &PrivateDirectory) -> Resu
 fn identity(fd: &OwnedFd, device: u64, inode: u64) -> Result<Identity, PortError> {
     let statx = rustix::fs::statx(fd, "", AtFlags::EMPTY_PATH, StatxFlags::BTIME)
         .map_err(|error| io_error("inspect directory birthtime", error))?;
-    if statx.stx_mask & StatxFlags::BTIME.bits() == 0
-        || statx.stx_btime.tv_sec <= 0
-        || statx.stx_btime.tv_nsec >= 1_000_000_000
-    {
+    let (birth_seconds, birth_nanoseconds) = checked_birthtime(
+        statx.stx_mask,
+        statx.stx_btime.tv_sec,
+        statx.stx_btime.tv_nsec,
+    )?;
+    Ok(Identity {
+        device,
+        inode,
+        birth_seconds,
+        birth_nanoseconds,
+    })
+}
+
+fn checked_birthtime(mask: u32, seconds: i64, nanoseconds: u32) -> Result<(i64, u32), PortError> {
+    if mask & StatxFlags::BTIME.bits() == 0 || seconds <= 0 || nanoseconds >= 1_000_000_000 {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
             "directory birthtime is unavailable",
         ));
     }
-    Ok(Identity {
-        device,
-        inode,
-        birth_seconds: statx.stx_btime.tv_sec,
-        birth_nanoseconds: statx.stx_btime.tv_nsec,
-    })
+    Ok((seconds, nanoseconds))
 }
 
 fn validate_lock_file_initial(parent: &OwnedFd, file: &File) -> Result<(u64, u64), PortError> {
@@ -400,6 +406,7 @@ fn io_error(
 mod tests {
     use std::env;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::time::Duration;
 
     use super::*;
 
@@ -436,5 +443,89 @@ mod tests {
             prepare_private_directory(&control).unwrap_err().kind(),
             PortErrorKind::InvalidLayout
         );
+    }
+
+    #[test]
+    fn lock_scope_requires_both_the_recorded_path_and_directory_identity() {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-lock-scope-")
+            .tempdir_in(root)
+            .unwrap();
+        let control = fixture.path().join("control");
+        let prepared = prepare_private_directory(&control).unwrap();
+        let reopened = open_private_directory(&control).unwrap();
+        assert!(prepared.same_identity(&reopened));
+
+        let other = prepare_private_directory(&fixture.path().join("other")).unwrap();
+        assert!(!prepared.same_identity(&other));
+
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let guard = adapter
+            .acquire_bootstrap(Duration::from_millis(100))
+            .unwrap();
+        assert!(guard.protects_directory(&reopened));
+
+        let mut path_changed = reopened;
+        path_changed.relabel(fixture.path().join("alias"));
+        assert!(!guard.protects_directory(&path_changed));
+
+        let mut identity_changed = other;
+        identity_changed.relabel(control);
+        assert!(!guard.protects_directory(&identity_changed));
+    }
+
+    #[test]
+    fn held_lock_rejects_mode_and_link_count_changes_independently() {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-lock-leaf-mode-")
+            .tempdir_in(root)
+            .unwrap();
+        let control = fixture.path().join("control");
+        prepare_private_directory(&control).unwrap();
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let guard = adapter
+            .acquire_bootstrap(Duration::from_millis(100))
+            .unwrap();
+        let leaf = control.join("lifecycle.lock");
+
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            guard.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        guard.revalidate().unwrap();
+
+        let extra_link = fixture.path().join("extra-link");
+        std::fs::hard_link(&leaf, &extra_link).unwrap();
+        assert_eq!(
+            guard.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+        std::fs::remove_file(&extra_link).unwrap();
+        guard.revalidate().unwrap();
+    }
+
+    #[test]
+    fn birthtime_evidence_requires_each_independent_field() {
+        let mask = StatxFlags::BTIME.bits();
+        assert_eq!(checked_birthtime(mask, 123, 456).unwrap(), (123, 456));
+        for (observed_mask, seconds, nanoseconds) in [
+            (0, 123, 456),
+            (mask, 0, 456),
+            (mask, -1, 456),
+            (mask, 123, 1_000_000_000),
+        ] {
+            assert_eq!(
+                checked_birthtime(observed_mask, seconds, nanoseconds)
+                    .unwrap_err()
+                    .kind(),
+                PortErrorKind::InvalidLayout
+            );
+        }
     }
 }

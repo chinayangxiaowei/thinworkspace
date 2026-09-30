@@ -1317,6 +1317,38 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_mount_check_rejects_wrong_volume_and_mount_independently() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-btrfs-mount-identity-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = open_target_directory(fixture.path()).unwrap();
+        let report = LinuxPlatformProbe
+            .inspect_path(&absolute(fixture.path()).unwrap())
+            .unwrap();
+        let (volume, mount) = btrfs_identity(&report).unwrap();
+        require_btrfs_mount(&directory, volume, mount).unwrap();
+
+        let first: VolumeId = "550e8400-e29b-41d4-a716-446655440000".parse().unwrap();
+        let second: VolumeId = "550e8400-e29b-41d4-a716-446655440001".parse().unwrap();
+        let other_volume = if volume == first { second } else { first };
+        assert_eq!(
+            require_btrfs_mount(&directory, other_volume, mount)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            require_btrfs_mount(&directory, volume, mount.wrapping_add(1))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
     fn operation_directory_rejects_a_mode_change_without_other_identity_changes() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");

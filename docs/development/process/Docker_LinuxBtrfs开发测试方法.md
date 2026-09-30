@@ -19,10 +19,12 @@
 
 ## 构建与运行
 
-首次或 Dockerfile 改动后构建本地镜像。镜像包含 Btrfs 工具、musl C 链接器和 Rust 的 `aarch64-unknown-linux-musl` 标准库：
+首次、Dockerfile 或 `tools/quality-tools.toml` 改动后构建本地镜像。镜像包含 Btrfs 工具、musl C 链接器、Rust 的 `aarch64-unknown-linux-musl` 标准库，以及按质量工具清单固定版本安装的 `cargo-mutants`。额外构建上下文只传入 `tools/`，不把仓库的 `target/` 送入 Docker：
 
 ```bash
-docker build -t thinws-linux-btrfs-dev:rust-1.97.1-musl tools/docker-linux-btrfs
+docker build --build-context quality-tools=tools \
+  -t thinws-linux-btrfs-dev:rust-1.97.1-musl tools/docker-linux-btrfs
+docker run --rm thinws-linux-btrfs-dev:rust-1.97.1-musl cargo mutants --version
 ```
 
 从仓库根目录运行全工作区普通测试：

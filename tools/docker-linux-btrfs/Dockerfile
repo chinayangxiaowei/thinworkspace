@@ -7,3 +7,8 @@ RUN apt-get update \
 RUN rustup component add clippy rustfmt \
     && rustup target add aarch64-unknown-linux-musl \
     && useradd --create-home --uid 1000 thinws
+
+COPY --from=quality-tools quality-tools.toml /tmp/thinws-quality-tools.toml
+RUN cargo_mutants_version="$(python3 -c 'import tomllib; print(tomllib.load(open("/tmp/thinws-quality-tools.toml", "rb"))["tools"]["cargo_mutants"])')" \
+    && cargo install --locked --version "$cargo_mutants_version" cargo-mutants \
+    && rm /tmp/thinws-quality-tools.toml

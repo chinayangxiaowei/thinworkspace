@@ -1095,6 +1095,77 @@ mod tests {
         }
     }
 
+    struct ReplaceSourcePathAfterFirstPublish {
+        source: PathBuf,
+    }
+
+    impl ExecutionHook for ReplaceSourcePathAfterFirstPublish {
+        fn after_published(&self, _relative: &[u8], count: usize) -> Result<(), TreeFailure> {
+            if count == 1 {
+                fs::rename(&self.source, self.source.with_file_name("displaced-source"))
+                    .map_err(|error| TreeFailure::io("displace source path for test", error))?;
+                fs::create_dir(&self.source)
+                    .map_err(|error| TreeFailure::io("replace source path for test", error))?;
+                fs::write(self.source.join("foreign"), b"unrelated source")
+                    .map_err(|error| TreeFailure::io("write replacement source for test", error))?;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn source_path_replacement_after_clone_cannot_produce_a_success_receipt() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-source-replaced-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplaceSourcePathAfterFirstPublish {
+                    source: paths[0].clone(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::PlanStale)
+        );
+        assert_eq!(failure.receipt().clone_calls_succeeded(), 2);
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::ConfirmedBaseline
+        );
+        assert_eq!(
+            fs::read(paths[0].join("foreign")).unwrap(),
+            b"unrelated source"
+        );
+        assert_eq!(
+            fs::read(paths[0].with_file_name("displaced-source").join("a")).unwrap(),
+            b"first file"
+        );
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn bound_paths_revalidation_rejects_replacement_of_each_directory_role() {
+        for role in 0..4 {
+            let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-bound-roles-");
+            let report = LinuxPlatformProbe
+                .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+                .unwrap();
+            let bound = BoundPaths::open(&request, report)
+                .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+            let displaced = paths[role].with_file_name(format!("displaced-{role}"));
+            fs::rename(&paths[role], &displaced).unwrap();
+            fs::create_dir(&paths[role]).unwrap();
+            assert_eq!(
+                bound.revalidate(&request).unwrap_err().kind,
+                MaterializationFailureKind::PlanStale,
+                "replaced role {role} must invalidate the bound path"
+            );
+            assert!(displaced.is_dir());
+        }
+    }
+
     #[test]
     fn btrfs_materializer_rejects_a_plan_for_another_backend() {
         let (_fixture, _paths, request, _plan) = fixture("thinws-btrfs-wrong-backend-");

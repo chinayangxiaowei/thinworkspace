@@ -249,7 +249,7 @@ pub(super) fn node_at(parent: &OwnedFd, name: &OsStr) -> Result<Node, TreeFailur
 pub(super) fn mount_id(fd: &OwnedFd) -> Result<u64, TreeFailure> {
     let observed = rustix::fs::statx(fd, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
         .map_err(|error| TreeFailure::io("inspect tree mount ID", error))?;
-    ((observed.stx_mask & StatxFlags::MNT_ID.bits()) != 0)
+    mount_id_available(observed.stx_mask)
         .then_some(observed.stx_mnt_id)
         .ok_or_else(|| {
             TreeFailure::new(
@@ -263,7 +263,7 @@ pub(super) fn mount_id(fd: &OwnedFd) -> Result<u64, TreeFailure> {
 pub(super) fn mount_id_at(parent: &OwnedFd, name: &OsStr) -> Result<u64, TreeFailure> {
     let observed = rustix::fs::statx(parent, name, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::MNT_ID)
         .map_err(|error| TreeFailure::io("inspect tree entry mount ID", error))?;
-    ((observed.stx_mask & StatxFlags::MNT_ID.bits()) != 0)
+    mount_id_available(observed.stx_mask)
         .then_some(observed.stx_mnt_id)
         .ok_or_else(|| {
             TreeFailure::new(
@@ -272,6 +272,10 @@ pub(super) fn mount_id_at(parent: &OwnedFd, name: &OsStr) -> Result<u64, TreeFai
                 "tree entry mount ID is unavailable",
             )
         })
+}
+
+fn mount_id_available(mask: u32) -> bool {
+    mask & StatxFlags::MNT_ID.bits() != 0
 }
 
 pub(super) fn directory_names(directory: &OwnedFd) -> Result<Vec<OsString>, TreeFailure> {
@@ -593,5 +597,31 @@ mod tests {
             3
         ));
         assert!(!file_snapshot_matches(expected, expected, 2));
+    }
+
+    #[test]
+    fn mount_id_requires_its_own_statx_mask_bit() {
+        let mount_bit = StatxFlags::MNT_ID.bits();
+        let other_bit = StatxFlags::SIZE.bits();
+        assert_eq!(mount_bit & other_bit, 0);
+        assert!(!mount_id_available(0));
+        assert!(!mount_id_available(other_bit));
+        assert!(mount_id_available(mount_bit));
+        assert!(mount_id_available(mount_bit | other_bit));
+    }
+
+    #[test]
+    #[ignore = "requires THINWS_LINUX_BIND_MOUNT_CHILD on a distinct bind mount of the same Btrfs filesystem"]
+    fn source_snapshot_rejects_a_child_on_another_mount() {
+        let child = env::var_os("THINWS_LINUX_BIND_MOUNT_CHILD")
+            .expect("set THINWS_LINUX_BIND_MOUNT_CHILD to a Btrfs bind-mounted child");
+        let source = std::path::Path::new(&child).parent().unwrap();
+        let source = rustix::fs::open(source, DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let failure =
+            snapshot(&source).expect_err("source snapshot must reject a child on another mount");
+        assert_eq!(
+            failure.kind,
+            MaterializationFailureKind::UnsupportedSourceEntry
+        );
     }
 }

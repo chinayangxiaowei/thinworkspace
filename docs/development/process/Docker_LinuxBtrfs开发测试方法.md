@@ -62,6 +62,16 @@ docker start -a "$container_id"
 
 脚本在容器内设置 `THINWS_LINUX_BTRFS_TEST_ROOT=/mnt/thinws-btrfs/fixtures`、`THINWS_LINUX_EXT4_TEST_ROOT=/mnt/thinws-ext4/fixtures`、`THINWS_LINUX_OTHER_TEST_FILE=/mnt/thinws-ext4/fixtures/other.txt`，还为专项测试设置同设备不同挂载的 `THINWS_LINUX_BIND_MOUNT_CHILD` 与指向该挂载的 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT`。这些路径仅是容器内测试夹具，不能用作产品 CLI 的持久配置。三个跨挂载专项测试默认被忽略；要实际运行，分别将上述命令末尾替换为 `cargo test --locked -p thinws-adapter-linux --lib destroy::tests::same_device_child_on_different_mount_is_not_in_deletion_scope -- --ignored`、`cargo test --locked -p thinws-adapter-linux --lib tree::tests::source_snapshot_rejects_a_child_on_another_mount -- --ignored` 和 `cargo test --locked -p thinws-adapter-linux --test btrfs_probe same_btrfs_filesystem_on_a_different_mount_is_rejected -- --ignored`。预检必须打印 `Btrfs reflink confirmed`，且命令以退出码 0 结束，才能记录为通过。遇到测试失败应保留原始失败原因；不要通过改用 root、跳过测试或改设非 Btrfs 路径来制造绿色结果。
 
+检查 GNU/Linux Release 二进制对 glibc 的要求时，可对已构建的容器内产物执行：
+
+```bash
+docker run --rm -v thinws-linux-target:/target:ro \
+  thinws-linux-btrfs-dev:rust-1.97.1 \
+  sh -c 'readelf --version-info /target/release/thinws | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -1'
+```
+
+该值必须与**拟发布目标系统**的 libc 版本核对；符号版本检查不能代替在目标系统运行。当前镜像基于 Debian 12，不能仅因在此容器中构建、测试通过，就认为其二进制兼容 Debian 11。Debian 11 候选产物需要兼容的构建用户态及原定 VM 实测；本方法不把 Docker LinuxKit 内核、Debian 12 用户态或容器生成的 Release 文件冒充该验收。
+
 ## 证据使用
 
 记录 Docker 镜像、内核、文件系统预检、执行命令、退出码和候选提交或 diff。Docker 结果可补充 Linux 开发证据，但不能替代《Phase 1 实施计划》P1-L05 所要求的 Debian VM 全命令黑盒验收。变异测试仍按《任务流程》使用与普通验证隔离的编译目标，并处理存活变异；此处的普通测试命名卷不得直接复用为变异编译缓存。

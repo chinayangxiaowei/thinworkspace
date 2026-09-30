@@ -217,14 +217,22 @@ impl LinuxHostAdapter {
                 }
                 Ok(PublishResult::Published)
             }
-            Err(error) if error.kind() == PortErrorKind::Conflict => {
-                if self.read_config()?.as_ref() == Some(identity) {
-                    Ok(PublishResult::AlreadyCurrent)
-                } else {
-                    Err(error)
-                }
-            }
-            Err(error) => Err(error),
+            Err(error) => self.reconcile_config_publication_error(error, identity),
+        }
+    }
+
+    fn reconcile_config_publication_error(
+        &self,
+        error: PortError,
+        identity: &InstallationIdentity,
+    ) -> Result<PublishResult, PortError> {
+        if error.kind() != PortErrorKind::Conflict {
+            return Err(error);
+        }
+        if self.read_config()?.as_ref() == Some(identity) {
+            Ok(PublishResult::AlreadyCurrent)
+        } else {
+            Err(error)
         }
     }
 
@@ -544,12 +552,15 @@ impl Drop for PrivateTemp {
 mod tests {
     use std::env;
     use std::fs;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::Path;
     use std::str::FromStr;
+    use std::time::Duration;
 
     use tempfile::TempDir;
     use thinws_core::{AbsolutePath, InstanceId, VolumeId};
+    use thinws_ports::LifecycleLock;
 
     use super::*;
 
@@ -570,6 +581,131 @@ mod tests {
     fn identity(path: &Path) -> (u64, u64) {
         let metadata = fs::metadata(path).unwrap();
         (metadata.dev(), metadata.ino())
+    }
+
+    #[test]
+    fn config_publication_conflict_keeps_the_original_error_unless_config_matches() {
+        let (fixture, _directory) = private_fixture("thinws-linux-config-conflict-");
+        let adapter = LinuxHostAdapter::new(fixture.path()).unwrap();
+        let root =
+            AbsolutePath::try_from_bytes(fixture.path().as_os_str().as_bytes().to_vec()).unwrap();
+        let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let expected = InstallationIdentity::new(
+            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f33").unwrap(),
+            root.clone(),
+            volume,
+        );
+        let other = InstallationIdentity::new(
+            InstanceId::from_str("01890a5d-ac96-774b-bd5b-55c7b8d09f34").unwrap(),
+            root,
+            volume,
+        );
+        let conflict = || {
+            PortError::conflict(
+                "original publication conflict",
+                PortConflict::InstallationIdentity,
+            )
+        };
+        assert_eq!(
+            adapter
+                .reconcile_config_publication_error(conflict(), &expected)
+                .err()
+                .unwrap()
+                .operation(),
+            "original publication conflict"
+        );
+
+        let config = fixture.path().join("config.toml");
+        fs::write(&config, encode_config(&other).unwrap()).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            adapter
+                .reconcile_config_publication_error(conflict(), &expected)
+                .err()
+                .unwrap()
+                .operation(),
+            "original publication conflict"
+        );
+
+        fs::write(&config, encode_config(&expected).unwrap()).unwrap();
+        assert_eq!(
+            adapter
+                .reconcile_config_publication_error(conflict(), &expected)
+                .unwrap(),
+            PublishResult::AlreadyCurrent
+        );
+        assert_eq!(
+            adapter
+                .reconcile_config_publication_error(
+                    PortError::new(PortErrorKind::Io, "original publication I/O"),
+                    &expected,
+                )
+                .err()
+                .unwrap()
+                .operation(),
+            "original publication I/O"
+        );
+    }
+
+    #[test]
+    fn bootstrap_publication_requires_the_exact_scope_root_and_directory_identity() {
+        let (fixture, directory) = private_fixture("thinws-linux-publication-lock-");
+        let adapter = LinuxHostAdapter::new(fixture.path()).unwrap();
+        let root =
+            AbsolutePath::try_from_bytes(fixture.path().as_os_str().as_bytes().to_vec()).unwrap();
+        let data_root_guard = adapter
+            .acquire_data_root(&root, Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(
+            adapter
+                .validate_bootstrap_lock(&data_root_guard, &directory)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        drop(data_root_guard);
+
+        let bootstrap_guard = adapter
+            .acquire_bootstrap(Duration::from_millis(100))
+            .unwrap();
+        adapter
+            .validate_bootstrap_lock(&bootstrap_guard, &directory)
+            .unwrap();
+        let other_adapter = LinuxHostAdapter::new(fixture.path().join("another-control")).unwrap();
+        assert_eq!(
+            other_adapter
+                .validate_bootstrap_lock(&bootstrap_guard, &directory)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+
+        let other_path = fixture.path().join("other");
+        fs::create_dir(&other_path).unwrap();
+        fs::set_permissions(&other_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut wrong_identity = open_private_directory(&other_path).unwrap();
+        wrong_identity.relabel(fixture.path().to_path_buf());
+        assert_eq!(
+            adapter
+                .validate_bootstrap_lock(&bootstrap_guard, &wrong_identity)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn directory_sync_reports_a_real_fd_error() {
+        let (fixture, _directory) = private_fixture("thinws-linux-sync-failure-");
+        let path_only = rustix::fs::open(
+            fixture.path(),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let error = sync_directory(&path_only).unwrap_err();
+        assert_eq!(error.kind(), PortErrorKind::Io);
+        assert_eq!(error.operation(), "sync Linux control directory");
     }
 
     #[test]

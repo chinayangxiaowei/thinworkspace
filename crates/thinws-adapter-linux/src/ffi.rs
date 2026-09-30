@@ -56,3 +56,38 @@ pub(crate) fn reflink_clone(source: &OwnedFd, destination: &OwnedFd) -> io::Resu
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs::{self, File};
+
+    use super::*;
+
+    #[test]
+    fn btrfs_fsid_matches_the_kernel_mount_identity() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs mount");
+        let directory: OwnedFd = File::open(root).unwrap().into();
+        let fsid = uuid::Uuid::from_bytes(btrfs_fsid(&directory).unwrap()).to_string();
+        let found = fs::read_dir("/sys/fs/btrfs")
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name() == fsid.as_str());
+        assert!(
+            found,
+            "Btrfs ioctl FSID must name a mounted kernel filesystem"
+        );
+    }
+
+    #[test]
+    fn btrfs_fsid_rejects_a_non_btrfs_descriptor_with_the_ioctl_error() {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a real ext4 directory");
+        let directory: OwnedFd = File::open(root).unwrap().into();
+        assert_eq!(
+            btrfs_fsid(&directory).unwrap_err().raw_os_error(),
+            Some(libc::ENOTTY)
+        );
+    }
+}

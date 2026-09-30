@@ -1266,6 +1266,57 @@ mod tests {
     }
 
     #[test]
+    fn target_directory_revalidation_requires_device_and_historical_identity_independently() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-target-revalidate-")
+            .tempdir_in(root)
+            .unwrap();
+        let mut directory = open_target_directory(fixture.path()).unwrap();
+        directory.revalidate().unwrap();
+
+        directory.device += 1;
+        assert_eq!(
+            directory.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+        directory.device -= 1;
+
+        directory.identity.inode += 1;
+        assert_eq!(
+            directory.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+        directory.identity.inode -= 1;
+        directory.revalidate().unwrap();
+    }
+
+    #[test]
+    fn target_directory_revalidation_rejects_a_same_device_path_replacement() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-target-replacement-")
+            .tempdir_in(root)
+            .unwrap();
+        let target = fixture.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let held = open_target_directory(&target).unwrap();
+        held.revalidate().unwrap();
+
+        std::fs::rename(&target, fixture.path().join("displaced")).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        let replacement = open_target_directory(&target).unwrap();
+        assert_eq!(held.device, replacement.device);
+        assert_ne!(held.identity, replacement.identity);
+        assert_eq!(
+            held.revalidate().unwrap_err().kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
     fn operation_directory_rejects_a_mode_change_without_other_identity_changes() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");

@@ -1394,6 +1394,46 @@ mod tests {
         assert!(fs::read_dir(&paths[2]).unwrap().next().is_none());
     }
 
+    struct OccupyTargetBeforePublish {
+        target: PathBuf,
+    }
+
+    impl ExecutionHook for OccupyTargetBeforePublish {
+        fn before_staged_publish(&self, relative: &[u8]) -> Result<(), TreeFailure> {
+            fs::write(
+                self.target.join(OsStr::from_bytes(relative)),
+                b"foreign target",
+            )
+            .map_err(|error| TreeFailure::io("occupy Btrfs target name for test", error))
+        }
+    }
+
+    #[test]
+    fn occupied_name_at_publish_is_target_changed_and_preserves_foreign_data() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-publish-race-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &OccupyTargetBeforePublish {
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        let receipt = failure.receipt();
+        assert_eq!(
+            receipt.failure_kind(),
+            Some(MaterializationFailureKind::TargetChanged)
+        );
+        assert_eq!(receipt.clone_calls_succeeded(), 1);
+        assert!(receipt.created().is_empty());
+        assert_eq!(receipt.rollback().status(), RollbackStatus::NotNeeded);
+        assert!(receipt.unconfirmed_staging().is_none());
+        assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"foreign target");
+        assert!(fs::read_dir(&paths[2]).unwrap().next().is_none());
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
     struct ReplacePublished {
         target: PathBuf,
     }

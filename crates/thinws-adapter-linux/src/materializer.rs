@@ -1043,6 +1043,36 @@ mod tests {
     }
 
     #[test]
+    fn clone_errno_classification_keeps_cross_device_and_no_space_distinct() {
+        for (errno, failure, port) in [
+            (
+                libc::EXDEV,
+                MaterializationFailureKind::InvalidLayout,
+                PortErrorKind::InvalidLayout,
+            ),
+            (
+                libc::ENOSPC,
+                MaterializationFailureKind::NoSpace,
+                PortErrorKind::Io,
+            ),
+            (
+                libc::EOPNOTSUPP,
+                MaterializationFailureKind::CowUnavailable,
+                PortErrorKind::CapabilityUnavailable,
+            ),
+            (
+                libc::EIO,
+                MaterializationFailureKind::Filesystem,
+                PortErrorKind::Io,
+            ),
+        ] {
+            let classified = classify_clone_error(std::io::Error::from_raw_os_error(errno));
+            assert_eq!(classified.kind, failure, "errno {errno}");
+            assert_eq!(classified.port_kind, port, "errno {errno}");
+        }
+    }
+
+    #[test]
     fn frozen_plan_rejects_each_changed_request_path() {
         let (fixture, paths, request, plan) = fixture("thinws-btrfs-plan-roles-");
         assert!(validate_request_plan(&request, &plan).is_ok());

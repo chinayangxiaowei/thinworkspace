@@ -1337,6 +1337,40 @@ mod tests {
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }
 
+    struct RemoveTargetSearchPermission {
+        target: PathBuf,
+    }
+    impl ExecutionHook for RemoveTargetSearchPermission {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            fs::set_permissions(&self.target, fs::Permissions::from_mode(0o400)).map_err(
+                |error| TreeFailure::io("remove target search permission for test", error),
+            )?;
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn rollback_restores_target_search_permission_before_examining_created_entries() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-root-mode-rollback-");
+        let baseline_mode = fs::metadata(&paths[1]).unwrap().permissions().mode() & 0o777;
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &RemoveTargetSearchPermission {
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        let rollback_status = failure.receipt().rollback().status();
+        let result_mode = fs::metadata(&paths[1]).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(&paths[1], fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(rollback_status, RollbackStatus::ConfirmedBaseline);
+        assert_eq!(result_mode, baseline_mode);
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+        assert_eq!(fs::read_dir(&paths[3]).unwrap().count(), 1);
+    }
+
     struct ReplaceTargetRoot {
         target: PathBuf,
     }

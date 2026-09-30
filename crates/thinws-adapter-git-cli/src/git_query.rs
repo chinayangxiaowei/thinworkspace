@@ -1236,18 +1236,24 @@ mod tests {
     fn exited_child_does_not_make_inherited_open_pipe_complete() {
         let failure = collect_command(
             helper_command("descendant-holds-pipes"),
-            test_budget(4096, 4096, 80),
+            // Starting a second test binary can exceed 80 ms when this suite
+            // runs in parallel; the descendant must still outlive the budget.
+            test_budget(4096, 4096, 500),
         )
         .expect_err("inherited open pipes must remain part of the run budget");
 
         assert_eq!(failure.kind, GitQueryFailureKind::TimedOut);
-        assert!(matches!(
-            failure.direct_child_exit,
-            DirectChildExit::Confirmed(GitExit {
-                code: Some(0),
-                signal: None
-            })
-        ));
+        assert!(
+            matches!(
+                failure.direct_child_exit,
+                DirectChildExit::Confirmed(GitExit {
+                    code: Some(0),
+                    signal: None
+                })
+            ),
+            "direct child exit: {:?}",
+            failure.direct_child_exit
+        );
     }
 
     #[test]
@@ -1321,14 +1327,14 @@ mod tests {
                 // Intentionally do not wait here: this is the regression shape
                 // where the direct child exits while a descendant retains both
                 // inherited pipe descriptors. The descendant self-exits after
-                // 250 ms and is then reaped by the operating system.
+                // 1.5 s and is then reaped by the operating system.
                 Command::new(env::current_exe().expect("current unit-test binary"))
                     .args(["--exact", "git_query::tests::command_helper", "--nocapture"])
                     .env(HELPER_MODE, "descendant")
                     .spawn()
                     .expect("bounded descendant");
             }
-            "descendant" => thread::sleep(Duration::from_millis(250)),
+            "descendant" => thread::sleep(Duration::from_millis(1_500)),
             other => panic!("unexpected helper mode: {other}"),
         }
     }

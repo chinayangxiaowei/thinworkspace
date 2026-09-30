@@ -115,7 +115,7 @@ docker run --rm --privileged \
   '
 ```
 
-该命令运行的是 musl Release 模式编出的 CLI 测试程序，不在 Debian 11 容器内重新编译；它实际启动同一目标目录中的 `thinws` 二进制。预检必须打印 `Btrfs reflink confirmed`，当前 9 项测试全部通过且容器退出码为 0。若宿主 bind mount 故障，沿用上文的 `docker create`＋`git archive HEAD`＋`docker cp` 快照法，替换为这里的运行镜像、只读产物卷、匿名目标卷与测试命令；不要把失败的挂载当成产品测试结果。
+该命令运行的是 musl Release 模式编出的 CLI 测试程序，不在 Debian 11 容器内重新编译；它实际启动同一目标目录中的 `thinws` 二进制。预检必须打印 `Btrfs reflink confirmed`，`e2e_linux` 套件全部通过且容器退出码为 0。若宿主 bind mount 故障，沿用上文的 `docker create`＋`git archive HEAD`＋`docker cp` 快照法，替换为这里的运行镜像、只读产物卷、匿名目标卷与测试命令；不要把失败的挂载当成产品测试结果。
 
 需要在 macOS 宿主取得 Linux 产物时，可从停止的一次性容器复制到仓库忽略的 `target/linux-musl/thinws`；不要覆盖本机 macOS 的 `target/release/thinws`，也不要把 Linux ELF 安装到 macOS 用户 bin：
 

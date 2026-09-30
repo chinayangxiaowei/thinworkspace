@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -156,6 +156,80 @@ fn debian_cli_completes_an_ext4_control_and_btrfs_workspace_lifecycle() {
     assert_eq!(removed["data"]["result"], "removed");
     assert!(!target.exists());
     assert!(control.join("logs/operations.jsonl").exists());
+}
+
+#[test]
+fn source_subvolume_on_the_same_btrfs_mount_completes_the_cli_lifecycle() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
+    let control_fixture = Builder::new()
+        .prefix("thinws-cli-subvolume-control-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let data_fixture = Builder::new()
+        .prefix("thinws-cli-subvolume-data-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let control = control_fixture.path().join(".thinws");
+    let source = data_fixture.path().join("source-subvolume");
+    let target = data_fixture.path().join("copy");
+    let created = Command::new("btrfs")
+        .args(["subvolume", "create"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    fs::write(source.join("note.txt"), b"subvolume source").unwrap();
+    assert_ne!(
+        fs::metadata(&source).unwrap().dev(),
+        fs::metadata(data_fixture.path()).unwrap().dev()
+    );
+
+    let (status, initialized) = execute_json(
+        &control,
+        vec!["thinws".into(), "--json".into(), "init".into()],
+    );
+    assert_eq!(status, 0, "{initialized}");
+    let (status, cloned) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
+            "--name".into(),
+            "subvolume-copy".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{cloned}");
+    assert_eq!(
+        cloned["data"]["materialization"]["adapter"],
+        "btrfs-reflink"
+    );
+    assert_eq!(cloned["data"]["materialization"]["cow"], "confirmed");
+    assert_eq!(
+        fs::read(target.join("note.txt")).unwrap(),
+        b"subvolume source"
+    );
+
+    let (status, removed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "remove".into(),
+            "subvolume-copy".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{removed}");
+    assert!(!target.exists());
+    fs::remove_file(source.join("note.txt")).unwrap();
+    fs::remove_dir(&source).unwrap();
 }
 
 #[test]

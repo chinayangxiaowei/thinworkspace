@@ -1349,6 +1349,37 @@ mod tests {
     }
 
     #[test]
+    fn staged_child_cleanup_removes_only_the_original_directory() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-staged-child-cleanup-")
+            .tempdir_in(root)
+            .unwrap();
+        let parent = open_target_directory(fixture.path()).unwrap();
+        let name = ".thinws-dir.tmp-owned";
+        let staged_path = fixture.path().join(name);
+
+        std::fs::create_dir(&staged_path).unwrap();
+        let staged = open_target_directory(&staged_path).unwrap();
+        cleanup_staged_child(&parent, name, &staged);
+        assert!(!staged_path.exists());
+
+        std::fs::create_dir(&staged_path).unwrap();
+        let held = open_target_directory(&staged_path).unwrap();
+        let displaced = fixture.path().join("displaced-staged-child");
+        std::fs::rename(&staged_path, &displaced).unwrap();
+        std::fs::create_dir(&staged_path).unwrap();
+        std::fs::write(staged_path.join("foreign"), b"leave in place").unwrap();
+        cleanup_staged_child(&parent, name, &held);
+        assert_eq!(
+            std::fs::read(staged_path.join("foreign")).unwrap(),
+            b"leave in place"
+        );
+        assert!(displaced.is_dir());
+    }
+
+    #[test]
     fn operation_directory_rejects_a_mode_change_without_other_identity_changes() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");

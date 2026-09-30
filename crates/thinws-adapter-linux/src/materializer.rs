@@ -971,7 +971,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
-    use thinws_core::{CowEvidence, FallbackPolicy};
+    use thinws_core::{CandidateEvidence, CowEvidence, FallbackPolicy, FileSystemIdentity};
 
     use super::*;
 
@@ -1018,6 +1018,199 @@ mod tests {
             PortErrorKind::Io,
             "injected Btrfs failure",
         )
+    }
+
+    #[test]
+    fn frozen_plan_rejects_each_changed_request_path() {
+        let (fixture, paths, request, plan) = fixture("thinws-btrfs-plan-roles-");
+        assert!(validate_request_plan(&request, &plan).is_ok());
+        for role in 0..4 {
+            let mut changed = paths.clone();
+            changed[role] = fixture.path().join(format!("other-{role}"));
+            let changed_request = MaterializeRequest::new(
+                absolute(&changed[0]),
+                absolute(&changed[1]),
+                absolute(&changed[2]),
+                absolute(&changed[3]),
+            );
+            assert_eq!(
+                validate_request_plan(&changed_request, &plan)
+                    .unwrap_err()
+                    .kind,
+                MaterializationFailureKind::PlanStale,
+                "changed role {role} must invalidate the frozen plan"
+            );
+        }
+    }
+
+    #[test]
+    fn btrfs_materializer_rejects_a_plan_for_another_backend() {
+        let (_fixture, _paths, request, _plan) = fixture("thinws-btrfs-wrong-backend-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let as_apfs = |path: &PathCapabilityReport| {
+            PathCapabilityReport::new(
+                path.requested_path().clone(),
+                path.resolution(),
+                path.nearest_existing_ancestor().clone(),
+                path.missing_components().to_vec(),
+                path.ancestry().to_vec(),
+                FileSystemIdentity::new(
+                    "apfs",
+                    path.filesystem().fsid(),
+                    path.filesystem().volume_id().clone(),
+                ),
+                path.mount(),
+                path.readability(),
+                path.writability(),
+                path.cow_clone(),
+            )
+            .unwrap()
+        };
+        let other_backend = MaterializationPathReport::new(
+            as_apfs(report.source()),
+            as_apfs(report.target_root()),
+            as_apfs(report.staging()),
+            as_apfs(report.trash()),
+            CandidateEvidence::new(
+                MaterializerKind::ApfsFileClone,
+                SupportState::Supported,
+                Vec::new(),
+            ),
+            report.full_copy().clone(),
+            report.evidence_digest(),
+        );
+        let wrong_plan =
+            MaterializationPlan::for_cow_clone(&other_backend, FallbackPolicy::Deny).unwrap();
+        assert_eq!(
+            validate_request_plan(&request, &wrong_plan)
+                .unwrap_err()
+                .kind,
+            MaterializationFailureKind::PlanStale
+        );
+    }
+
+    #[test]
+    fn occupied_target_is_rejected_without_touching_the_foreign_entry() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-target-not-empty-");
+        fs::write(paths[1].join("foreign"), b"keep").unwrap();
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize(&request, &plan)
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::InvalidLayout)
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::NotNeeded
+        );
+        assert!(failure.receipt().created().is_empty());
+        assert_eq!(fs::read(paths[1].join("foreign")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn created_entry_identity_and_type_must_both_match() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-created-match-");
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let observed = node(&target).ok().unwrap();
+        assert!(ensure_identity(observed, observed.identity(), NodeKind::Directory).is_ok());
+        assert!(
+            ensure_identity(
+                observed,
+                FileIdentity::new(observed.device, observed.inode + 1),
+                NodeKind::Directory
+            )
+            .is_err()
+        );
+        assert!(ensure_identity(observed, observed.identity(), NodeKind::File).is_err());
+
+        fs::write(paths[1].join("owned"), b"clone").unwrap();
+        let tree = snapshot(&target).ok().unwrap();
+        let file = tree.entries.get(b"owned".as_slice()).unwrap();
+        let created = vec![TrackedCreated {
+            path: b"owned".to_vec(),
+            kind: NodeKind::File,
+            identity: Some(file.node.identity()),
+        }];
+        assert!(created_matches_target(&tree, &created));
+        assert!(rollback_set_matches(&target, &created));
+
+        let mut wrong_kind = created.clone();
+        wrong_kind[0].kind = NodeKind::Directory;
+        assert!(!created_matches_target(&tree, &wrong_kind));
+        assert!(!rollback_set_matches(&target, &wrong_kind));
+
+        let mut wrong_identity = created.clone();
+        wrong_identity[0].identity = Some(FileIdentity::new(file.node.device, file.node.inode + 1));
+        assert!(!created_matches_target(&tree, &wrong_identity));
+        assert!(!rollback_set_matches(&target, &wrong_identity));
+
+        let mut missing_identity = created.clone();
+        missing_identity[0].identity = None;
+        assert!(!created_matches_target(&tree, &missing_identity));
+        assert!(!rollback_set_matches(&target, &missing_identity));
+
+        let mut wrong_path = created.clone();
+        wrong_path[0].path = b"other".to_vec();
+        assert!(!created_matches_target(&tree, &wrong_path));
+        assert!(!rollback_set_matches(&target, &wrong_path));
+
+        fs::write(paths[1].join("foreign"), b"keep").unwrap();
+        let enlarged = snapshot(&target).ok().unwrap();
+        assert!(!created_matches_target(&enlarged, &created));
+        assert!(!rollback_set_matches(&target, &created));
+    }
+
+    #[test]
+    fn restored_root_requires_every_baseline_fact() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-root-baseline-");
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let baseline = node(&target).ok().unwrap();
+        assert!(root_baseline_matches(baseline, baseline));
+        assert!(!root_baseline_matches(
+            Node {
+                device: baseline.device + 1,
+                ..baseline
+            },
+            baseline
+        ));
+        assert!(!root_baseline_matches(
+            Node {
+                inode: baseline.inode + 1,
+                ..baseline
+            },
+            baseline
+        ));
+        assert!(!root_baseline_matches(
+            Node {
+                kind: NodeKind::File,
+                ..baseline
+            },
+            baseline
+        ));
+        assert!(!root_baseline_matches(
+            Node {
+                mode: baseline.mode ^ 0o100,
+                ..baseline
+            },
+            baseline
+        ));
+        assert!(!root_baseline_matches(
+            Node {
+                mtime_seconds: baseline.mtime_seconds + 1,
+                ..baseline
+            },
+            baseline
+        ));
+        assert!(!root_baseline_matches(
+            Node {
+                mtime_nanoseconds: baseline.mtime_nanoseconds + 1,
+                ..baseline
+            },
+            baseline
+        ));
     }
 
     struct FailAfterOne;

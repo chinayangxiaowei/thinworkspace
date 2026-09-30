@@ -226,3 +226,19 @@ Docker `/proc` 根重验变异计划（2026-09-30 08:47 UTC）：主 Agent 对�
 Docker `/proc` 根重验变异结果（2026-09-30）：上述 22 项约 3 分钟结束，21 caught、0 missed、1 unviable、0 timeout，退出码 0；`outcomes.json` SHA-256 为 `00b14a52271e1916d54d4c490346cd9918d44258afbb91809964255ac826db7b`。唯一 unviable 是把 `current_root_identity` 替换为 `Some(Default::default())`，而 `FileIdentity` 没有 `Default`，并非行为测试捕获。旧批次 9 项根重验存活对应的存在性、独立证据和挂载掩码变异在新版定向范围中已被捕获；旧 65 项结果仍按原始失败报告保留。容器不覆盖 Debian VM 与完整 Adapter 包级门禁。
 
 Docker Release CLI 补充验证（2026-09-30）：保持上述 Docker 环境和普通 target 命名卷，对当前源码执行 `cargo test --locked --release -p thinws-cli --test e2e_linux`，首次 Release 编译约 1 分 40 秒，9 项 Linux CLI 黑盒测试全部通过、退出码 0。此结果证明当前代码在容器的真实 Btrfs/ext4 上跑通该套件，不替代 Debian 11.7 VM 的新候选复验、`prl_fs` 场景或维护者人工测试。
+
+P1-L03 物化入口边界补测计划（2026-09-30）：旧完整 Linux Adapter 变异报告中 `materializer.rs` 有 55 项 missed；先处理“请求与冻结 Plan 的四个路径角色须逐一匹配、错误 Adapter 不得执行，以及 target 非空必须拒绝且保留原文件”这一安全入口切片。主 Agent 仅增加 Linux Materializer 测试，不改变 Port、公开 CLI、持久格式或物化政策；现有完整报告的存活项作为可失败断言来源。普通测试与受影响函数定向变异在 Docker 的真实 Btrfs/ext4 环境运行，Debian 11.7 VM 与完整 Adapter 包级门禁仍待补。
+
+物化入口普通测试与变异计划（2026-09-30）：四个路径角色逐一替换、另一 CoW Adapter 的 Plan 和已占用 target 三项新测试加既有故障注入共 9 项在 Docker Btrfs 上通过。首次编译因测试误写不存在的 `ApfsClone` 变体而失败，核对 Core 枚举后改为 `ApfsFileClone` 再通过；该编译错误不是预期 RED 或产品缺陷。当前 `materializer.rs` SHA-256 为 `aacc326518a656a457f628bad4888a9cf9b0932364e7e6aeab0c9f3009e6186e`，只改测试代码；`cargo-mutants --list` 对 `validate_request_plan|ensure_empty` 枚举 13 项。主 Agent 使用 Docker 真实 Btrfs/ext4、Linux Adapter/Application/CLI 三包、单 worker、每项 180 秒上限与独立 `thinws-linux-mutants-target`，输出到 `thinws-linux-target` 卷中的 `mutants-out-materializer-entry`。参照上一批 22 项约 3 分钟，首次主动查看约启动后 4 分钟；运行中冻结该模块代码和测试。本批不覆盖其余物化或回滚存活项。
+
+物化入口变异结果（2026-09-30）：13 项约 2 分钟完成，13 caught、0 missed/unviable/timeout，退出码 0；`outcomes.json` SHA-256 为 `5d9c294819cedd291a025aa131f170efb2c23d04270333b33c034d32c358fdba`。这些结果关闭本轮 Plan 请求角色与目标非空切片，不代表 `materializer.rs` 的其他路径绑定、元数据或回滚存活项已关闭。
+
+P1-L03 已创建项与回滚基线补测计划（2026-09-30）：继续针对旧完整 Adapter 报告中 `ensure_identity`、`created_matches_target`、`root_baseline_matches`、`rollback_set_matches` 的存活项，只增加独立的设备/inode、类型、权限/mtime、登记数量及登记路径身份断言；真实 target 仍只在 Docker Btrfs 临时夹具内创建。目标是防止不匹配对象被当作成功副本或已恢复基线，不修改生产回滚算法。先运行普通测试，再列举这四个函数当前候选并定向变异；其余回滚时序与竞态仍单独待办。
+
+已创建项与回滚基线定向变异计划（2026-09-30）：新增两项测试使 Docker Btrfs 的 Materializer 模块 11 项普通测试全部通过；`materializer.rs` SHA-256 为 `720e955499751c67081ece4aa8f77e24100202c73485ea62e3be128e65b75949`，仍只改测试。四个受影响函数用 `--list` 枚举，工具实际计数为 25 项；主 Agent 在真实 Btrfs/ext4 Docker 环境以 Adapter/Application/CLI 三包、1 worker、`--timeout 180`、独立变异编译卷执行，结果放在普通 target 卷的 `mutants-out-materializer-identity` 子目录。前一 13 项约 2 分钟，首次主动查看预计启动后约 5 分钟；运行期间冻结候选。
+
+已创建项与回滚基线变异结果（2026-09-30）：25 项约 2 分钟完成，25 caught、0 missed/unviable/timeout，退出码 0；`outcomes.json` SHA-256 为 `9422b4238839ec14c046c7cb55f1c7ab6f7a0501abe2399f43b681c869d6cb3c`。该结果只覆盖四个身份/基线谓词，不覆盖 `rollback_created` 的完整时序、挂载变化或摘取后回滚分支。
+
+Docker 同设备不同挂载专项夹具（2026-09-30）：测试运行脚本在临时 Btrfs 文件系统内额外 bind mount 一个空子目录，设置 `THINWS_LINUX_BIND_MOUNT_CHILD`，并在退出时先卸载该子挂载。原本默认忽略的 `destroy::tests::same_device_child_on_different_mount_is_not_in_deletion_scope` 使用 `-- --ignored` 单独运行，确认同设备号、不同 mount ID 的入口拒绝，1 passed、退出码 0。它只证明 LinuxKit 当前内核的 bind mount 边界，不证明 Debian 5.10 的跨挂载 reflink 行为；后者仍需原 VM。
+
+本轮候选门禁与波动（2026-09-30）：定向变异批次完成后，测试中的 `BTreeMap<Vec<u8>, …>` 查找改为等价的字节切片借用写法，以满足严格 Clippy；没有改变生产代码或断言条件。此后 Docker `cargo test --quiet --locked --workspace --all-targets`、`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`、macOS `cargo fmt --all -- --check` 与严格 Clippy 均通过。macOS 首次全仓测试中，`real_cli_keeps_registration_while_the_target_parent_is_unavailable` 在恢复 target 父目录后一次返回 `E_WORKSPACE_BUSY`，而该测试预期成功；当前变更不涉及 macOS 生产代码。单独重跑该测试、再跑全仓测试以及连续五轮 `e2e_remove` 套件均通过。因未捕获当时具体占用进程，暂按偶发环境占用记录，不能宣称根因已修复；若重现，应保留进程证据并单独处理。现有 Docker 定向变异结果仅适用于对应物化函数及当时的等价测试语义，不等同于当前全量 Adapter 变异通过。

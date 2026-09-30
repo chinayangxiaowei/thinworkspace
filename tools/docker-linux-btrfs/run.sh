@@ -12,6 +12,9 @@ btrfs_mount=/mnt/thinws-btrfs
 ext4_mount=/mnt/thinws-ext4
 
 cleanup() {
+    if mountpoint -q "$btrfs_mount/fixtures/bind-child"; then
+        umount "$btrfs_mount/fixtures/bind-child"
+    fi
     if mountpoint -q "$btrfs_mount"; then
         umount "$btrfs_mount"
     fi
@@ -33,6 +36,9 @@ export THINWS_LINUX_BTRFS_TEST_ROOT="$btrfs_mount/fixtures"
 export THINWS_LINUX_EXT4_TEST_ROOT="$ext4_mount/fixtures"
 export THINWS_LINUX_OTHER_TEST_FILE="$ext4_mount/fixtures/other.txt"
 mkdir -p "$THINWS_LINUX_BTRFS_TEST_ROOT" "$THINWS_LINUX_EXT4_TEST_ROOT"
+mkdir -p "$THINWS_LINUX_BTRFS_TEST_ROOT/bind-source" "$THINWS_LINUX_BTRFS_TEST_ROOT/bind-child"
+mount --bind "$THINWS_LINUX_BTRFS_TEST_ROOT/bind-source" "$THINWS_LINUX_BTRFS_TEST_ROOT/bind-child"
+export THINWS_LINUX_BIND_MOUNT_CHILD="$THINWS_LINUX_BTRFS_TEST_ROOT/bind-child"
 cp -- /work/README.md "$THINWS_LINUX_OTHER_TEST_FILE"
 chown -R thinws:thinws "$THINWS_LINUX_BTRFS_TEST_ROOT" "$THINWS_LINUX_EXT4_TEST_ROOT"
 mkdir -p /usr/local/cargo/registry

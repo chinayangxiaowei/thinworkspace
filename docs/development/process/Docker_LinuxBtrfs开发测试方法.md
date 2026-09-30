@@ -40,6 +40,26 @@ docker run --rm --privileged \
 
 严格 Clippy、定向测试或 Release 构建只替换命令末尾，例如分别使用 `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`、`cargo test --locked -p thinws-adapter-linux --lib process::tests`、`cargo build --locked --release -p thinws-cli`。不要在同一时间对同一命名 target 卷并行启动 Cargo。首次下载依赖需要网络；缓存齐全后可增加 `--network none` 并让 Cargo 使用 `--offline`，但离线失败不能冒充测试失败。
 
+若 Docker Desktop 临时无法 bind mount 外置卷（例如报 `mkdir /host_mnt/Volumes/data: file exists`），先确认宿主仓库仍可读取、无宿主目录挂载的容器能运行；不要把 Docker 环境错误记作项目测试失败。可用一次性容器接收 Git 快照，再逐个覆盖本次尚未提交的源码文件：
+
+```bash
+container_id=$(docker create --rm --privileged \
+  -v thinws-linux-cargo:/usr/local/cargo/registry \
+  -v thinws-linux-target:/target \
+  -v thinws-linux-target:/work/target \
+  -e CARGO_TARGET_DIR=/target \
+  thinws-linux-btrfs-dev:rust-1.97.1 \
+  sh /work/tools/docker-linux-btrfs/run.sh \
+  cargo test --locked -p thinws-adapter-linux --lib materializer::tests)
+docker cp tools/docker-linux-btrfs "$container_id":/work
+git archive HEAD | docker cp - "$container_id":/work
+docker cp crates/thinws-adapter-linux/src/materializer.rs \
+  "$container_id":/work/crates/thinws-adapter-linux/src/materializer.rs
+docker start -a "$container_id"
+```
+
+上例中 `docker cp` 的文件只是示范：运行前核对 `git status`，把当前候选中所有未提交且影响构建/测试的文件逐个复制进容器；否则测到的是旧 `HEAD`。新建的未跟踪文件若父目录不在归档内，也须先复制其父目录。一次性容器退出后自动删除；命名 Cargo 缓存卷仍保留。记录所测源码的哈希、容器命令和退出码；复制路径仅用于开发验证，不能替代原 Debian VM 的资格验收。
+
 脚本在容器内设置 `THINWS_LINUX_BTRFS_TEST_ROOT=/mnt/thinws-btrfs/fixtures`、`THINWS_LINUX_EXT4_TEST_ROOT=/mnt/thinws-ext4/fixtures`、`THINWS_LINUX_OTHER_TEST_FILE=/mnt/thinws-ext4/fixtures/other.txt`，还为专项测试设置同设备不同挂载的 `THINWS_LINUX_BIND_MOUNT_CHILD` 与指向该挂载的 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT`。这些路径仅是容器内测试夹具，不能用作产品 CLI 的持久配置。三个跨挂载专项测试默认被忽略；要实际运行，分别将上述命令末尾替换为 `cargo test --locked -p thinws-adapter-linux --lib destroy::tests::same_device_child_on_different_mount_is_not_in_deletion_scope -- --ignored`、`cargo test --locked -p thinws-adapter-linux --lib tree::tests::source_snapshot_rejects_a_child_on_another_mount -- --ignored` 和 `cargo test --locked -p thinws-adapter-linux --test btrfs_probe same_btrfs_filesystem_on_a_different_mount_is_rejected -- --ignored`。预检必须打印 `Btrfs reflink confirmed`，且命令以退出码 0 结束，才能记录为通过。遇到测试失败应保留原始失败原因；不要通过改用 root、跳过测试或改设非 Btrfs 路径来制造绿色结果。
 
 ## 证据使用

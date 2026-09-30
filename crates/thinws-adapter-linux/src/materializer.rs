@@ -968,6 +968,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
@@ -1341,8 +1342,11 @@ mod tests {
     }
     impl ExecutionHook for ReplaceTargetRoot {
         fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
-            fs::rename(&self.target, self.target.with_file_name("displaced-target"))
+            let displaced = self.target.with_file_name("displaced-target");
+            fs::rename(&self.target, &displaced)
                 .map_err(|error| TreeFailure::io("displace target root for test", error))?;
+            fs::set_permissions(&displaced, fs::Permissions::from_mode(0o500))
+                .map_err(|error| TreeFailure::io("change displaced root mode for test", error))?;
             fs::create_dir(&self.target)
                 .map_err(|error| TreeFailure::io("replace target root for test", error))?;
             fs::write(self.target.join("foreign"), b"unrelated data")
@@ -1376,7 +1380,57 @@ mod tests {
             fs::read(paths[1].with_file_name("displaced-target").join("a")).unwrap(),
             b"first file"
         );
+        assert_eq!(
+            fs::metadata(paths[1].with_file_name("displaced-target"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o500
+        );
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct SaturateRollbackQuarantine {
+        target: PathBuf,
+        trash: PathBuf,
+    }
+    impl ExecutionHook for SaturateRollbackQuarantine {
+        fn after_published(&self, relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            let published = fs::metadata(self.target.join(OsStr::from_bytes(relative)))
+                .map_err(|error| TreeFailure::io("stat published entry for test", error))?;
+            for collision in 0..128 {
+                let name = format!(
+                    ".thinws-rollback-{}-{}-0-{collision}",
+                    published.dev(),
+                    published.ino()
+                );
+                fs::write(self.trash.join(name), b"existing quarantine")
+                    .map_err(|error| TreeFailure::io("occupy quarantine name for test", error))?;
+            }
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn exhausted_quarantine_names_cannot_claim_a_completed_rollback() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-quarantine-full-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &SaturateRollbackQuarantine {
+                    target: paths[1].clone(),
+                    trash: paths[3].clone(),
+                },
+            )
+            .unwrap_err();
+        let rollback = failure.receipt().rollback();
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert_eq!(rollback.remaining().len(), 1);
+        assert!(rollback.removed().is_empty());
+        assert_eq!(fs::read_dir(&paths[1]).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&paths[3]).unwrap().count(), 128);
     }
 
     struct AddForeignChild {

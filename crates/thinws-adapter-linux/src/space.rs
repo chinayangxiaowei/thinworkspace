@@ -144,7 +144,51 @@ fn add_allocated(stat: &rustix::fs::Stat, totals: &mut Totals) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+    use std::process::Command;
+
+    use tempfile::Builder;
+
     use super::*;
+
+    #[test]
+    fn child_subvolume_on_the_same_mount_makes_space_unknown() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+        let fixture = Builder::new()
+            .prefix("thinws-linux-space-subvolume-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let expected_mount = mount_id(&directory, OsStr::new(""), AtFlags::EMPTY_PATH).unwrap();
+        let subvolume = fixture.path().join("subvolume");
+        let created = Command::new("btrfs")
+            .args(["subvolume", "create"])
+            .arg(&subvolume)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+        let root_stat = rustix::fs::fstat(&directory).unwrap();
+        let child_stat = rustix::fs::statat(
+            &directory,
+            OsStr::new("subvolume"),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+        assert_ne!(child_stat.st_dev, root_stat.st_dev);
+        assert_eq!(
+            mount_id(
+                &directory,
+                OsStr::new("subvolume"),
+                AtFlags::SYMLINK_NOFOLLOW,
+            ),
+            Some(expected_mount)
+        );
+        let result = measure_root(&directory, expected_mount);
+        fs::remove_dir(&subvolume).unwrap();
+        assert_eq!(result, WorkspaceSpace::Unknown);
+    }
 
     #[test]
     fn each_limit_has_an_independent_inclusive_boundary() {

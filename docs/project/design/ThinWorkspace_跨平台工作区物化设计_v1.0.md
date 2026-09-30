@@ -1,6 +1,6 @@
 # ThinWorkspace：跨平台工作区物化设计
 
-**版本：v1.0｜文档性质：详细设计｜当前已实现候选：macOS APFS；Linux/Btrfs 扩展准入见 ADR-0007**
+**版本：v1.0｜文档性质：详细设计｜当前实现候选：macOS/APFS、Linux/Btrfs；平台资格以用户手册为准**
 
 ## 一、文档职责
 
@@ -11,7 +11,7 @@
 - `Probe → Plan → Revalidate → Execute → Receipt` 协议；
 - CoW 证据、显式降级和部分失败回滚；
 - macOS/APFS 的文件系统实现边界；
-- 后续 Linux/Windows Adapter 接入时必须保持的共同契约。
+- 已准入的 Linux/Btrfs 和未来 Windows Adapter 必须保持的共同契约。
 
 本文档不决定产品阶段、CLI 参数、Rust crate 选择或任务门禁；分别由架构方案、用户手册、《技术栈》和《任务流程》管理。
 
@@ -75,7 +75,7 @@ Materializer 从原始目录物化计划指定的文件项；它不调用 Git、
 
 ### 3.3 Phase 1 实现边界
 
-Core 拥有支持性、请求/有效/实际模式、fallback、执行结果、CoW、回滚、路径身份摘要、Plan 和 Receipt 等跨平台值；Ports 只声明上述两个边界及其结构化失败；macOS Adapter 拥有目录 FD、errno 和系统调用细节。生产 Adapter 不依赖 `experiments/p0/` crate，P0 实验只能作为待重新审核的算法和测试输入。
+Core 拥有支持性、请求/有效/实际模式、fallback、执行结果、CoW、回滚、路径身份摘要、Plan 和 Receipt 等跨平台值；Ports 只声明上述两个边界及其结构化失败；macOS/APFS 与 Linux/Btrfs Adapter 各自封装目录 FD、errno 和系统调用细节。生产 Adapter 不依赖 `experiments/p0/` crate，P0 实验只能作为待重新审核的算法和测试输入。
 
 P1-06 只在 `WorkspaceMaterializer` 落地 `kind/materialize`，交付 APFS 路径 Probe、共同数据模型和 `ApfsCloneMaterializer`。Probe 必须能观察不存在目标的最近存在父目录，供 dry-run 使用；真正执行时，用户指定的 target 必须已经由调用者在已验证 parent 下建立为空目录、持久记录历史归属并绑定到 Plan，Materializer 不自行认领任意目标根。首个物化切片只执行 `cow-clone`，不实现 Full Copy 或 fallback；后续在同一 Port 上增加 Full Copy 和获准降级，不修改 APFS 已冻结的成功、失败或回滚语义。Application 负责 lifecycle lock、Creating/Ready/Error 持久化和公开 `workspace create`，不得塞进 Adapter。
 
@@ -153,7 +153,7 @@ AllowFullCopyOnCowUnsupported
 
 macOS 使用从 no-follow 打开的目录 FD 获得的 APFS Volume UUID，并与 `fstatfs` 结果一起形成 `FileSystemId`。APFS container ID 不等于 Volume ID。UUID 缺失或改变时结果是 unknown/布局错误，不得假定同卷。
 
-Linux 后续 Adapter 必须结合实际挂载关系与文件系统身份判断路径组合；`source` 和 `target` 同为 `btrfs` 或同为 `xfs`，甚至位于同一物理磁盘，均不足以证明可 reflink。文件系统身份或挂载边界无法确认时返回 `unknown`，不得凭名称推定 `supported`。
+Linux Adapter 必须结合实际挂载关系与文件系统身份判断路径组合；`source` 和 `target` 同为 `btrfs` 或同为 `xfs`，甚至位于同一物理磁盘，均不足以证明可 reflink。文件系统身份或挂载边界无法确认时返回 `unknown`，不得凭名称推定 `supported`。
 
 ### 5.3 执行前重验
 
@@ -263,7 +263,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 
 - 真实平台上的同卷成功与跨卷拒绝；
 - 当前 Linux/Btrfs Adapter 验收须覆盖同一挂载的 Btrfs 合格路径、ext4/`prl_fs` 拒绝、不同文件系统或不同挂载拒绝、Btrfs 文件属性不兼容及低于 5.18 内核的跨挂载点场景；不得用 Full Copy 成功代替 reflink 成功。XFS 合格路径与 `reflink=0` 拒绝属于将来 XFS Adapter 的验收，不作为本次 Btrfs CLI 适配的放行条件；
-- Linux Btrfs 真实文件系统测试由 `THINWS_LINUX_BTRFS_TEST_ROOT` 显式指定已存在、可写、无路径符号链接的绝对目录；测试先确认实际文件系统为 Btrfs，只在该目录内创建并清理随机命名的私有子目录，不删除配置的根目录，也不默认使用系统临时目录或源码共享目录。未配置或验证失败须记为未执行/失败，不得冒充真实 Btrfs 已通过。先用 `python3 -B tools/linux_btrfs_preflight.py` 在该环境下验证；此变量仅属于测试工具，不是产品 CLI 配置。后续 Linux Adapter 的真实物化测试沿用该测试根约定；
+- Linux Btrfs 真实文件系统测试由 `THINWS_LINUX_BTRFS_TEST_ROOT` 显式指定已存在、可写、无路径符号链接的绝对目录；测试先确认实际文件系统为 Btrfs，只在该目录内创建并清理随机命名的私有子目录，不删除配置的根目录，也不默认使用系统临时目录或源码共享目录。未配置或验证失败须记为未执行/失败，不得冒充真实 Btrfs 已通过。先用 `python3 -B tools/linux_btrfs_preflight.py` 在该环境下验证；此变量仅属于测试工具，不是产品 CLI 配置。Linux Adapter 的真实物化测试沿用该测试根约定；
 - supported/unsupported/unknown 三种 Probe 结果；
 - Probe 后路径、挂载点或 symlink 被替换的竞态；
 - 部分 clone、回滚成功/失败和重新规划；

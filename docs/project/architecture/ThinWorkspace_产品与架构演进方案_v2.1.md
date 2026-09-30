@@ -118,7 +118,7 @@ CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例�
 
 ### 4.1 Phase 1 分层
 
-首发架构只包含当前需要的组件：
+当前 Phase 1 架构只包含已准入的组件；Linux/Btrfs Adapter 仍处于资格验证中：
 
 ```text
 ┌──────────────────────────────────────────────┐
@@ -128,13 +128,13 @@ CLI 命令、参数、stdout/stderr、JSON、退出码和所有用户可见例�
 ├─────────────────────────────────────────────┤
 │ Core/Ports：身份、状态、策略和窄接口       │
 ├──────────────────────────────────────────────┤
-│ Adapters：macOS/APFS、Git CLI、SQLite          │
+│ Adapters：macOS/APFS、Linux/Btrfs、Git CLI、SQLite │
 └──────────────────────────────────────────────┘
 ```
 
-依赖只能向内。Core/Application 不直接识别 macOS、APFS、SQLite、Git CLI 或具体系统调用；Adapter 只报告能力和执行事实，产品策略由 Core/Application 决定。
+依赖只能向内。Core/Application 不直接识别 macOS、APFS、Linux、Btrfs、SQLite、Git CLI 或具体系统调用；Adapter 只报告能力和执行事实，产品策略由 Core/Application 决定。
 
-Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCodec、ExecutionBackend 或 Linux Adapter 占位代码。当后续阶段真正需要时，再以向后兼容的 Port 版本演进。
+Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCodec、ExecutionBackend 或未经准入的平台 Adapter 占位代码。Linux/Btrfs Adapter 是 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 准入的实际实现，不因此预建其他 Linux 后端；当后续阶段真正需要新能力时，再以向后兼容的 Port 版本演进。
 
 ### 4.2 详细设计分工
 
@@ -479,4 +479,4 @@ Web UI
 
 架构上提前保留的是**窄接口和能力报告**，不是提前创建大量服务和业务对象。
 
-这样既能在当前 macOS/APFS 环境快速得到真实可用的产品，也能在后续加入 Linux Reflink、OverlayFS、远程 Worker 和多节点控制面时复用核心流程，而不把任何单一平台的实现细节变成整个系统的协议。
+这样既能让当前 macOS/APFS 候选和已准入的 Linux/Btrfs 扩展复用核心流程，也能在后续接入其他 Linux 后端、远程 Worker 和多节点控制面时延续这一边界，而不把单一平台的实现细节变成整个系统的协议。

@@ -73,6 +73,15 @@ trait ExecutionHook {
     fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
         Ok(())
     }
+
+    #[cfg(test)]
+    fn before_rollback_entry_identity_check(&self, _relative: &[u8]) {}
+
+    #[cfg(test)]
+    fn before_rollback_final_path_check(&self) {}
+
+    #[cfg(test)]
+    fn before_rollback_final_root_check(&self) {}
 }
 
 struct NoopHook;
@@ -193,7 +202,7 @@ fn materialize_with_hook(
             }
             let rollback = bound.as_ref().map_or_else(
                 || RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new()),
-                |paths| rollback_created(paths, request, &context),
+                |paths| rollback_created(paths, request, &context, hook),
             );
             let evidence = MaterializationAttemptEvidence::new(
                 context.logical_bytes,
@@ -746,6 +755,7 @@ fn rollback_created(
     paths: &BoundPaths,
     request: &MaterializeRequest,
     context: &ExecutionContext,
+    _hook: &dyn ExecutionHook,
 ) -> RollbackEvidence {
     if !context.target_modified && context.created.is_empty() {
         return RollbackEvidence::new(RollbackStatus::NotNeeded, Vec::new(), Vec::new());
@@ -782,6 +792,8 @@ fn rollback_created(
         else {
             break;
         };
+        #[cfg(test)]
+        _hook.before_rollback_entry_identity_check(&entry.path);
         if node_at(&parent, &name)
             .ok()
             .is_none_or(|current| current.identity() != identity || current.kind != entry.kind)
@@ -803,9 +815,17 @@ fn rollback_created(
     }
     let exact_remaining = rollback_set_matches(&paths.target, &context.created[..active_count]);
     let restored = exact_remaining
-        && paths.revalidate_target_trash(request).is_ok()
+        && {
+            #[cfg(test)]
+            _hook.before_rollback_final_path_check();
+            paths.revalidate_target_trash(request).is_ok()
+        }
         && set_preserved_metadata(&paths.target, baseline.identity(), baseline).is_ok()
-        && node(&paths.target).is_ok_and(|root| root_baseline_matches(root, baseline));
+        && {
+            #[cfg(test)]
+            _hook.before_rollback_final_root_check();
+            node(&paths.target).is_ok_and(|root| root_baseline_matches(root, baseline))
+        };
     let remaining = context.created[..active_count]
         .iter()
         .map(TrackedCreated::evidence)
@@ -966,10 +986,11 @@ fn detach_to_trash(
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::fs;
+    use std::fs::{self, File, FileTimes};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use tempfile::TempDir;
     use thinws_core::{CandidateEvidence, CowEvidence, FallbackPolicy, FileSystemIdentity};
@@ -1304,6 +1325,58 @@ mod tests {
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }
 
+    struct ReplaceEntryAfterRollbackSetCheck {
+        target: PathBuf,
+        trash: PathBuf,
+        frozen_trash_mtime: SystemTime,
+    }
+    impl ExecutionHook for ReplaceEntryAfterRollbackSetCheck {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            Err(injected_failure())
+        }
+
+        fn before_rollback_entry_identity_check(&self, relative: &[u8]) {
+            let name = OsStr::from_bytes(relative);
+            fs::rename(self.target.join(name), self.target.join("displaced")).unwrap();
+            fs::write(self.target.join(name), b"foreign replacement").unwrap();
+            File::open(&self.trash)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(self.frozen_trash_mtime))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_never_quarantines_a_foreign_entry_replaced_after_set_check() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-entry-race-");
+        let frozen_trash_mtime = UNIX_EPOCH + Duration::from_secs(946_684_800);
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplaceEntryAfterRollbackSetCheck {
+                    target: paths[1].clone(),
+                    trash: paths[3].clone(),
+                    frozen_trash_mtime,
+                },
+            )
+            .unwrap_err();
+        let rollback = failure.receipt().rollback();
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert!(rollback.removed().is_empty());
+        assert_eq!(rollback.remaining().len(), 1);
+        assert_eq!(
+            fs::read(paths[1].join("a")).unwrap(),
+            b"foreign replacement"
+        );
+        assert_eq!(fs::read(paths[1].join("displaced")).unwrap(), b"first file");
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+        assert_eq!(
+            fs::metadata(&paths[3]).unwrap().modified().unwrap(),
+            frozen_trash_mtime
+        );
+    }
+
     #[test]
     fn rollback_restores_a_modified_empty_target_instead_of_claiming_no_work() {
         let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-empty-rollback-");
@@ -1313,7 +1386,7 @@ mod tests {
         let bound = BoundPaths::open(&request, report)
             .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
         assert_eq!(
-            rollback_created(&bound, &request, &ExecutionContext::default()).status(),
+            rollback_created(&bound, &request, &ExecutionContext::default(), &NoopHook).status(),
             RollbackStatus::NotNeeded
         );
         rustix::fs::fchmod(&bound.target, Mode::from_bits_retain(0o500)).unwrap();
@@ -1327,7 +1400,7 @@ mod tests {
             target_modified: true,
             ..ExecutionContext::default()
         };
-        let rollback = rollback_created(&bound, &request, &modified);
+        let rollback = rollback_created(&bound, &request, &modified, &NoopHook);
         assert_eq!(rollback.status(), RollbackStatus::ConfirmedBaseline);
         assert!(rollback.remaining().is_empty());
         assert!(root_baseline_matches(
@@ -1351,7 +1424,7 @@ mod tests {
             ..ExecutionContext::default()
         };
 
-        let rollback = rollback_created(&bound, &request, &modified);
+        let rollback = rollback_created(&bound, &request, &modified, &NoopHook);
         assert_eq!(rollback.status(), RollbackStatus::Incomplete);
         assert!(rollback.removed().is_empty());
         assert!(rollback.remaining().is_empty());
@@ -1359,6 +1432,94 @@ mod tests {
             fs::read(paths[1].join("foreign")).unwrap(),
             b"unrelated data"
         );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct ReplaceTargetBeforeFinalPathCheck {
+        target: PathBuf,
+    }
+    impl ExecutionHook for ReplaceTargetBeforeFinalPathCheck {
+        fn before_rollback_final_path_check(&self) {
+            fs::rename(
+                &self.target,
+                self.target.with_file_name("displaced-at-final-check"),
+            )
+            .unwrap();
+            fs::create_dir(&self.target).unwrap();
+            fs::write(self.target.join("foreign"), b"unrelated data").unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_cannot_confirm_a_target_replaced_before_final_path_check() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-final-path-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let bound = BoundPaths::open(&request, report)
+            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+        rustix::fs::fchmod(&bound.target, Mode::from_bits_retain(0o500)).unwrap();
+        let modified = ExecutionContext {
+            target_modified: true,
+            ..ExecutionContext::default()
+        };
+
+        let rollback = rollback_created(
+            &bound,
+            &request,
+            &modified,
+            &ReplaceTargetBeforeFinalPathCheck {
+                target: paths[1].clone(),
+            },
+        );
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert_eq!(
+            fs::read(paths[1].join("foreign")).unwrap(),
+            b"unrelated data"
+        );
+        assert!(paths[1].with_file_name("displaced-at-final-check").is_dir());
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct ChangeTargetBeforeFinalRootCheck {
+        target: PathBuf,
+    }
+    impl ExecutionHook for ChangeTargetBeforeFinalRootCheck {
+        fn before_rollback_final_root_check(&self) {
+            fs::set_permissions(&self.target, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_cannot_confirm_root_metadata_changed_after_restoration() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-final-root-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let bound = BoundPaths::open(&request, report)
+            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+        rustix::fs::fchmod(&bound.target, Mode::from_bits_retain(0o500)).unwrap();
+        let modified = ExecutionContext {
+            target_modified: true,
+            ..ExecutionContext::default()
+        };
+
+        let rollback = rollback_created(
+            &bound,
+            &request,
+            &modified,
+            &ChangeTargetBeforeFinalRootCheck {
+                target: paths[1].clone(),
+            },
+        );
+        let observed_mode = fs::metadata(&paths[1]).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(
+            &paths[1],
+            fs::Permissions::from_mode(bound.target_baseline.mode),
+        )
+        .unwrap();
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert_eq!(observed_mode, 0o500);
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }
 

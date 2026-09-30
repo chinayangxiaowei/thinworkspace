@@ -648,27 +648,7 @@ fn registered_target(
         ));
     }
     require_btrfs_mount(&parent, ownership.volume_id, ownership.mount_id)?;
-    let sibling_path =
-        |kind: &str| parent_path.join(format!(".thinws-{kind}-{}", reservation.workspace_id()));
-    if ownership.staging.path != absolute(&sibling_path("staging"))?
-        || ownership.trash.path != absolute(&sibling_path("trash"))?
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "registered Workspace operation paths changed",
-        ));
-    }
-    let isolated_path = sibling_path("remove");
-    if ownership
-        .isolated_path
-        .as_ref()
-        .is_some_and(|registered| registered.as_bytes() != isolated_path.as_os_str().as_bytes())
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidLayout,
-            "registered isolation path is not the Workspace sibling",
-        ));
-    }
+    let isolated_path = parent_path.join(format!(".thinws-remove-{}", reservation.workspace_id()));
     Ok(RegisteredTarget {
         parent,
         target_path,

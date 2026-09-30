@@ -496,8 +496,21 @@ mod tests {
             decode_workspace_ownership(format!("{encoded}unrecognized = 1\n").as_bytes()),
             Err(DocumentError::InvalidToml)
         );
-        let mut forged = ownership;
+        let mut forged = ownership.clone();
         forged.staging.path = AbsolutePath::try_from_bytes(b"/mnt/btrfs/foreign".to_vec()).unwrap();
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&forged).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+        let mut forged = ownership.clone();
+        forged.trash.path = AbsolutePath::try_from_bytes(b"/mnt/btrfs/foreign".to_vec()).unwrap();
+        assert_eq!(
+            decode_workspace_ownership(&encode_workspace_ownership(&forged).unwrap()),
+            Err(DocumentError::InvalidIdentity)
+        );
+        let mut forged = ownership;
+        forged.isolated_path =
+            Some(AbsolutePath::try_from_bytes(b"/mnt/btrfs/foreign".to_vec()).unwrap());
         assert_eq!(
             decode_workspace_ownership(&encode_workspace_ownership(&forged).unwrap()),
             Err(DocumentError::InvalidIdentity)

@@ -633,6 +633,102 @@ fn removal_lookup_only_returns_the_registered_btrfs_target() {
 }
 
 #[test]
+fn removal_lookup_requires_each_registration_and_ownership_identity() {
+    let (control, target_fixture, adapter, identity) = fixture();
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    let target = target_fixture.path().join("working-copy");
+    adapter
+        .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+        .unwrap();
+    let original = reservation(&identity, workspace_id, target_fixture.path(), &target);
+    let btrfs_volume = original.target_volume_id();
+    let control_volume = identity.volume_id();
+    let make = |instance, source_volume, target_volume, path: &Path| {
+        WorkspaceReservation::new(
+            workspace_id,
+            instance,
+            "test-copy".parse::<WorkspaceName>().unwrap(),
+            absolute(target_fixture.path()),
+            absolute(path),
+            source_volume,
+            target_volume,
+            false,
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        )
+    };
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &original)
+            .unwrap(),
+        Some(absolute(&target))
+    );
+    for forged in [
+        make(
+            identity.instance_id(),
+            btrfs_volume,
+            btrfs_volume,
+            &target_fixture.path().join("other-copy"),
+        ),
+        make(
+            identity.instance_id(),
+            btrfs_volume,
+            control_volume,
+            &target,
+        ),
+        make(
+            identity.instance_id(),
+            control_volume,
+            btrfs_volume,
+            &target,
+        ),
+    ] {
+        assert_eq!(
+            adapter
+                .inspect_removal_container(&lock, &layout, &forged)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    let ownership_path = control
+        .path()
+        .join(format!("control/metadata/ownership-{workspace_id}.toml"));
+    let saved = std::fs::read_to_string(&ownership_path).unwrap();
+    let other_instance = "01890a5d-ac96-774b-bd5b-55c7b8d09f35"
+        .parse::<InstanceId>()
+        .unwrap();
+    let from = format!("instance_id = \"{}\"", identity.instance_id());
+    let to = format!("instance_id = \"{other_instance}\"");
+    assert!(saved.contains(&from));
+    std::fs::write(&ownership_path, saved.replacen(&from, &to, 1)).unwrap();
+    for registered_instance in [identity.instance_id(), other_instance] {
+        let forged = make(registered_instance, btrfs_volume, btrfs_volume, &target);
+        assert_eq!(
+            adapter
+                .inspect_removal_container(&lock, &layout, &forged)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+    std::fs::write(&ownership_path, saved).unwrap();
+    assert_eq!(
+        adapter
+            .inspect_removal_container(&lock, &layout, &original)
+            .unwrap(),
+        Some(absolute(&target))
+    );
+    assert!(target.is_dir());
+}
+
+#[test]
 fn removal_lookup_refuses_an_unregistered_isolation_sibling() {
     let (_control, target_fixture, adapter, identity) = fixture();
     let layout = adapter.validate_layout(&identity).unwrap();

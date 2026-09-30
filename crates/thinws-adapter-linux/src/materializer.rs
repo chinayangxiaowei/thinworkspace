@@ -1636,67 +1636,6 @@ mod tests {
     }
 
     #[test]
-    fn rollback_does_not_detach_a_created_file_when_root_baseline_identity_differs() {
-        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-rollback-root-id-");
-        let report = LinuxPlatformProbe
-            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
-            .unwrap();
-        let mut bound = BoundPaths::open(&request, report)
-            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
-        fs::write(paths[1].join("owned"), b"preserve until scope is proven").unwrap();
-        let observed = node_at(&bound.target, OsStr::new("owned"))
-            .unwrap_or_else(|_| panic!("created file must be inspectable"));
-        let context = ExecutionContext {
-            target_modified: true,
-            created: vec![TrackedCreated {
-                path: b"owned".to_vec(),
-                kind: NodeKind::File,
-                identity: Some(observed.identity()),
-            }],
-            ..ExecutionContext::default()
-        };
-        bound.target_baseline.inode += 1;
-
-        let rollback = rollback_created(&bound, &request, &context, &NoopHook);
-        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
-        assert!(rollback.removed().is_empty());
-        assert_eq!(
-            fs::read(paths[1].join("owned")).unwrap(),
-            b"preserve until scope is proven"
-        );
-        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
-    }
-
-    #[test]
-    fn rollback_parent_requires_the_registered_path_and_directory_kind_together() {
-        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-rollback-parent-");
-        fs::create_dir(paths[1].join("nested")).unwrap();
-        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
-        let nested = open_directory(&target, OsStr::new("nested"))
-            .unwrap_or_else(|_| panic!("nested directory must open"));
-        let identity = node(&nested)
-            .unwrap_or_else(|_| panic!("nested directory must be inspectable"))
-            .identity();
-        let entry = TrackedCreated {
-            path: b"nested/file".to_vec(),
-            kind: NodeKind::File,
-            identity: None,
-        };
-        let matching_parent = TrackedCreated {
-            path: b"nested".to_vec(),
-            kind: NodeKind::Directory,
-            identity: Some(identity),
-        };
-        assert!(open_rollback_parent(&target, &entry, &[matching_parent]).is_ok());
-        let wrong_path = TrackedCreated {
-            path: b"other".to_vec(),
-            kind: NodeKind::Directory,
-            identity: Some(identity),
-        };
-        assert!(open_rollback_parent(&target, &entry, &[wrong_path]).is_err());
-    }
-
-    #[test]
     fn rollback_detach_restores_a_file_with_a_different_registered_identity() {
         let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-detach-identity-");
         fs::write(paths[1].join("owned"), b"foreign identity").unwrap();

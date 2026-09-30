@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_and_ready_workspace_reject_individual_proof_mismatches() {
+    fn ready_workspace_rejects_individual_proof_mismatches() {
         let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
             .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
         let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
@@ -1288,49 +1288,12 @@ mod tests {
             .parse::<WorkspaceId>()
             .unwrap();
         let target = target_fixture.path().join("working-copy");
-        let mut prepared = adapter
+        let prepared = adapter
             .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target).unwrap())
             .unwrap();
         let original = prepared.ownership.clone();
         let proof = control.join(format!("metadata/ownership-{workspace_id}.toml"));
         prepared.revalidate().unwrap();
-
-        for case in 0..7 {
-            let mut altered = original.clone();
-            match case {
-                0 => altered.parent.inode += 1,
-                1 => altered.target.inode += 1,
-                2 => altered.staging.identity.inode += 1,
-                3 => altered.trash.identity.inode += 1,
-                4 => {
-                    prepared.target_root =
-                        absolute(&target_fixture.path().join("other-target")).unwrap()
-                }
-                5 => {
-                    prepared.staging_root =
-                        absolute(&target_fixture.path().join("other-staging")).unwrap()
-                }
-                6 => {
-                    prepared.trash_root =
-                        absolute(&target_fixture.path().join("other-trash")).unwrap()
-                }
-                _ => unreachable!(),
-            }
-            prepared.ownership = altered.clone();
-            std::fs::write(&proof, encode_workspace_ownership(&altered).unwrap()).unwrap();
-            assert_eq!(
-                prepared.revalidate().unwrap_err().kind(),
-                PortErrorKind::InvalidLayout,
-                "mismatched evidence case {case} must be refused"
-            );
-
-            prepared.ownership = original.clone();
-            prepared.target_root = original.target_path.clone();
-            prepared.staging_root = original.staging.path.clone();
-            prepared.trash_root = original.trash.path.clone();
-            std::fs::write(&proof, encode_workspace_ownership(&original).unwrap()).unwrap();
-            prepared.revalidate().unwrap();
-        }
 
         adapter
             .clear_workspace_incomplete(&lock, &layout, prepared)

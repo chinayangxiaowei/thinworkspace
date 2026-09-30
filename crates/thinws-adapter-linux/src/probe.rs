@@ -217,11 +217,10 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     } else {
         SupportState::Unsupported
     };
-    let cow = if fs_type == "btrfs" {
+    let cow = match fs_type {
         // The ioctl result and per-file flags are not known until execution.
-        SupportState::Unknown
-    } else {
-        SupportState::Unsupported
+        "btrfs" | "unknown" => SupportState::Unknown,
+        _ => SupportState::Unsupported,
     };
     PathCapabilityReport::new(
         path.clone(),
@@ -347,8 +346,10 @@ fn combined_support(
     let first_mount = source.mount().mount_id();
     let first_volume = source.filesystem().volume_id().known().copied();
     for path in paths {
-        if path.filesystem().type_name() != "btrfs" {
-            unsupported.push("non_btrfs_path".to_owned());
+        match path.filesystem().type_name() {
+            "btrfs" => {}
+            "unknown" => unknown.push("filesystem_unknown".to_owned()),
+            _ => unsupported.push("non_btrfs_path".to_owned()),
         }
         match (first_mount, path.mount().mount_id()) {
             (Some(a), Some(b)) if a != b => unsupported.push("different_mount".to_owned()),
@@ -543,6 +544,16 @@ mod tests {
         mount_id: Option<u64>,
         volume: Evidence<VolumeId>,
     ) -> PathCapabilityReport {
+        report_with_type(name, resolution, mount_id, volume, "btrfs")
+    }
+
+    fn report_with_type(
+        name: &str,
+        resolution: PathResolution,
+        mount_id: Option<u64>,
+        volume: Evidence<VolumeId>,
+        filesystem_type: &str,
+    ) -> PathCapabilityReport {
         let requested = path(&format!("/sample/{name}"));
         let mut ancestry = vec![
             DirectoryIdentityEvidence::new(path("/"), FileIdentity::new(1, 1)),
@@ -574,11 +585,15 @@ mod tests {
             nearest,
             missing,
             ancestry,
-            FileSystemIdentity::new("btrfs", [1, 2], volume),
+            FileSystemIdentity::new(filesystem_type, [1, 2], volume),
             mount,
             SupportState::Supported,
             SupportState::Supported,
-            SupportState::Supported,
+            if filesystem_type == "unknown" {
+                SupportState::Unknown
+            } else {
+                SupportState::Supported
+            },
         )
         .expect("consistent test report")
     }
@@ -669,6 +684,48 @@ mod tests {
         assert_eq!(
             support(&reports),
             (SupportState::Unknown, vec!["volume_unknown".to_owned()])
+        );
+    }
+
+    #[test]
+    fn unknown_filesystem_type_keeps_probe_result_unknown() {
+        let mut reports = same_mount_reports();
+        reports[1] = report_with_type(
+            "target",
+            PathResolution::ExistingDirectory,
+            Some(7),
+            Evidence::Unknown {
+                reason: "mountinfo unavailable".to_owned(),
+                errno: None,
+            },
+            "unknown",
+        );
+        assert_eq!(
+            support(&reports),
+            (
+                SupportState::Unknown,
+                vec![
+                    "clone_capability_unknown".to_owned(),
+                    "filesystem_unknown".to_owned(),
+                    "volume_unknown".to_owned(),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn known_ext4_path_stays_unsupported() {
+        let mut reports = same_mount_reports();
+        reports[1] = report_with_type(
+            "target",
+            PathResolution::ExistingDirectory,
+            Some(7),
+            known_volume(),
+            "ext4",
+        );
+        assert_eq!(
+            support(&reports),
+            (SupportState::Unsupported, vec!["non_btrfs_path".to_owned()])
         );
     }
 

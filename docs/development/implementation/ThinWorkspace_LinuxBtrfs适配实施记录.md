@@ -120,3 +120,5 @@ Linux Adapter 包级隔离重跑计划（2026-09-30 01:22 UTC）：主 Agent 继
 包级隔离重跑第二次查看（2026-09-30 03:23 UTC）：会话仍存活，已处理 983/1103（547 caught、309 missed、127 unviable、0 timeout），ext4 仍有约 3.2 GiB 可用、Btrfs 约 0.8 GiB。按本批后半段实际速度，剩余 120 项预计约 20 分钟，下一次查看留余量定在约 25 分钟后。中间存活项已含身份、路径、发布和安全清理逻辑，不能只以无超时或完成计数宣布包级通过。
 
 包级隔离重跑终态（2026-09-30 03:40 UTC）：会话退出码 2，基线通过；1103 项全部执行，617 caught、337 missed、149 unviable、0 timeout，用时约 2 小时 17 分。结果 `/media/psf/data/code/thinws-mutants-linux-adapter-ext4-full/mutants.out/outcomes.json` 的 SHA-256 为 `89c89df4c256ee79a2ef7b228c68fc2528d2f768d5d58c4bcaaccd24957e02e4`；独立 ext4 编译目标仍占约 1.3 GiB、系统盘剩余约 3.1 GiB，未触发空间中止。包级质量门禁失败，旧 4 worker 中止批次不计入本结果。下一步按风险先修复可确定复现的身份、挂载解析、路径重叠和安全清理测试缺口，保留失败结果并仅对修复影响范围重跑；不能为了取得全绿摘要而再次无条件执行 1103 项。
+
+真实 Btrfs 双挂载补验（2026-09-30）：Debian 5.10.0-24-arm64 上把现有 `/dev/sdd` Btrfs 临时 bind mount 到 ext4 下随机空目录，`findmnt` 证实两挂载点共享 FSID `3e0131b6-30e9-4412-9971-b8c5f31e5aa4`。显式配置 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT` 并执行原被忽略的 `same_btrfs_filesystem_on_a_different_mount_is_rejected`，1 passed、0 failed，Probe 拒绝了不同 mount ID 的组合。随后成功卸载并删除此次创建的空挂载点，复核仅保留原 `/media/yxw/thinws` 挂载；未删除或修改原 Btrfs 数据。首次命令因误用不存在的 Cargo 可执行路径退出 127、未运行测试；修正路径后的上述命令才是有效结果。

@@ -200,3 +200,13 @@ Linux 归属文档边界补测计划（2026-09-30）：历史完整 Adapter 报�
 归属文档变异结果（2026-09-30）：18 项约 3 分钟完成，16 caught、1 missed、1 unviable、0 timeout，退出码 2；`outcomes.json` SHA-256 为 `5424e8912a433a5f7432c50d2772ab3481c729354f00411eecf625d92d930915`。旧报告中目录身份、大小上限与错误显示的 8 项存活已捕获；唯一剩余为 `decode_hex` 中 `|→^`。左操作数是已左移 4 位的高半字节、低操作数只占低 4 位，按位与恒为 0，因此该处 OR 与 XOR 结果完全一致；这仍是待 Reviewer 接受的等价候选，不能记作 caught。格式与 diff 检查退出 0，普通测试/严格 Clippy 待提交前复测。
 
 归属文档补测提交前门禁（2026-09-30）：Debian 11.7 配置 ext4 控制根、真实 Btrfs 工作区与跨文件系统只读对照后，`cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 均退出 0；macOS 同两条命令退出 0；`cargo fmt --all -- --check` 与 `git diff --check` 退出 0。没有重跑全量 Adapter 变异或长预算 fuzz；上述一项等价候选仍待审核，L01–L05 状态不变。
+
+本地提交（2026-09-30）：归属文档临界值测试与实施证据提交为 `fac2851`，仅保留在本地 `main`，未 push 或创建 PR。
+
+Linux 控制布局边界补测计划（2026-09-30）：历史完整 Adapter 报告的 `layout.rs` 有 19 项 missed，涉及新建布局三方身份、文件系统身份、子目录按名身份、数据库打开标志和持久文件权限/链接数。主 Agent 在 `fac2851` 上以真实 ext4 控制夹具新增五项定向断言；测试先因缺少 `child_entry_changed`、`database_metadata_changed`、`database_open_flags` 编译 RED（E0425），再把原有多字段条件与打开标志原样提取为同模块局部函数，未增加 Port、持久状态或公开行为。Debian 五项布局单测 GREEN、rustfmt 通过；`layout.rs` SHA-256 为 `338d392c941fc68011d9e09083965d190f858c2fcc7d69f780f60061ff15ae04`。在 Debian 11.7、ext4＋真实 Btrfs 夹具、Linux Adapter/Application/CLI 三包、单 worker、隔离 ext4 编译目标、`--timeout 180` 下对该模块当前 62 项变异运行，输出至 `/media/psf/data/code/thinws-mutants-linux-layout-boundary-fix/`。参考近期 38 项日志模块约 4 分钟，本批首次主动查看约 7 分钟后；候选源码与测试冻结。当前不把本批结果当作完整 Adapter 包级门禁。
+
+控制布局首轮结果（2026-09-30）：62 项约 6 分钟完成，52 caught、4 missed、6 unviable、0 timeout，退出码 2；`outcomes.json` SHA-256 为 `516beaae0ae32ca6f346b9daabb4439b628770745530f6ed86d6314a7bb3b860`。三项 `database_open_flags` 的 `|→^` 位运算发生在 `RDONLY=0` 与互不重叠的 `CLOEXEC`、`NOFOLLOW`、`NONBLOCK` 标志之间，仅为待 Reviewer 接受的等价候选；另一个 `revalidate_child` 整体置空是真实测试缺口。针对后者新增直接的父目录＋名字＋已持有子目录绑定测试，Debian 布局 6 项普通测试通过，rustfmt 后 `layout.rs` SHA-256 为 `9f41e76cad19342146ebc4c343ca2e41fd0fc3acadb358654cb7029e2cede262`。只重测重新列举的 `layout.rs:158` 一项，用同一 Debian 真实夹具与三包验证，输出至 `/media/psf/data/code/thinws-mutants-linux-layout-child-fix/`；参考单项约十余秒，首次主动查看约 1 分钟后。不能把首轮失败报告改写为通过。
+
+子目录重验复测结果（2026-09-30）：一项约 17 秒完成，1 caught、0 missed/timeout/unviable，退出码 0；`outcomes.json` SHA-256 为 `a84dc20b938270d658f1dbaa4f2b0f4026f7d494dcc5833b299f21881f04d87b`。当前布局模块首轮中三项等价候选待审核，其余有效存活项已由首轮及此补测关闭；不将不同候选的计数合并冒充一次完整通过。两平台全仓普通测试、严格 Clippy 和最终格式检查仍待执行。
+
+控制布局补测最终门禁（2026-09-30）：Debian 11.7 在 ext4 控制根与真实 Btrfs 工作区夹具下运行 `cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 均退出 0；macOS 同两条命令退出 0；`cargo fmt --all -- --check` 与 `git diff --check` 均退出 0。本轮不改公开 CLI、持久格式、状态机或平台降级政策。布局模块的三个等价候选仍待 Reviewer，完整 Adapter 包级失败报告和 L01–L05 In Progress 状态不因本轮变化。

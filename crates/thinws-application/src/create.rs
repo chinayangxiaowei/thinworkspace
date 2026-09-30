@@ -1006,6 +1006,88 @@ fn map_materialization_error(kind: PortErrorKind, error: thinws_ports::PortError
     }
 }
 
+#[cfg(test)]
+mod portable_path_tests {
+    use std::str::FromStr;
+
+    use thinws_core::InstanceId;
+
+    use super::*;
+
+    fn path(value: &str) -> AbsolutePath {
+        AbsolutePath::try_from_bytes(value.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn overlap_is_component_aware_in_both_directions() {
+        assert!(paths_overlap(&path("/a/b"), &path("/a/b")));
+        assert!(paths_overlap(&path("/a"), &path("/a/b")));
+        assert!(paths_overlap(&path("/a/b"), &path("/a")));
+        assert!(paths_overlap(&path("/"), &path("/a")));
+        assert!(!paths_overlap(&path("/a/b"), &path("/a/bc")));
+        assert!(!paths_overlap(&path("/a/b"), &path("/a/c")));
+    }
+
+    #[test]
+    fn requested_path_overlap_rejects_each_independent_pair() {
+        let control = path("/control");
+        assert!(requested_paths_overlap(
+            &path("/control/source"),
+            &path("/target"),
+            &control
+        ));
+        assert!(requested_paths_overlap(
+            &path("/source"),
+            &path("/control/target"),
+            &control
+        ));
+        assert!(requested_paths_overlap(
+            &path("/source"),
+            &path("/source/target"),
+            &control
+        ));
+        assert!(!requested_paths_overlap(
+            &path("/source"),
+            &path("/target"),
+            &control
+        ));
+    }
+
+    #[test]
+    fn active_workspace_protects_all_paths_that_its_cleanup_can_remove() {
+        let id = WorkspaceId::new();
+        let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let now = UnixMillis::new(1).unwrap();
+        let reservation = WorkspaceReservation::new(
+            id,
+            InstanceId::new(),
+            WorkspaceName::from_str("parent").unwrap(),
+            path("/source"),
+            path("/parent/target"),
+            volume,
+            volume,
+            false,
+            now,
+        );
+        let record = WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
+        let protected = active_workspace_protected_paths(&record).unwrap();
+        assert_eq!(protected[0], path("/parent/target"));
+        assert_eq!(protected[1], path(&format!("/parent/.thinws-staging-{id}")));
+        assert_eq!(protected[2], path(&format!("/parent/.thinws-trash-{id}")));
+        assert_eq!(protected[3], path(&format!("/parent/.thinws-remove-{id}")));
+        for location in protected {
+            let nested = derived_path(&location, &[b"child"]).unwrap();
+            assert_eq!(
+                require_no_active_workspace_path_overlap(&nested, std::slice::from_ref(&record))
+                    .unwrap_err()
+                    .diagnostic()
+                    .code(),
+                ErrorCode::TargetConflict
+            );
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::fs;
@@ -1089,41 +1171,6 @@ mod tests {
                 .code(),
             ErrorCode::TargetLayout
         );
-    }
-
-    #[test]
-    fn overlap_is_component_aware_in_both_directions() {
-        assert!(paths_overlap(&path("/a/b"), &path("/a/b")));
-        assert!(paths_overlap(&path("/a"), &path("/a/b")));
-        assert!(paths_overlap(&path("/a/b"), &path("/a")));
-        assert!(paths_overlap(&path("/"), &path("/a")));
-        assert!(!paths_overlap(&path("/a/b"), &path("/a/bc")));
-        assert!(!paths_overlap(&path("/a/b"), &path("/a/c")));
-    }
-
-    #[test]
-    fn requested_path_overlap_rejects_each_independent_pair() {
-        let control = path("/control");
-        assert!(requested_paths_overlap(
-            &path("/control/source"),
-            &path("/target"),
-            &control
-        ));
-        assert!(requested_paths_overlap(
-            &path("/source"),
-            &path("/control/target"),
-            &control
-        ));
-        assert!(requested_paths_overlap(
-            &path("/source"),
-            &path("/source/target"),
-            &control
-        ));
-        assert!(!requested_paths_overlap(
-            &path("/source"),
-            &path("/target"),
-            &control
-        ));
     }
 
     #[test]
@@ -1275,40 +1322,6 @@ mod tests {
             )
             .is_ok()
         );
-    }
-
-    #[test]
-    fn active_workspace_protects_all_paths_that_its_cleanup_can_remove() {
-        let id = WorkspaceId::new();
-        let volume = VolumeId::from_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let now = UnixMillis::new(1).unwrap();
-        let reservation = WorkspaceReservation::new(
-            id,
-            InstanceId::new(),
-            WorkspaceName::from_str("parent").unwrap(),
-            path("/source"),
-            path("/parent/target"),
-            volume,
-            volume,
-            false,
-            now,
-        );
-        let record = WorkspaceRecord::new(reservation, WorkspaceState::Ready, None, now).unwrap();
-        let protected = active_workspace_protected_paths(&record).unwrap();
-        assert_eq!(protected[0], path("/parent/target"));
-        assert_eq!(protected[1], path(&format!("/parent/.thinws-staging-{id}")));
-        assert_eq!(protected[2], path(&format!("/parent/.thinws-trash-{id}")));
-        assert_eq!(protected[3], path(&format!("/parent/.thinws-remove-{id}")));
-        for location in protected {
-            let nested = derived_path(&location, &[b"child"]).unwrap();
-            assert_eq!(
-                require_no_active_workspace_path_overlap(&nested, std::slice::from_ref(&record))
-                    .unwrap_err()
-                    .diagnostic()
-                    .code(),
-                ErrorCode::TargetConflict
-            );
-        }
     }
 
     #[test]

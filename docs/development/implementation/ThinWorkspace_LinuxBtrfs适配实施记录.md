@@ -242,3 +242,7 @@ P1-L03 已创建项与回滚基线补测计划（2026-09-30）：继续针对旧
 Docker 同设备不同挂载专项夹具（2026-09-30）：测试运行脚本在临时 Btrfs 文件系统内额外 bind mount 一个空子目录，设置 `THINWS_LINUX_BIND_MOUNT_CHILD`，并在退出时先卸载该子挂载。原本默认忽略的 `destroy::tests::same_device_child_on_different_mount_is_not_in_deletion_scope` 使用 `-- --ignored` 单独运行，确认同设备号、不同 mount ID 的入口拒绝，1 passed、退出码 0。它只证明 LinuxKit 当前内核的 bind mount 边界，不证明 Debian 5.10 的跨挂载 reflink 行为；后者仍需原 VM。
 
 本轮候选门禁与波动（2026-09-30）：定向变异批次完成后，测试中的 `BTreeMap<Vec<u8>, …>` 查找改为等价的字节切片借用写法，以满足严格 Clippy；没有改变生产代码或断言条件。此后 Docker `cargo test --quiet --locked --workspace --all-targets`、`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`、macOS `cargo fmt --all -- --check` 与严格 Clippy 均通过。macOS 首次全仓测试中，`real_cli_keeps_registration_while_the_target_parent_is_unavailable` 在恢复 target 父目录后一次返回 `E_WORKSPACE_BUSY`，而该测试预期成功；当前变更不涉及 macOS 生产代码。单独重跑该测试、再跑全仓测试以及连续五轮 `e2e_remove` 套件均通过。因未捕获当时具体占用进程，暂按偶发环境占用记录，不能宣称根因已修复；若重现，应保留进程证据并单独处理。现有 Docker 定向变异结果仅适用于对应物化函数及当时的等价测试语义，不等同于当前全量 Adapter 变异通过。
+
+Docker 同 FSID 双挂载 Probe 夹具（2026-09-30）：已有 Btrfs bind mount 子目录可兼作 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT`。先显式执行被忽略的 `same_btrfs_filesystem_on_a_different_mount_is_rejected`，因缺少该环境变量按预期失败，确认此前 Docker 默认全仓测试没有覆盖此项；随后仅在容器运行脚本中导出第二挂载路径，产品代码与测试断言不变。相同命令复验为 1 passed、退出码 0，测试断言相同 FSID、不同 mount ID 以及 `different_mount` 拒绝理由。该证据仍只适用于 Docker LinuxKit 内核，不代替 Debian 5.10 VM 记录。
+
+第二挂载夹具加入后的 Docker 全仓普通测试与严格 Clippy 再次退出 0；这两项默认仍不运行 `#[ignore]` 测试，其独立的显式执行结果见上。未重跑全量变异或 Linux 长预算 fuzz。

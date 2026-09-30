@@ -856,7 +856,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。ARM64 静态 musl 候选已在 Docker 真实 Btrfs 和 Debian 11 用户态容器运行完整 Linux CLI 黑盒套件。名为“Debian GNU Linux 11.7”的原 Parallels VM 曾通过真实 Btrfs、Debian 5.10 内核及 `prl_fs` 拓扑测试，但机内实测为 Debian 12 用户态；当前主机又无法访问其未挂载的注册位置，因此不能记作要求的 Debian 11.7 整机资格。L01–L05 仍为 In Progress：受影响范围的变异证据尚未闭合、原定版本资格与人工验收尚未完成；此前共用构建缓存的定向变异计数不得用于放行。逐次命令、计数、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
+当前证据：Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。ARM64 静态 musl 候选已在 Docker 真实 Btrfs 和 Debian 11 用户态容器运行完整 Linux CLI 黑盒套件。原 Parallels VM 已重新可访问，真实 Btrfs 主盘重新挂载且本轮 CLI/Adapter 黑盒及同盘跨挂载测试通过；但名为“Debian GNU Linux 11.7”的该 VM 机内实测仍为 Debian 12 用户态、`5.10.0-24-arm64` 内核，不能记作要求的 Debian 11.7 整机资格。L01–L05 仍为 In Progress：完整受影响范围变异证据尚未闭合、原定版本资格与人工验收尚未完成；此前共用构建缓存的定向变异计数不得用于放行。逐次命令、计数、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
 
 ---
 

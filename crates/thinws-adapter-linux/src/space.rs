@@ -56,7 +56,7 @@ fn scan_directory(
     depth: usize,
     totals: &mut Totals,
 ) -> Option<()> {
-    if limits_exceeded(depth, totals)
+    if limits_exceeded(depth, totals.entries, totals.started.elapsed())
         || mount_id(directory, OsStr::new(""), AtFlags::EMPTY_PATH)? != expected_mount
     {
         return None;
@@ -74,7 +74,7 @@ fn scan_directory(
             continue;
         }
         totals.entries = totals.entries.checked_add(1)?;
-        if limits_exceeded(depth, totals) {
+        if limits_exceeded(depth, totals.entries, totals.started.elapsed()) {
             return None;
         }
         let before = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
@@ -102,31 +102,43 @@ fn scan_directory(
             _ => return None,
         }
         let after = rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
-        if !same_identity(&before, &after)
-            || mount_id(
+        if !identity_matches_mount(&after, &before, expected_mount, || {
+            mount_id(
                 directory,
                 OsStr::from_bytes(name.to_bytes()),
                 AtFlags::SYMLINK_NOFOLLOW,
-            )? != expected_mount
-        {
+            )
+        }) {
             return None;
         }
     }
     let after = rustix::fs::fstat(directory).ok()?;
-    (same_identity(&after, expected)
-        && mount_id(directory, OsStr::new(""), AtFlags::EMPTY_PATH)? == expected_mount)
-        .then_some(())
+    identity_matches_mount(&after, expected, expected_mount, || {
+        mount_id(directory, OsStr::new(""), AtFlags::EMPTY_PATH)
+    })
+    .then_some(())
 }
 
 fn mount_id(directory: &OwnedFd, name: &OsStr, flags: AtFlags) -> Option<u64> {
     let observed = rustix::fs::statx(directory, name, flags, StatxFlags::MNT_ID).ok()?;
-    (observed.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(observed.stx_mnt_id)
+    reported_mount_id(observed.stx_mask, observed.stx_mnt_id)
 }
 
-fn limits_exceeded(depth: usize, totals: &Totals) -> bool {
-    depth > MAX_SCAN_DEPTH
-        || totals.entries > MAX_SCAN_ENTRIES
-        || totals.started.elapsed() > MAX_SCAN_DURATION
+fn reported_mount_id(mask: u32, id: u64) -> Option<u64> {
+    (mask & StatxFlags::MNT_ID.bits() != 0).then_some(id)
+}
+
+fn identity_matches_mount(
+    current: &rustix::fs::Stat,
+    expected: &rustix::fs::Stat,
+    expected_mount: u64,
+    observed_mount: impl FnOnce() -> Option<u64>,
+) -> bool {
+    same_identity(current, expected) && observed_mount() == Some(expected_mount)
+}
+
+fn limits_exceeded(depth: usize, entries: usize, elapsed: Duration) -> bool {
+    depth > MAX_SCAN_DEPTH || entries > MAX_SCAN_ENTRIES || elapsed > MAX_SCAN_DURATION
 }
 
 fn same_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
@@ -191,20 +203,129 @@ mod tests {
     }
 
     #[test]
-    fn each_limit_has_an_independent_inclusive_boundary() {
+    fn root_on_a_different_mount_is_unknown_before_any_scan() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+        let fixture = Builder::new()
+            .prefix("thinws-linux-space-mount-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let actual_mount = mount_id(&directory, OsStr::new(""), AtFlags::EMPTY_PATH).unwrap();
+        let different_mount = actual_mount.wrapping_add(1);
+        assert_ne!(different_mount, actual_mount);
+        assert_eq!(
+            measure_root(&directory, different_mount),
+            WorkspaceSpace::Unknown
+        );
+    }
+
+    #[test]
+    fn mismatched_root_identity_is_rejected_without_traversing_entries() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+        let fixture = Builder::new()
+            .prefix("thinws-linux-space-identity-")
+            .tempdir_in(root)
+            .unwrap();
+        fs::write(fixture.path().join("content"), b"x").unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let expected_mount = mount_id(&directory, OsStr::new(""), AtFlags::EMPTY_PATH).unwrap();
+        let mut incorrect = rustix::fs::fstat(&directory).unwrap();
+        incorrect.st_ino = incorrect.st_ino.wrapping_add(1);
         let mut totals = Totals {
             logical: 0,
             allocated: 0,
-            entries: MAX_SCAN_ENTRIES,
+            entries: 0,
             seen_inodes: HashSet::new(),
             started: Instant::now(),
         };
-        assert!(!limits_exceeded(MAX_SCAN_DEPTH, &totals));
-        assert!(limits_exceeded(MAX_SCAN_DEPTH + 1, &totals));
-        totals.entries += 1;
-        assert!(limits_exceeded(0, &totals));
-        totals.entries = 0;
-        totals.started -= MAX_SCAN_DURATION + Duration::from_secs(1);
-        assert!(limits_exceeded(0, &totals));
+        assert!(scan_directory(&directory, &incorrect, expected_mount, 0, &mut totals).is_none());
+        assert_eq!(totals.entries, 0);
+        assert!(totals.seen_inodes.is_empty());
+    }
+
+    #[test]
+    fn directory_tree_beyond_the_depth_limit_has_no_complete_estimate() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+        let fixture = Builder::new()
+            .prefix("thinws-linux-space-depth-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let expected_mount = mount_id(&directory, OsStr::new(""), AtFlags::EMPTY_PATH).unwrap();
+        let mut child = fixture.path().to_path_buf();
+        for _ in 0..=MAX_SCAN_DEPTH {
+            child.push("d");
+            fs::create_dir(&child).unwrap();
+        }
+        assert_eq!(
+            measure_root(&directory, expected_mount),
+            WorkspaceSpace::Unknown
+        );
+    }
+
+    #[test]
+    fn final_identity_and_mount_must_each_match() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+        let fixture = Builder::new()
+            .prefix("thinws-linux-space-final-")
+            .tempdir_in(root)
+            .unwrap();
+        let directory = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let expected = rustix::fs::fstat(&directory).unwrap();
+        let expected_mount = mount_id(&directory, OsStr::new(""), AtFlags::EMPTY_PATH).unwrap();
+        let mut changed = rustix::fs::fstat(&directory).unwrap();
+        changed.st_ino = changed.st_ino.wrapping_add(1);
+
+        assert!(!identity_matches_mount(
+            &changed,
+            &expected,
+            expected_mount,
+            || panic!("mount check must not inspect a changed directory"),
+        ));
+        assert!(!identity_matches_mount(
+            &expected,
+            &expected,
+            expected_mount,
+            || Some(expected_mount.wrapping_add(1)),
+        ));
+        assert!(!identity_matches_mount(
+            &expected,
+            &expected,
+            expected_mount,
+            || None,
+        ));
+        assert!(identity_matches_mount(
+            &expected,
+            &expected,
+            expected_mount,
+            || Some(expected_mount),
+        ));
+    }
+
+    #[test]
+    fn mount_id_requires_the_reported_statx_mask_bit() {
+        assert_eq!(reported_mount_id(0, 41), None);
+        assert_eq!(reported_mount_id(StatxFlags::SIZE.bits(), 41), None);
+        assert_eq!(reported_mount_id(StatxFlags::MNT_ID.bits(), 41), Some(41));
+    }
+
+    #[test]
+    fn each_limit_has_an_independent_inclusive_boundary() {
+        assert!(!limits_exceeded(
+            MAX_SCAN_DEPTH,
+            MAX_SCAN_ENTRIES,
+            MAX_SCAN_DURATION,
+        ));
+        assert!(limits_exceeded(MAX_SCAN_DEPTH + 1, 0, Duration::ZERO));
+        assert!(limits_exceeded(0, MAX_SCAN_ENTRIES + 1, Duration::ZERO));
+        assert!(limits_exceeded(
+            0,
+            0,
+            MAX_SCAN_DURATION + Duration::from_nanos(1),
+        ));
     }
 }

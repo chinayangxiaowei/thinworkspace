@@ -1167,6 +1167,65 @@ mod tests {
     }
 
     #[test]
+    fn bound_directory_rejects_each_inconsistent_path_mount_and_filesystem_fact() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-bound-facts-");
+        let report = LinuxPlatformProbe.inspect_path(request.source()).unwrap();
+        assert!(open_bound_directory(request.source(), &report).is_ok());
+        let variant = |requested_path: AbsolutePath,
+                       filesystem: FileSystemIdentity,
+                       mount: thinws_core::MountEvidence| {
+            PathCapabilityReport::new(
+                requested_path,
+                report.resolution(),
+                report.nearest_existing_ancestor().clone(),
+                report.missing_components().to_vec(),
+                report.ancestry().to_vec(),
+                filesystem,
+                mount,
+                report.readability(),
+                report.writability(),
+                report.cow_clone(),
+            )
+            .unwrap()
+        };
+        let original_filesystem = report.filesystem().clone();
+        let original_mount = report.mount();
+        let wrong_requested_path = variant(
+            absolute(&paths[1]),
+            original_filesystem.clone(),
+            original_mount,
+        );
+        let wrong_mount = variant(
+            request.source().clone(),
+            original_filesystem.clone(),
+            thinws_core::MountEvidence::new(original_mount.raw_flags(), original_mount.writable())
+                .with_mount_id(original_mount.mount_id().unwrap() + 1),
+        );
+        let wrong_filesystem = variant(
+            request.source().clone(),
+            FileSystemIdentity::new(
+                "ext4",
+                original_filesystem.fsid(),
+                original_filesystem.volume_id().clone(),
+            ),
+            original_mount,
+        );
+        for (case, altered) in [
+            ("requested path", wrong_requested_path),
+            ("mount ID", wrong_mount),
+            ("filesystem type", wrong_filesystem),
+        ] {
+            assert_eq!(
+                open_bound_directory(request.source(), &altered)
+                    .unwrap_err()
+                    .kind,
+                MaterializationFailureKind::PlanStale,
+                "inconsistent {case} must stale the plan"
+            );
+        }
+    }
+
+    #[test]
     fn btrfs_materializer_rejects_a_plan_for_another_backend() {
         let (_fixture, _paths, request, _plan) = fixture("thinws-btrfs-wrong-backend-");
         let report = LinuxPlatformProbe
@@ -1572,6 +1631,91 @@ mod tests {
         assert_eq!(
             fs::read(paths[1].join("foreign")).unwrap(),
             b"unrelated data"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rollback_does_not_detach_a_created_file_when_root_baseline_identity_differs() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-rollback-root-id-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let mut bound = BoundPaths::open(&request, report)
+            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+        fs::write(paths[1].join("owned"), b"preserve until scope is proven").unwrap();
+        let observed = node_at(&bound.target, OsStr::new("owned"))
+            .unwrap_or_else(|_| panic!("created file must be inspectable"));
+        let context = ExecutionContext {
+            target_modified: true,
+            created: vec![TrackedCreated {
+                path: b"owned".to_vec(),
+                kind: NodeKind::File,
+                identity: Some(observed.identity()),
+            }],
+            ..ExecutionContext::default()
+        };
+        bound.target_baseline.inode += 1;
+
+        let rollback = rollback_created(&bound, &request, &context, &NoopHook);
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert!(rollback.removed().is_empty());
+        assert_eq!(
+            fs::read(paths[1].join("owned")).unwrap(),
+            b"preserve until scope is proven"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn rollback_parent_requires_the_registered_path_and_directory_kind_together() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-rollback-parent-");
+        fs::create_dir(paths[1].join("nested")).unwrap();
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let nested = open_directory(&target, OsStr::new("nested"))
+            .unwrap_or_else(|_| panic!("nested directory must open"));
+        let identity = node(&nested)
+            .unwrap_or_else(|_| panic!("nested directory must be inspectable"))
+            .identity();
+        let entry = TrackedCreated {
+            path: b"nested/file".to_vec(),
+            kind: NodeKind::File,
+            identity: None,
+        };
+        let matching_parent = TrackedCreated {
+            path: b"nested".to_vec(),
+            kind: NodeKind::Directory,
+            identity: Some(identity),
+        };
+        assert!(open_rollback_parent(&target, &entry, &[matching_parent]).is_ok());
+        let wrong_path = TrackedCreated {
+            path: b"other".to_vec(),
+            kind: NodeKind::Directory,
+            identity: Some(identity),
+        };
+        assert!(open_rollback_parent(&target, &entry, &[wrong_path]).is_err());
+    }
+
+    #[test]
+    fn rollback_detach_restores_a_file_with_a_different_registered_identity() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-detach-identity-");
+        fs::write(paths[1].join("owned"), b"foreign identity").unwrap();
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let trash = rustix::fs::open(&paths[3], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let observed = node_at(&target, OsStr::new("owned"))
+            .unwrap_or_else(|_| panic!("target file must be inspectable"));
+        let entry = TrackedCreated {
+            path: b"owned".to_vec(),
+            kind: NodeKind::File,
+            identity: Some(FileIdentity::new(observed.device, observed.inode + 1)),
+        };
+        assert!(matches!(
+            detach_to_trash(&target, OsStr::new("owned"), &trash, &entry, 0),
+            DetachOutcome::NotDetached
+        ));
+        assert_eq!(
+            fs::read(paths[1].join("owned")).unwrap(),
+            b"foreign identity"
         );
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }

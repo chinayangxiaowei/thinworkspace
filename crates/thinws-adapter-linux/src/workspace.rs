@@ -1288,4 +1288,81 @@ mod tests {
         std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         require_private_operation_directory(&directory).unwrap();
     }
+
+    #[test]
+    fn workspace_lifecycle_lock_requires_scope_adapter_and_directory_match() {
+        let root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-workspace-lock-")
+            .tempdir_in(root)
+            .unwrap();
+        let control = fixture.path().join("control");
+        let other_control = fixture.path().join("other-control");
+        for path in [
+            &control,
+            &control.join("metadata"),
+            &control.join("logs"),
+            &other_control,
+        ] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let database = control.join("metadata/state.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let control_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&control).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let identity = InstallationIdentity::new(
+            "01890a5d-ac96-774b-bd5b-55c7b8d09f35"
+                .parse::<InstanceId>()
+                .unwrap(),
+            absolute(&control).unwrap(),
+            control_volume,
+        );
+        let layout = adapter.validate_layout(&identity).unwrap();
+        let bootstrap = adapter
+            .acquire_bootstrap(Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(
+            validate_data_root_lock(&adapter, &bootstrap, &layout)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        drop(bootstrap);
+
+        let lock = adapter
+            .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+            .unwrap();
+        validate_data_root_lock(&adapter, &lock, &layout).unwrap();
+
+        let other_adapter = LinuxHostAdapter::new(&other_control).unwrap();
+        assert_eq!(
+            validate_data_root_lock(&other_adapter, &lock, &layout)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        let other_lock = other_adapter
+            .acquire_data_root(
+                &absolute(&other_control).unwrap(),
+                Duration::from_millis(200),
+            )
+            .unwrap();
+        assert_eq!(
+            validate_data_root_lock(&adapter, &other_lock, &layout)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
 }

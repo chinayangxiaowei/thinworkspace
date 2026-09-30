@@ -1337,6 +1337,31 @@ mod tests {
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }
 
+    #[test]
+    fn rollback_cannot_confirm_an_empty_ledger_with_a_foreign_target_entry() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-empty-foreign-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let bound = BoundPaths::open(&request, report)
+            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+        fs::write(paths[1].join("foreign"), b"unrelated data").unwrap();
+        let modified = ExecutionContext {
+            target_modified: true,
+            ..ExecutionContext::default()
+        };
+
+        let rollback = rollback_created(&bound, &request, &modified);
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert!(rollback.removed().is_empty());
+        assert!(rollback.remaining().is_empty());
+        assert_eq!(
+            fs::read(paths[1].join("foreign")).unwrap(),
+            b"unrelated data"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
     struct RemoveTargetSearchPermission {
         target: PathBuf,
     }
@@ -1512,6 +1537,41 @@ mod tests {
         assert_eq!(
             fs::read(paths[1].join("nested/foreign")).unwrap(),
             b"unrelated child"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct AddForeignSibling {
+        target: PathBuf,
+    }
+    impl ExecutionHook for AddForeignSibling {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            fs::write(self.target.join("foreign"), b"unrelated sibling")
+                .map_err(|error| TreeFailure::io("write foreign sibling for test", error))?;
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn rollback_stops_before_detaching_a_registered_file_beside_a_foreign_sibling() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-foreign-sibling-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &AddForeignSibling {
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        let rollback = failure.receipt().rollback();
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert!(rollback.removed().is_empty());
+        assert_eq!(rollback.remaining().len(), 1);
+        assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"first file");
+        assert_eq!(
+            fs::read(paths[1].join("foreign")).unwrap(),
+            b"unrelated sibling"
         );
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }

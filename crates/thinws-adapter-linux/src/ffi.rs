@@ -24,7 +24,7 @@ pub(crate) fn btrfs_fsid(directory: &OwnedFd) -> io::Result<[u8; 16]> {
     let result = unsafe {
         libc::ioctl(
             directory.as_raw_fd(),
-            linux_raw_sys::ioctl::BTRFS_IOC_FS_INFO as libc::c_ulong,
+            linux_raw_sys::ioctl::BTRFS_IOC_FS_INFO as libc::Ioctl,
             &raw mut info,
         )
     };
@@ -47,7 +47,7 @@ pub(crate) fn reflink_clone(source: &OwnedFd, destination: &OwnedFd) -> io::Resu
     let result = unsafe {
         libc::ioctl(
             destination.as_raw_fd(),
-            libc::FICLONE as libc::c_ulong,
+            libc::FICLONE as libc::Ioctl,
             source.as_raw_fd(),
         )
     };

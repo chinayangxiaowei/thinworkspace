@@ -15,13 +15,14 @@
 - `tools/docker-linux-btrfs/run.sh` 仅在一次性容器内部创建稀疏 Btrfs/ext4 镜像并挂载，预检 Btrfs reflink，随后以普通用户运行传入的命令。退出时卸载；`docker run --rm` 删除容器及其临时镜像文件，不删除两个命名缓存卷。
 - 镜像内含 `btrfs-progs`。需要真实子卷的测试以普通用户在临时 Btrfs 夹具内创建空子卷，并用 `rmdir` 清理；该挂载布局下普通用户执行 `btrfs subvolume delete` 可能返回 `EPERM`，不能把夹具清理失败当作产品删除失败。
 - 该环境是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核，既不是原定 Debian 11.7/5.10 VM，也不提供 Parallels `prl_fs`。它能验证真实 Btrfs/ext4、Linux 编译和大部分生命周期行为；内核版本、`prl_fs`、VM 挂载拓扑及维护者人工验收仍需在原定环境完成。
+- 本文的 Linux Release 目标是 ARM64 musl；示例按本机 Docker 的 `linux/arm64` 镜像运行。其他架构不能直接沿用 `musl-gcc` 与 `aarch64-unknown-linux-musl` 的组合，必须另行验证交叉链接器和目标运行环境。
 
 ## 构建与运行
 
-首次或 Dockerfile 改动后构建本地镜像：
+首次或 Dockerfile 改动后构建本地镜像。镜像包含 Btrfs 工具、musl C 链接器和 Rust 的 `aarch64-unknown-linux-musl` 标准库：
 
 ```bash
-docker build -t thinws-linux-btrfs-dev:rust-1.97.1 tools/docker-linux-btrfs
+docker build -t thinws-linux-btrfs-dev:rust-1.97.1-musl tools/docker-linux-btrfs
 ```
 
 从仓库根目录运行全工作区普通测试：
@@ -33,12 +34,12 @@ docker run --rm --privileged \
   -v thinws-linux-target:/target \
   -v thinws-linux-target:/work/target \
   -e CARGO_TARGET_DIR=/target \
-  thinws-linux-btrfs-dev:rust-1.97.1 \
+  thinws-linux-btrfs-dev:rust-1.97.1-musl \
   sh /work/tools/docker-linux-btrfs/run.sh \
   cargo test --locked --workspace --all-targets
 ```
 
-严格 Clippy、定向测试或 Release 构建只替换命令末尾，例如分别使用 `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`、`cargo test --locked -p thinws-adapter-linux --lib process::tests`、`cargo build --locked --release -p thinws-cli`。不要在同一时间对同一命名 target 卷并行启动 Cargo。首次下载依赖需要网络；缓存齐全后可增加 `--network none` 并让 Cargo 使用 `--offline`，但离线失败不能冒充测试失败。
+GNU 开发测试的严格 Clippy 或定向测试只替换命令末尾，例如分别使用 `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`、`cargo test --locked -p thinws-adapter-linux --lib process::tests`。Linux Release 候选须使用下文的 musl 命令，不把此默认 GNU 目标构建当成发布产物。不要在同一时间对同一命名 target 卷并行启动 Cargo。首次下载依赖需要网络；缓存齐全后可增加 `--network none` 并让 Cargo 使用 `--offline`，但离线失败不能冒充测试失败。
 
 若 Docker Desktop 临时无法 bind mount 外置卷（例如报 `mkdir /host_mnt/Volumes/data: file exists`），先确认宿主仓库仍可读取、无宿主目录挂载的容器能运行；不要把 Docker 环境错误记作项目测试失败。可用一次性容器接收 Git 快照，再逐个覆盖本次尚未提交的源码文件：
 
@@ -48,7 +49,7 @@ container_id=$(docker create --rm --privileged \
   -v thinws-linux-target:/target \
   -v thinws-linux-target:/work/target \
   -e CARGO_TARGET_DIR=/target \
-  thinws-linux-btrfs-dev:rust-1.97.1 \
+  thinws-linux-btrfs-dev:rust-1.97.1-musl \
   sh /work/tools/docker-linux-btrfs/run.sh \
   cargo test --locked -p thinws-adapter-linux --lib materializer::tests)
 docker cp tools/docker-linux-btrfs "$container_id":/work
@@ -62,15 +63,47 @@ docker start -a "$container_id"
 
 脚本在容器内设置 `THINWS_LINUX_BTRFS_TEST_ROOT=/mnt/thinws-btrfs/fixtures`、`THINWS_LINUX_EXT4_TEST_ROOT=/mnt/thinws-ext4/fixtures`、`THINWS_LINUX_OTHER_TEST_FILE=/mnt/thinws-ext4/fixtures/other.txt`，还为专项测试设置同设备不同挂载的 `THINWS_LINUX_BIND_MOUNT_CHILD` 与指向该挂载的 `THINWS_LINUX_SECOND_BTRFS_MOUNT_ROOT`。这些路径仅是容器内测试夹具，不能用作产品 CLI 的持久配置。三个跨挂载专项测试默认被忽略；要实际运行，分别将上述命令末尾替换为 `cargo test --locked -p thinws-adapter-linux --lib destroy::tests::same_device_child_on_different_mount_is_not_in_deletion_scope -- --ignored`、`cargo test --locked -p thinws-adapter-linux --lib tree::tests::source_snapshot_rejects_a_child_on_another_mount -- --ignored` 和 `cargo test --locked -p thinws-adapter-linux --test btrfs_probe same_btrfs_filesystem_on_a_different_mount_is_rejected -- --ignored`。预检必须打印 `Btrfs reflink confirmed`，且命令以退出码 0 结束，才能记录为通过。遇到测试失败应保留原始失败原因；不要通过改用 root、跳过测试或改设非 Btrfs 路径来制造绿色结果。
 
-检查 GNU/Linux Release 二进制对 glibc 的要求时，可对已构建的容器内产物执行：
+Linux Release 候选使用静态 musl 目标。用与普通测试分开的编译卷，避免 GNU 与 musl 产物或变异测试缓存混用：
 
 ```bash
-docker run --rm -v thinws-linux-target:/target:ro \
-  thinws-linux-btrfs-dev:rust-1.97.1 \
-  sh -c 'readelf --version-info /target/release/thinws | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -1'
+docker run --rm --privileged \
+  -v "$PWD":/work:ro \
+  -v thinws-linux-cargo:/usr/local/cargo/registry \
+  -v thinws-linux-musl-target:/target \
+  -v thinws-linux-musl-target:/work/target \
+  -e CARGO_TARGET_DIR=/target \
+  -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+  -e CC_aarch64_unknown_linux_musl=musl-gcc \
+  thinws-linux-btrfs-dev:rust-1.97.1-musl \
+  sh /work/tools/docker-linux-btrfs/run.sh \
+  cargo build --locked --release --target aarch64-unknown-linux-musl -p thinws-cli
 ```
 
-该值必须与**拟发布目标系统**的 libc 版本核对；符号版本检查不能代替在目标系统运行。当前镜像基于 Debian 12，不能仅因在此容器中构建、测试通过，就认为其二进制兼容 Debian 11。Debian 11 候选产物需要兼容的构建用户态及原定 VM 实测；本方法不把 Docker LinuxKit 内核、Debian 12 用户态或容器生成的 Release 文件冒充该验收。
+如宿主 bind mount 故障，按上面的 `docker create`＋`git archive`＋`docker cp` 方法输入相同源码快照，把此命令的 musl 编译卷、两个 `-e` 链接器变量和 `cargo build` 参数原样用于一次性容器。验证真实 Btrfs CLI 链路时，只把末尾改成 `cargo test --locked --release --target aarch64-unknown-linux-musl -p thinws-cli --test e2e_linux`；更大范围的测试仍按《任务流程》确定。
+
+核验最终产物，而不是仅看 Cargo 目标名称；`file` 应显示 `statically linked`，`readelf -l` 不得有 `INTERP`，`readelf -d` 不得列出 `NEEDED`，版本信息不得包含 `GLIBC_`：
+
+```bash
+docker run --rm -v thinws-linux-musl-target:/target:ro \
+  thinws-linux-btrfs-dev:rust-1.97.1-musl \
+  sh -c 'file /target/aarch64-unknown-linux-musl/release/thinws; readelf -l /target/aarch64-unknown-linux-musl/release/thinws; readelf -d /target/aarch64-unknown-linux-musl/release/thinws; readelf --version-info /target/aarch64-unknown-linux-musl/release/thinws'
+docker run --rm -v thinws-linux-musl-target:/target:ro \
+  debian:11 /target/aarch64-unknown-linux-musl/release/thinws --version
+```
+
+需要在 macOS 宿主取得 Linux 产物时，可从停止的一次性容器复制到仓库忽略的 `target/linux-musl/thinws`；不要覆盖本机 macOS 的 `target/release/thinws`，也不要把 Linux ELF 安装到 macOS 用户 bin：
+
+```bash
+container_id=$(docker create -v thinws-linux-musl-target:/target:ro \
+  thinws-linux-btrfs-dev:rust-1.97.1-musl true)
+mkdir -p target/linux-musl
+docker cp "$container_id":/target/aarch64-unknown-linux-musl/release/thinws \
+  target/linux-musl/thinws
+docker rm "$container_id"
+shasum -a 256 target/linux-musl/thinws
+```
+
+Debian 11 容器冒烟只证明该用户态与 Docker LinuxKit 内核下可启动，不证明 Debian 11.7/5.10 VM、`prl_fs` 或实际挂载拓扑资格；静态 musl 也不使不支持的文件系统自动具备 reflink。原定 VM 的全命令黑盒与维护者人工验收仍须补齐。
 
 ## 证据使用
 

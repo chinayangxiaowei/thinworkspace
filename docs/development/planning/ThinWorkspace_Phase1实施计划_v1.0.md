@@ -852,11 +852,11 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 | P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | In Progress |
 | P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | In Progress |
 | P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | In Progress |
-| P1-L05 CLI 装配与真实机验收 | Debian `thinws` 全命令可编译并完成 Btrfs 黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Progress |
+| P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在 Debian 11.7 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Progress |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：Debian 11.7/aarch64 的 ext4 控制根与同挂载 Btrfs 工作区已完成 Release CLI 9 项黑盒测试；Linux 适用的 8 个 fuzz 目标各完成 300 秒长预算，原样全仓 check/test/Clippy 已通过。L01–L05 仍为 In Progress：受影响范围的变异证据尚未闭合，人工验收尚未完成；此前共用构建缓存的定向变异计数不得用于放行。逐次实施、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
+当前证据：Debian 11.7/aarch64 的 ext4 控制根与同挂载 Btrfs 工作区曾完成 GNU Release CLI 9 项黑盒测试；Linux 适用的 8 个 fuzz 目标各完成 300 秒长预算，原样全仓 check/test/Clippy 已通过。当前发布候选已改为 ARM64 静态 musl，在 Docker 的真实 Btrfs 上通过 Release CLI 与全仓测试，并在 Debian 11 容器通过启动冒烟；其原定 Debian 11.7/5.10 VM 验收尚未完成。L01–L05 仍为 In Progress：受影响范围的变异证据尚未闭合，人工验收尚未完成；此前共用构建缓存的定向变异计数不得用于放行。逐次实施、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
 
 ---
 

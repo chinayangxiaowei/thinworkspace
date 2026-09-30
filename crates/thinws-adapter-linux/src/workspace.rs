@@ -718,16 +718,19 @@ fn verify_selected_target(
         )
     })?;
     selected.revalidate()?;
-    if selected.path != current.path
-        || selected.identity != current.identity
-        || selected.device != current.device
-    {
+    if !selected_target_matches(selected, &current) {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
             "Workspace deletion target changed",
         ));
     }
     Ok(())
+}
+
+fn selected_target_matches(selected: &TargetDirectory, current: &TargetDirectory) -> bool {
+    selected.path == current.path
+        && selected.identity == current.identity
+        && selected.device == current.device
 }
 
 fn remove_operation_directory(
@@ -1133,4 +1136,132 @@ fn io_error(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> PortError {
     PortError::new(PortErrorKind::Io, operation).with_source(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    use thinws_core::{InstallationIdentity, InstanceId, UnixMillis, WorkspaceName};
+    use thinws_ports::LifecycleLock;
+
+    use super::*;
+
+    #[test]
+    fn deletion_scope_rejects_changed_ownership_proof_after_target_selection() {
+        let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let control_fixture = tempfile::Builder::new()
+            .prefix("thinws-scope-control-")
+            .tempdir_in(control_root)
+            .unwrap();
+        let target_fixture = tempfile::Builder::new()
+            .prefix("thinws-scope-target-")
+            .tempdir_in(target_root)
+            .unwrap();
+        let control = control_fixture.path().join("control");
+        for path in [&control, &control.join("metadata"), &control.join("logs")] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let database = control.join("metadata/state.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let control_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&control).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let identity = InstallationIdentity::new(
+            "01890a5d-ac96-774b-bd5b-55c7b8d09f33"
+                .parse::<InstanceId>()
+                .unwrap(),
+            absolute(&control).unwrap(),
+            control_volume,
+        );
+        let layout = adapter.validate_layout(&identity).unwrap();
+        let lock = adapter
+            .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+            .unwrap();
+        let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+            .parse::<WorkspaceId>()
+            .unwrap();
+        let source = target_fixture.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let target = target_fixture.path().join("copy");
+        adapter
+            .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target).unwrap())
+            .unwrap();
+        let target_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&source).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let reservation = WorkspaceReservation::new(
+            workspace_id,
+            identity.instance_id(),
+            "scope-check".parse::<WorkspaceName>().unwrap(),
+            absolute(&source).unwrap(),
+            absolute(&target).unwrap(),
+            target_volume,
+            target_volume,
+            false,
+            UnixMillis::new(1_700_000_000_000).unwrap(),
+        );
+        let registered = registered_target(&layout, &reservation).unwrap();
+        let (selected, _) = locate_target(&registered).unwrap().unwrap();
+        verify_selected_target(&adapter, &lock, &layout, &registered, &selected).unwrap();
+
+        let mut forged = registered.ownership.clone();
+        forged.staging.identity.inode += 1;
+        let ownership_path = control.join(format!("metadata/ownership-{workspace_id}.toml"));
+        std::fs::write(
+            &ownership_path,
+            encode_workspace_ownership(&forged).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_selected_target(&adapter, &lock, &layout, &registered, &selected)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn selected_target_evidence_requires_each_field_to_match() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-selected-evidence-")
+            .tempdir_in(root)
+            .unwrap();
+        let expected = open_target_directory(fixture.path()).unwrap();
+        let mut selected = open_target_directory(fixture.path()).unwrap();
+        assert!(selected_target_matches(&selected, &expected));
+
+        selected.path.push("another-name");
+        assert!(!selected_target_matches(&selected, &expected));
+        selected.path.pop();
+
+        selected.identity.inode += 1;
+        assert!(!selected_target_matches(&selected, &expected));
+        selected.identity.inode -= 1;
+
+        selected.device += 1;
+        assert!(!selected_target_matches(&selected, &expected));
+    }
 }

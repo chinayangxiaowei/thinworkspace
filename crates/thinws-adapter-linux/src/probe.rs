@@ -158,17 +158,9 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     let statfs = rustix::fs::fstatfs(&fd).map_err(|error| port_io("stat filesystem", error))?;
     let mount_id = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)
         .ok()
-        .and_then(|observed| {
-            (observed.stx_mask & StatxFlags::MNT_ID.bits() != 0).then_some(observed.stx_mnt_id)
-        });
+        .and_then(|observed| known_mount_id(observed.stx_mask, observed.stx_mnt_id));
     let mount_kind = mount_id.and_then(|id| mountinfo::filesystem_type(id).ok().flatten());
-    let fs_type = match mount_kind.as_deref() {
-        Some("btrfs") if statfs.f_type as u64 == libc::BTRFS_SUPER_MAGIC as u64 => "btrfs",
-        Some("ext4") if statfs.f_type as u64 == libc::EXT4_SUPER_MAGIC as u64 => "ext4",
-        Some("btrfs" | "ext4") => "unknown",
-        Some(other) => other,
-        None => "unknown",
-    };
+    let fs_type = filesystem_type_from_evidence(mount_kind.as_deref(), statfs.f_type as u64);
     let volume = if fs_type == "btrfs" {
         match btrfs_fsid(&fd) {
             Ok(bytes) => Evidence::Known(
@@ -246,22 +238,38 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
     .map_err(|error| port_invalid("build path report", error))
 }
 
+fn known_mount_id(mask: u32, id: u64) -> Option<u64> {
+    (mask & StatxFlags::MNT_ID.bits() != 0).then_some(id)
+}
+
+fn filesystem_type_from_evidence(mount_kind: Option<&str>, superblock_magic: u64) -> &str {
+    match mount_kind {
+        Some("btrfs") if superblock_magic == libc::BTRFS_SUPER_MAGIC as u64 => "btrfs",
+        Some("ext4") if superblock_magic == libc::EXT4_SUPER_MAGIC as u64 => "ext4",
+        Some("btrfs" | "ext4") => "unknown",
+        Some(other) => other,
+        None => "unknown",
+    }
+}
+
 fn ext4_identity(directory: &OwnedFd) -> Result<VolumeId, rustix::io::Errno> {
     let statvfs = rustix::fs::fstatvfs(directory)?;
     if statvfs.f_fsid == 0 {
         return Err(rustix::io::Errno::INVAL);
     }
+    Ok(ext4_volume_id(statvfs.f_fsid))
+}
+
+fn ext4_volume_id(fsid: u64) -> VolumeId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"thinws-linux-ext4-identity-v1\0");
-    hasher.update(&statvfs.f_fsid.to_le_bytes());
+    hasher.update(&fsid.to_le_bytes());
     let mut bytes = [0; 16];
     bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(
-        VolumeId::from_str(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
-            .expect("UUID formatter produces canonical lowercase UUID"),
-    )
+    VolumeId::from_str(&uuid::Uuid::from_bytes(bytes).hyphenated().to_string())
+        .expect("UUID formatter produces canonical lowercase UUID")
 }
 
 fn access_state(result: Result<(), rustix::io::Errno>) -> SupportState {
@@ -515,6 +523,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
@@ -869,6 +878,93 @@ mod tests {
         assert_ne!(
             digest_for(&unknown(3), &split_a),
             digest_for(&unknown(4), &split_a)
+        );
+    }
+
+    #[test]
+    fn mount_and_superblock_evidence_must_agree_before_naming_a_filesystem() {
+        assert_eq!(known_mount_id(0, 41), None);
+        assert_eq!(known_mount_id(StatxFlags::MNT_ID.bits(), 41), Some(41));
+        assert_eq!(
+            filesystem_type_from_evidence(Some("btrfs"), libc::BTRFS_SUPER_MAGIC as u64),
+            "btrfs"
+        );
+        assert_eq!(
+            filesystem_type_from_evidence(Some("btrfs"), libc::EXT4_SUPER_MAGIC as u64),
+            "unknown"
+        );
+        assert_eq!(
+            filesystem_type_from_evidence(Some("ext4"), libc::EXT4_SUPER_MAGIC as u64),
+            "ext4"
+        );
+        assert_eq!(
+            filesystem_type_from_evidence(Some("ext4"), libc::BTRFS_SUPER_MAGIC as u64),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn ext4_identity_keeps_the_fixed_uuid_version_and_variant_bits() {
+        let fsid = 0x1234_5678_9abc_def0_u64;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"thinws-linux-ext4-identity-v1\0");
+        hasher.update(&fsid.to_le_bytes());
+        let hashed = hasher.finalize();
+        let actual = ext4_volume_id(fsid).as_uuid().into_bytes();
+        assert_eq!(actual[6], (hashed.as_bytes()[6] & 0x0f) | 0x80);
+        assert_eq!(actual[8], (hashed.as_bytes()[8] & 0x3f) | 0x80);
+    }
+
+    #[test]
+    fn private_path_probe_checks_actual_read_write_and_search_permissions() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs mount");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-probe-access-")
+            .tempdir_in(root)
+            .unwrap();
+        let readonly = fixture.path().join("readonly");
+        let no_search = fixture.path().join("no-search");
+        fs::create_dir(&readonly).unwrap();
+        fs::create_dir(&no_search).unwrap();
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&no_search, fs::Permissions::from_mode(0o400)).unwrap();
+        let absolute = |candidate: &std::path::Path| {
+            AbsolutePath::try_from_bytes(candidate.as_os_str().as_bytes().to_vec()).unwrap()
+        };
+        let readonly_report = LinuxPlatformProbe.inspect_path(&absolute(&readonly));
+        let no_search_report = LinuxPlatformProbe.inspect_path(&absolute(&no_search));
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&no_search, fs::Permissions::from_mode(0o700)).unwrap();
+        let readonly_report = readonly_report.unwrap();
+        assert_eq!(readonly_report.readability(), SupportState::Supported);
+        assert_eq!(readonly_report.writability(), SupportState::Unsupported);
+        let no_search_report = no_search_report.unwrap();
+        assert_eq!(no_search_report.readability(), SupportState::Unsupported);
+        assert_eq!(no_search_report.writability(), SupportState::Unsupported);
+    }
+
+    #[test]
+    fn path_open_error_keeps_link_layout_and_access_denial_distinct() {
+        assert_eq!(
+            open_error(rustix::io::Errno::LOOP).kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            open_error(rustix::io::Errno::NOTDIR).kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            open_error(rustix::io::Errno::ACCESS).kind(),
+            PortErrorKind::Unavailable
+        );
+        assert_eq!(
+            open_error(rustix::io::Errno::PERM).kind(),
+            PortErrorKind::Unavailable
+        );
+        assert_eq!(
+            open_error(rustix::io::Errno::NOENT).kind(),
+            PortErrorKind::Io
         );
     }
 }

@@ -423,7 +423,8 @@ where
         require_no_active_workspace_path_overlap(request.target(), &active)?;
 
         // Only this preliminary source observation precedes Creating: its actual
-        // APFS Volume UUID is an immutable reservation field, not a caller guess.
+        // The platform filesystem identity is an immutable reservation field,
+        // not a caller guess.
         let source = self
             .bootstrap
             .inspect_path(request.source())
@@ -764,9 +765,9 @@ fn require_no_active_workspace_identity_overlap(
     for record in active {
         let registered = record.reservation();
         if registered.target_volume_id() != target_volume_id {
-            // A different APFS volume cannot own this target's existing parent.
-            // In particular, an offline target on another volume must not block
-            // creation on the available volume.
+            // A different filesystem identity cannot own this target's existing
+            // parent. An offline target on another volume must not block creation
+            // on the available volume.
             continue;
         }
         for path in active_workspace_protected_paths(record)? {
@@ -834,7 +835,7 @@ fn paths_overlap_with_identity(
     }
     // Source existence is checked by the caller; the registered root is bound
     // by the layout proof and revalidated before success. Compare descriptor
-    // identities, not spelling: APFS may fold case or Unicode.
+    // identities, not spelling: APFS aliases and Linux bind mounts can differ.
     let source_leaf = source
         .ancestry()
         .last()
@@ -867,8 +868,8 @@ fn target_enters_existing_root(
     target: &PathCapabilityReport,
     existing: &PathCapabilityReport,
 ) -> bool {
-    // The target can be missing while its parent is an APFS case/Unicode alias
-    // of an existing control or Workspace root. Spelling alone misses that edge.
+    // The target can be missing while its parent aliases an existing control or
+    // Workspace root. Spelling alone misses that edge.
     let existing_identity = existing
         .ancestry()
         .last()

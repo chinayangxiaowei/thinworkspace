@@ -35,7 +35,7 @@ impl InstallationIdentity {
         &self.data_root
     }
 
-    /// Returns the APFS volume identifier.
+    /// Returns the control-root filesystem identity token.
     #[must_use]
     pub const fn volume_id(&self) -> VolumeId {
         self.volume_id

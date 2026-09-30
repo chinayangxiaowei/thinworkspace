@@ -64,7 +64,7 @@ pub enum WorkspaceRemoval {
 }
 
 /// Current, best-effort byte measurement of one verified Ready copy.
-/// Allocated bytes can include APFS blocks shared with other clones.
+/// Allocated bytes can include CoW blocks shared with other clones.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceSpace {
     /// The bounded scan completed without a detected identity change.

@@ -1264,4 +1264,28 @@ mod tests {
         selected.device += 1;
         assert!(!selected_target_matches(&selected, &expected));
     }
+
+    #[test]
+    fn operation_directory_rejects_a_mode_change_without_other_identity_changes() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-operation-mode-")
+            .tempdir_in(root)
+            .unwrap();
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_target_directory(fixture.path()).unwrap();
+        require_private_operation_directory(&directory).unwrap();
+
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(
+            require_private_operation_directory(&directory)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        require_private_operation_directory(&directory).unwrap();
+    }
 }

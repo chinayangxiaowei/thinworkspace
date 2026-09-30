@@ -1304,6 +1304,131 @@ mod tests {
     }
 
     #[test]
+    fn rollback_restores_a_modified_empty_target_instead_of_claiming_no_work() {
+        let (_fixture, paths, request, _plan) = fixture("thinws-btrfs-empty-rollback-");
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let bound = BoundPaths::open(&request, report)
+            .unwrap_or_else(|_| panic!("valid Btrfs fixture must bind"));
+        assert_eq!(
+            rollback_created(&bound, &request, &ExecutionContext::default()).status(),
+            RollbackStatus::NotNeeded
+        );
+        rustix::fs::fchmod(&bound.target, Mode::from_bits_retain(0o500)).unwrap();
+        assert_ne!(
+            node(&bound.target)
+                .unwrap_or_else(|_| panic!("bound target must remain readable"))
+                .mode,
+            bound.target_baseline.mode
+        );
+        let modified = ExecutionContext {
+            target_modified: true,
+            ..ExecutionContext::default()
+        };
+        let rollback = rollback_created(&bound, &request, &modified);
+        assert_eq!(rollback.status(), RollbackStatus::ConfirmedBaseline);
+        assert!(rollback.remaining().is_empty());
+        assert!(root_baseline_matches(
+            node(&bound.target).unwrap_or_else(|_| panic!("bound target must remain readable")),
+            bound.target_baseline
+        ));
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct ReplaceTargetRoot {
+        target: PathBuf,
+    }
+    impl ExecutionHook for ReplaceTargetRoot {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            fs::rename(&self.target, self.target.with_file_name("displaced-target"))
+                .map_err(|error| TreeFailure::io("displace target root for test", error))?;
+            fs::create_dir(&self.target)
+                .map_err(|error| TreeFailure::io("replace target root for test", error))?;
+            fs::write(self.target.join("foreign"), b"unrelated data")
+                .map_err(|error| TreeFailure::io("write replacement target for test", error))?;
+            Err(TreeFailure::target_changed())
+        }
+    }
+
+    #[test]
+    fn rollback_does_not_touch_a_replaced_target_root() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-root-replacement-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplaceTargetRoot {
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(failure.receipt().rollback().remaining().len(), 1);
+        assert_eq!(
+            fs::read(paths[1].join("foreign")).unwrap(),
+            b"unrelated data"
+        );
+        assert_eq!(
+            fs::read(paths[1].with_file_name("displaced-target").join("a")).unwrap(),
+            b"first file"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    struct AddForeignChild {
+        target: PathBuf,
+    }
+    impl ExecutionHook for AddForeignChild {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            fs::write(self.target.join("nested/foreign"), b"unrelated child")
+                .map_err(|error| TreeFailure::io("write foreign child for test", error))?;
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn rollback_preserves_an_unregistered_child_in_a_created_directory() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-foreign-child-");
+        fs::remove_file(paths[0].join("a")).unwrap();
+        fs::remove_file(paths[0].join("b")).unwrap();
+        fs::create_dir(paths[0].join("nested")).unwrap();
+        fs::write(paths[0].join("nested/file"), b"source file").unwrap();
+        let request = MaterializeRequest::new(
+            absolute(&paths[0]),
+            absolute(&paths[1]),
+            absolute(&paths[2]),
+            absolute(&paths[3]),
+        );
+        let report = LinuxPlatformProbe
+            .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+            .unwrap();
+        let plan = MaterializationPlan::for_cow_clone(&report, FallbackPolicy::Deny).unwrap();
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &AddForeignChild {
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(failure.receipt().rollback().remaining().len(), 1);
+        assert_eq!(
+            fs::read(paths[1].join("nested/foreign")).unwrap(),
+            b"unrelated child"
+        );
+        assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    }
+
+    #[test]
     fn nested_partial_clone_is_quarantined_child_before_parent() {
         let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-nested-rollback-");
         fs::remove_file(paths[0].join("a")).unwrap();

@@ -512,6 +512,10 @@ const fn state_byte(value: SupportState) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+
     use super::*;
 
     fn path(value: &str) -> AbsolutePath {
@@ -677,6 +681,194 @@ mod tests {
                 SupportState::Unsupported,
                 vec!["different_volume".to_owned()]
             )
+        );
+    }
+
+    #[test]
+    fn occupied_leaf_and_intermediate_file_have_distinct_failures() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs mount");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-linux-probe-file-")
+            .tempdir_in(root)
+            .unwrap();
+        let occupied = fixture.path().join("occupied");
+        fs::write(&occupied, b"content").unwrap();
+        let absolute = |candidate: &std::path::Path| {
+            AbsolutePath::try_from_bytes(candidate.as_os_str().as_bytes().to_vec()).unwrap()
+        };
+        assert_eq!(
+            LinuxPlatformProbe
+                .inspect_path(&absolute(&occupied))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::NotEmpty
+        );
+        assert_eq!(
+            LinuxPlatformProbe
+                .inspect_path(&absolute(&occupied.join("child")))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+    }
+
+    #[test]
+    fn overlap_rejects_lexical_nesting_and_identity_aliases_but_not_siblings() {
+        let source = report(
+            "source",
+            PathResolution::ExistingDirectory,
+            Some(7),
+            known_volume(),
+        );
+        let child = PathCapabilityReport::new(
+            path("/sample/source/child"),
+            PathResolution::MissingTarget,
+            source.requested_path().clone(),
+            vec![b"child".to_vec()],
+            source.ancestry().to_vec(),
+            source.filesystem().clone(),
+            source.mount(),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap();
+        let sibling = report(
+            "source-backup",
+            PathResolution::MissingTarget,
+            Some(7),
+            known_volume(),
+        );
+        assert!(overlap(&source, &child));
+        assert!(overlap(&child, &source));
+        assert!(!overlap(&source, &sibling));
+
+        // A concurrent disappearance can leave the separately probed source
+        // and target with inconsistent ancestry. Literal nesting must still
+        // reject this combination without relying on a shared leaf identity.
+        let lexical_only_child = PathCapabilityReport::new(
+            path("/sample/source/child"),
+            PathResolution::MissingTarget,
+            path("/sample"),
+            vec![b"source".to_vec(), b"child".to_vec()],
+            source.ancestry()[..2].to_vec(),
+            source.filesystem().clone(),
+            source.mount(),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap();
+        assert!(overlap(&source, &lexical_only_child));
+        assert!(overlap(&lexical_only_child, &source));
+        assert!(overlap(&sibling, &sibling));
+        let synthetic_root = PathCapabilityReport::new(
+            path("/"),
+            PathResolution::ExistingDirectory,
+            path("/"),
+            vec![],
+            vec![DirectoryIdentityEvidence::new(
+                path("/"),
+                FileIdentity::new(99, 99),
+            )],
+            source.filesystem().clone(),
+            source.mount(),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap();
+        assert!(overlap(&synthetic_root, &sibling));
+
+        let mut alias_ancestry = source.ancestry().to_vec();
+        alias_ancestry
+            .last_mut()
+            .unwrap()
+            .clone_from(&DirectoryIdentityEvidence::new(
+                path("/sample/alias"),
+                source.ancestry().last().unwrap().identity(),
+            ));
+        let alias = PathCapabilityReport::new(
+            path("/sample/alias"),
+            PathResolution::ExistingDirectory,
+            path("/sample/alias"),
+            vec![],
+            alias_ancestry,
+            source.filesystem().clone(),
+            source.mount(),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap();
+        assert!(overlap(&source, &alias));
+        assert!(overlap(&alias, &source));
+
+        let alias_child = PathCapabilityReport::new(
+            path("/sample/alias/child"),
+            PathResolution::MissingTarget,
+            path("/sample/alias"),
+            vec![b"child".to_vec()],
+            alias.ancestry().to_vec(),
+            source.filesystem().clone(),
+            source.mount(),
+            SupportState::Supported,
+            SupportState::Supported,
+            SupportState::Supported,
+        )
+        .unwrap();
+        assert!(overlap(&source, &alias_child));
+        assert!(overlap(&alias_child, &source));
+
+        let reports = same_mount_reports();
+        let (state, reasons) =
+            combined_support(&source, &lexical_only_child, &reports[2], &reports[3]);
+        assert_eq!(state, SupportState::Unsupported);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason == "source_target_overlap")
+        );
+    }
+
+    #[test]
+    fn probe_digest_commits_to_reason_boundaries_unknown_errno_and_support_state() {
+        let reports = same_mount_reports();
+        let copy = CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Unsupported,
+            vec![],
+        );
+        let candidate =
+            |state, reasons| CandidateEvidence::new(MaterializerKind::BtrfsReflink, state, reasons);
+        let digest_for = |source: &PathCapabilityReport, cow: &CandidateEvidence| {
+            digest(source, &reports[1], &reports[2], &reports[3], cow, &copy)
+        };
+        let split_a = candidate(SupportState::Unknown, vec!["a".to_owned(), "bc".to_owned()]);
+        let split_b = candidate(SupportState::Unknown, vec!["ab".to_owned(), "c".to_owned()]);
+        assert_ne!(
+            digest_for(&reports[0], &split_a),
+            digest_for(&reports[0], &split_b)
+        );
+        assert_ne!(
+            digest_for(&reports[0], &candidate(SupportState::Supported, vec![])),
+            digest_for(&reports[0], &candidate(SupportState::Unsupported, vec![]))
+        );
+        let unknown = |errno| {
+            report(
+                "source",
+                PathResolution::ExistingDirectory,
+                Some(7),
+                Evidence::Unknown {
+                    reason: "test unavailable".to_owned(),
+                    errno: Some(errno),
+                },
+            )
+        };
+        assert_ne!(
+            digest_for(&unknown(3), &split_a),
+            digest_for(&unknown(4), &split_a)
         );
     }
 }

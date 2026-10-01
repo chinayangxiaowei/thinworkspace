@@ -965,10 +965,11 @@ fn open_target_directory(path: &Path) -> Result<TargetDirectory, PortError> {
         rustix::fs::fstat(&fd).map_err(|error| io_error("inspect Workspace directory", error))?;
     let birth = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::BTIME)
         .map_err(|error| io_error("inspect Workspace directory birthtime", error))?;
-    if birth.stx_mask & StatxFlags::BTIME.bits() == 0
-        || birth.stx_btime.tv_sec <= 0
-        || birth.stx_btime.tv_nsec >= 1_000_000_000
-    {
+    if !birthtime_is_usable(
+        birth.stx_mask,
+        birth.stx_btime.tv_sec,
+        birth.stx_btime.tv_nsec,
+    ) {
         return Err(PortError::new(
             PortErrorKind::InvalidLayout,
             "Workspace directory birthtime is unavailable",
@@ -984,6 +985,11 @@ fn open_target_directory(path: &Path) -> Result<TargetDirectory, PortError> {
         },
         device: stat.st_dev,
     })
+}
+
+fn birthtime_is_usable(mask: u32, seconds: i64, nanoseconds: u32) -> bool {
+    // A value without its statx evidence bit cannot establish directory ownership.
+    mask & StatxFlags::BTIME.bits() != 0 && seconds > 0 && nanoseconds < 1_000_000_000
 }
 
 fn create_child(parent: &TargetDirectory, name: &OsStr) -> Result<TargetDirectory, PortError> {
@@ -1158,6 +1164,20 @@ mod tests {
     use thinws_ports::LifecycleLock;
 
     use super::*;
+
+    #[test]
+    fn directory_birthtime_requires_each_independent_evidence_field() {
+        let birthtime = StatxFlags::BTIME.bits();
+        let unrelated = StatxFlags::SIZE.bits();
+        assert_eq!(birthtime & unrelated, 0);
+        assert!(birthtime_is_usable(birthtime, 1, 0));
+        assert!(birthtime_is_usable(birthtime | unrelated, 1, 999_999_999));
+        assert!(!birthtime_is_usable(unrelated, 1, 0));
+        assert!(!birthtime_is_usable(0, 1, 0));
+        assert!(!birthtime_is_usable(birthtime, 0, 0));
+        assert!(!birthtime_is_usable(birthtime, -1, 0));
+        assert!(!birthtime_is_usable(birthtime, 1, 1_000_000_000));
+    }
 
     #[test]
     fn deletion_scope_rejects_changed_ownership_proof_after_target_selection() {

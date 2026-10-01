@@ -924,6 +924,27 @@ mod tests {
     }
 
     #[test]
+    fn staged_document_descriptor_keeps_required_runtime_flags() {
+        let (fixture, directory) = private_fixture("thinws-linux-temp-flags-");
+        let temporary = PrivateTemp::create(&directory, "document", b"owned").unwrap();
+        let descriptor = temporary.file.as_ref().unwrap();
+
+        assert!(
+            rustix::io::fcntl_getfd(descriptor)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+        let flags = rustix::fs::fcntl_getfl(descriptor).unwrap();
+        assert!(flags.contains(OFlags::RDWR));
+        assert!(flags.contains(OFlags::NONBLOCK));
+        let staged = fixture.path().join(temporary.name());
+        assert_eq!(
+            fs::metadata(&staged).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+    }
+
+    #[test]
     fn no_replace_publication_preserves_an_existing_document_and_cleans_staging() {
         let (fixture, directory) = private_fixture("thinws-linux-temp-conflict-");
         let existing = fixture.path().join("document");

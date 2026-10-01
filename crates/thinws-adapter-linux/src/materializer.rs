@@ -82,6 +82,9 @@ trait ExecutionHook {
 
     #[cfg(test)]
     fn before_rollback_final_root_check(&self) {}
+
+    #[cfg(test)]
+    fn before_final_target_snapshot(&self) {}
 }
 
 struct NoopHook;
@@ -148,6 +151,8 @@ fn materialize_with_hook(
         if source_after != source_snapshot {
             return Err(TreeFailure::source_changed());
         }
+        #[cfg(test)]
+        hook.before_final_target_snapshot();
         let target_after = snapshot(&paths.target).map_err(|error| {
             TreeFailure::with_source(
                 MaterializationFailureKind::TargetChanged,
@@ -1143,6 +1148,71 @@ mod tests {
             b"first file"
         );
         assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    }
+
+    struct ReplacePublishedWithIdenticalBytes {
+        source: PathBuf,
+        target: PathBuf,
+    }
+
+    impl ExecutionHook for ReplacePublishedWithIdenticalBytes {
+        fn before_final_target_snapshot(&self) {
+            let source_file = self.source.join("a");
+            let target_file = self.target.join("a");
+            let replacement = self.target.join("replacement");
+            let source_metadata = fs::metadata(&source_file).unwrap();
+            let target_root_mtime = fs::metadata(&self.target).unwrap().modified().unwrap();
+            let original_inode = fs::metadata(&target_file).unwrap().ino();
+
+            fs::copy(&source_file, &replacement).unwrap();
+            fs::set_permissions(&replacement, source_metadata.permissions()).unwrap();
+            File::options()
+                .write(true)
+                .open(&replacement)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(source_metadata.modified().unwrap()))
+                .unwrap();
+            fs::rename(&replacement, &target_file).unwrap();
+            File::open(&self.target)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(target_root_mtime))
+                .unwrap();
+            assert_ne!(fs::metadata(&target_file).unwrap().ino(), original_inode);
+
+            let source = rustix::fs::open(&self.source, DIRECTORY_FLAGS, Mode::empty()).unwrap();
+            let target = rustix::fs::open(&self.target, DIRECTORY_FLAGS, Mode::empty()).unwrap();
+            let source_manifest = snapshot(&source)
+                .unwrap_or_else(|_| panic!("source tree must remain inspectable"))
+                .manifest;
+            let target_manifest = snapshot(&target)
+                .unwrap_or_else(|_| panic!("replacement tree must remain inspectable"))
+                .manifest;
+            assert!(target_manifest.matches_promised(&source_manifest));
+        }
+    }
+
+    #[test]
+    fn final_manifest_match_does_not_hide_replaced_published_inode() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-identical-replacement-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplacePublishedWithIdenticalBytes {
+                    source: paths[0].clone(),
+                    target: paths[1].clone(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.receipt().failure_kind(),
+            Some(MaterializationFailureKind::ManifestMismatch)
+        );
+        assert_eq!(
+            failure.receipt().rollback().status(),
+            RollbackStatus::Incomplete
+        );
+        assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"first file");
     }
 
     #[test]

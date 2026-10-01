@@ -85,6 +85,9 @@ trait ExecutionHook {
 
     #[cfg(test)]
     fn before_final_target_snapshot(&self) {}
+
+    #[cfg(test)]
+    fn before_metadata_verification(&self) {}
 }
 
 struct NoopHook;
@@ -139,6 +142,7 @@ fn materialize_with_hook(
             &paths.target,
             node(&paths.target)?.identity(),
             source_snapshot.root,
+            hook,
         )?;
         let source_after = snapshot(&paths.source).map_err(|error| {
             TreeFailure::with_source(
@@ -483,7 +487,7 @@ fn materialize_directory(
                     context,
                     hook,
                 )?;
-                set_preserved_metadata(&target_child, identity, before)?;
+                set_preserved_metadata(&target_child, identity, before, hook)?;
                 if node(&source_child)? != before {
                     return Err(TreeFailure::source_changed());
                 }
@@ -528,7 +532,7 @@ fn materialize_directory(
                 )?;
                 let target_file = open_file(target, &name)?;
                 ensure_identity(node(&target_file)?, identity, NodeKind::File)?;
-                set_preserved_metadata(&target_file, identity, before)?;
+                set_preserved_metadata(&target_file, identity, before, hook)?;
                 if node(&source_file)? != before {
                     return Err(TreeFailure::source_changed());
                 }
@@ -683,6 +687,7 @@ fn set_preserved_metadata(
     target: &OwnedFd,
     identity: FileIdentity,
     source: Node,
+    _hook: &dyn ExecutionHook,
 ) -> Result<(), TreeFailure> {
     ensure_identity(node(target)?, identity, source.kind)?;
     let times = Timestamps {
@@ -699,6 +704,8 @@ fn set_preserved_metadata(
         .map_err(|error| TreeFailure::io("preserve Btrfs entry modification time", error))?;
     rustix::fs::fchmod(target, Mode::from_bits_retain(source.mode))
         .map_err(|error| TreeFailure::io("preserve Btrfs entry permissions", error))?;
+    #[cfg(test)]
+    _hook.before_metadata_verification();
     let after = node(target)?;
     ensure_identity(after, identity, source.kind)?;
     if after.mode != source.mode || after.mtime() != source.mtime() {
@@ -825,7 +832,7 @@ fn rollback_created(
             _hook.before_rollback_final_path_check();
             paths.revalidate_target_trash(request).is_ok()
         }
-        && set_preserved_metadata(&paths.target, baseline.identity(), baseline).is_ok()
+        && set_preserved_metadata(&paths.target, baseline.identity(), baseline, &NoopHook).is_ok()
         && {
             #[cfg(test)]
             _hook.before_rollback_final_root_check();
@@ -1213,6 +1220,80 @@ mod tests {
             RollbackStatus::Incomplete
         );
         assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"first file");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MetadataChange {
+        Mode,
+        Mtime,
+    }
+
+    struct ChangePublishedMetadataBeforeVerification {
+        target: PathBuf,
+        change: MetadataChange,
+        changed: std::sync::atomic::AtomicBool,
+    }
+
+    impl ExecutionHook for ChangePublishedMetadataBeforeVerification {
+        fn before_metadata_verification(&self) {
+            if self.changed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let file = self.target.join("a");
+            let before = fs::metadata(&file).unwrap();
+            match self.change {
+                MetadataChange::Mode => {
+                    fs::set_permissions(
+                        &file,
+                        fs::Permissions::from_mode(before.permissions().mode() ^ 0o100),
+                    )
+                    .unwrap();
+                    let after = fs::metadata(&file).unwrap();
+                    assert_ne!(after.permissions().mode(), before.permissions().mode());
+                    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+                }
+                MetadataChange::Mtime => {
+                    File::options()
+                        .write(true)
+                        .open(&file)
+                        .unwrap()
+                        .set_times(
+                            FileTimes::new()
+                                .set_modified(before.modified().unwrap() + Duration::from_secs(1)),
+                        )
+                        .unwrap();
+                    let after = fs::metadata(&file).unwrap();
+                    assert_eq!(after.permissions().mode(), before.permissions().mode());
+                    assert_ne!(after.modified().unwrap(), before.modified().unwrap());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_sided_published_metadata_change_rejects_success() {
+        for change in [MetadataChange::Mode, MetadataChange::Mtime] {
+            let (_fixture, paths, request, plan) = fixture("thinws-btrfs-metadata-race-");
+            let failure = BtrfsReflinkMaterializer::new()
+                .materialize_with_hook(
+                    &request,
+                    &plan,
+                    &ChangePublishedMetadataBeforeVerification {
+                        target: paths[1].clone(),
+                        change,
+                        changed: std::sync::atomic::AtomicBool::new(false),
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(
+                failure.receipt().failure_kind(),
+                Some(MaterializationFailureKind::ManifestMismatch),
+                "change: {change:?}"
+            );
+            assert_eq!(failure.receipt().clone_calls_succeeded(), 1);
+            assert_eq!(failure.receipt().created().len(), 1);
+            assert!(failure.receipt().target_manifest_digest().is_none());
+        }
     }
 
     #[test]

@@ -304,6 +304,13 @@ pub(super) fn open_file(parent: &OwnedFd, name: &OsStr) -> Result<OwnedFd, TreeF
 }
 
 pub(super) fn snapshot(root: &OwnedFd) -> Result<TreeSnapshot, TreeFailure> {
+    snapshot_with_hook(root, &mut |_| {})
+}
+
+fn snapshot_with_hook(
+    root: &OwnedFd,
+    before_directory_open: &mut impl FnMut(&[u8]),
+) -> Result<TreeSnapshot, TreeFailure> {
     let before = node(root)?;
     if before.kind != NodeKind::Directory {
         return Err(TreeFailure::new(
@@ -325,18 +332,19 @@ pub(super) fn snapshot(root: &OwnedFd) -> Result<TreeSnapshot, TreeFailure> {
             physical_bytes: 0,
         },
     };
-    snapshot_directory(root, &[], root_mount, &mut snapshot)?;
+    snapshot_directory_with_hook(root, &[], root_mount, &mut snapshot, before_directory_open)?;
     if node(root)? != before {
         return Err(TreeFailure::source_changed());
     }
     Ok(snapshot)
 }
 
-fn snapshot_directory(
+fn snapshot_directory_with_hook(
     directory: &OwnedFd,
     prefix: &[u8],
     root_mount: u64,
     snapshot: &mut TreeSnapshot,
+    before_directory_open: &mut impl FnMut(&[u8]),
 ) -> Result<(), TreeFailure> {
     for name in directory_names(directory)? {
         let name_bytes = name.as_bytes();
@@ -360,11 +368,18 @@ fn snapshot_directory(
         };
         let (mode, mtime, length, digest) = match before.kind {
             NodeKind::Directory => {
+                before_directory_open(&path);
                 let child = open_directory(directory, &name)?;
                 if node(&child)? != before || mount_id(&child)? != root_mount {
                     return Err(TreeFailure::source_changed());
                 }
-                snapshot_directory(&child, &path, root_mount, snapshot)?;
+                snapshot_directory_with_hook(
+                    &child,
+                    &path,
+                    root_mount,
+                    snapshot,
+                    before_directory_open,
+                )?;
                 if node(&child)? != before {
                     return Err(TreeFailure::source_changed());
                 }
@@ -463,6 +478,7 @@ fn update_time(hasher: &mut blake3::Hasher, (seconds, nanoseconds): (i64, i64)) 
 mod tests {
     use std::env;
     use std::fs;
+    use std::os::unix::net::UnixListener;
 
     use super::*;
 
@@ -608,6 +624,33 @@ mod tests {
         assert!(!mount_id_available(other_bit));
         assert!(mount_id_available(mount_bit));
         assert!(mount_id_available(mount_bit | other_bit));
+    }
+
+    #[test]
+    fn source_snapshot_refuses_replaced_child_before_scanning_it() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-tree-child-race-")
+            .tempdir_in(root)
+            .unwrap();
+        let child = fixture.path().join("child");
+        let displaced = fixture.path().join("displaced");
+        fs::create_dir(&child).unwrap();
+        let source = rustix::fs::open(fixture.path(), DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let mut socket = None;
+
+        let failure = snapshot_with_hook(&source, &mut |path| {
+            if path == b"child" {
+                fs::rename(&child, &displaced).unwrap();
+                fs::create_dir(&child).unwrap();
+                socket = Some(UnixListener::bind(child.join("socket")).unwrap());
+            }
+        })
+        .unwrap_err();
+        assert_eq!(failure.kind, MaterializationFailureKind::SourceChanged);
+        assert!(socket.is_some());
+        assert!(displaced.is_dir());
     }
 
     #[test]

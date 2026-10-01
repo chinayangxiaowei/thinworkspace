@@ -993,6 +993,14 @@ fn birthtime_is_usable(mask: u32, seconds: i64, nanoseconds: u32) -> bool {
 }
 
 fn create_child(parent: &TargetDirectory, name: &OsStr) -> Result<TargetDirectory, PortError> {
+    create_child_with_hook(parent, name, || {})
+}
+
+fn create_child_with_hook(
+    parent: &TargetDirectory,
+    name: &OsStr,
+    before_publish: impl FnOnce(),
+) -> Result<TargetDirectory, PortError> {
     parent.revalidate()?;
     require_absent_child(parent, name)?;
     for _ in 0..32 {
@@ -1010,6 +1018,7 @@ fn create_child(parent: &TargetDirectory, name: &OsStr) -> Result<TargetDirector
         let mut staged = open_target_directory(&parent.path.join(&temporary_name))?;
         require_private_operation_directory(&staged)?;
         parent.revalidate()?;
+        before_publish();
         match rustix::fs::renameat_with(
             &parent.fd,
             temporary_name.as_str(),
@@ -1157,6 +1166,7 @@ fn io_error(
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
@@ -1553,6 +1563,35 @@ mod tests {
             b"leave in place"
         );
         assert!(displaced.is_dir());
+    }
+
+    #[test]
+    fn child_publish_collision_preserves_the_other_directory_and_cleans_our_stage() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-child-publish-collision-")
+            .tempdir_in(root)
+            .unwrap();
+        let parent = open_target_directory(fixture.path()).unwrap();
+        let target = fixture.path().join("copy");
+
+        let error = create_child_with_hook(&parent, OsStr::new("copy"), || {
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("keep"), b"other process").unwrap();
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), PortErrorKind::NotEmpty);
+        assert_eq!(
+            std::fs::read(target.join("keep")).unwrap(),
+            b"other process"
+        );
+        let names: Vec<_> = std::fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsString::from("copy")]);
     }
 
     #[test]

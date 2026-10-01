@@ -66,6 +66,12 @@ impl WorkspaceMaterializer for BtrfsReflinkMaterializer {
 }
 
 trait ExecutionHook {
+    #[cfg(test)]
+    fn before_staged_create(&self, _name: &OsStr) {}
+
+    #[cfg(test)]
+    fn before_staged_prepare(&self, _name: &OsStr) {}
+
     fn before_staged_publish(&self, _relative: &[u8]) -> Result<(), TreeFailure> {
         Ok(())
     }
@@ -604,6 +610,8 @@ fn stage_and_publish(
             ".thinws-materialize-{}-{sequence}",
             std::process::id()
         ));
+        #[cfg(test)]
+        hook.before_staged_create(&name);
         match create(staging, &name) {
             Ok(()) => {
                 selected = Some(name);
@@ -635,6 +643,8 @@ fn stage_and_publish(
         .as_mut()
         .expect("staging just recorded")
         .identity = Some(identity);
+    #[cfg(test)]
+    hook.before_staged_prepare(&staged_name);
     let clone_calls = prepare(staging, &staged_name)?;
     context.clone_calls = context.clone_calls.saturating_add(clone_calls);
     ensure_identity(node_at(staging, &staged_name)?, identity, kind)?;
@@ -1602,6 +1612,80 @@ mod tests {
         assert!(receipt.unconfirmed_staging().is_none());
         assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
         assert!(fs::read_dir(&paths[2]).unwrap().next().is_none());
+    }
+
+    struct OccupyFirstStagingName {
+        staging: PathBuf,
+        occupied: std::sync::atomic::AtomicBool,
+    }
+
+    impl ExecutionHook for OccupyFirstStagingName {
+        fn before_staged_create(&self, name: &OsStr) {
+            if !self
+                .occupied
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::write(self.staging.join(name), b"foreign staged file").unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn occupied_staging_name_is_retried_without_changing_the_foreign_file() {
+        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-stage-occupied-");
+        let receipt = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &OccupyFirstStagingName {
+                    staging: paths[2].clone(),
+                    occupied: std::sync::atomic::AtomicBool::new(false),
+                },
+            )
+            .unwrap();
+        assert_eq!(receipt.clone_calls_succeeded(), 2);
+        let remaining: Vec<_> = fs::read_dir(&paths[2])
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            fs::read(remaining[0].path()).unwrap(),
+            b"foreign staged file"
+        );
+        assert_eq!(fs::read(paths[1].join("a")).unwrap(), b"first file");
+    }
+
+    struct ReplaceStagedWithExternalSymlinkBeforeClone {
+        staging: PathBuf,
+        external: PathBuf,
+    }
+
+    impl ExecutionHook for ReplaceStagedWithExternalSymlinkBeforeClone {
+        fn before_staged_prepare(&self, name: &OsStr) {
+            fs::rename(self.staging.join(name), self.staging.join("displaced")).unwrap();
+            std::os::unix::fs::symlink(&self.external, self.staging.join(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn staged_symlink_before_clone_cannot_modify_an_external_file() {
+        let (fixture, paths, request, plan) = fixture("thinws-btrfs-stage-symlink-");
+        let external = fixture.path().join("external");
+        fs::write(&external, b"").unwrap();
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplaceStagedWithExternalSymlinkBeforeClone {
+                    staging: paths[2].clone(),
+                    external: external.clone(),
+                },
+            )
+            .unwrap_err();
+        assert!(failure.receipt().unconfirmed_staging().is_some());
+        assert!(fs::read(&external).unwrap().is_empty());
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
     }
 
     struct OccupyTargetBeforePublish {

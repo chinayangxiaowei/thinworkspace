@@ -1082,7 +1082,17 @@ fn require_btrfs_mount(
     expected_volume: VolumeId,
     expected_mount: u64,
 ) -> Result<(), PortError> {
+    require_btrfs_mount_with_hook(directory, expected_volume, expected_mount, || {})
+}
+
+fn require_btrfs_mount_with_hook(
+    directory: &TargetDirectory,
+    expected_volume: VolumeId,
+    expected_mount: u64,
+    before_probe: impl FnOnce(),
+) -> Result<(), PortError> {
     directory.revalidate()?;
+    before_probe();
     let report = LinuxPlatformProbe.inspect_path(&absolute(&directory.path)?)?;
     if report.resolution() != PathResolution::ExistingDirectory
         || report.ancestry().last().map(|entry| entry.identity()) != Some(directory.file_identity())
@@ -1463,6 +1473,35 @@ mod tests {
                 .kind(),
             PortErrorKind::InvalidLayout
         );
+    }
+
+    #[test]
+    fn btrfs_mount_check_rejects_a_path_replaced_before_probe() {
+        let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-btrfs-mount-race-")
+            .tempdir_in(root)
+            .unwrap();
+        let target = fixture.path().join("target");
+        let displaced = fixture.path().join("displaced");
+        std::fs::create_dir(&target).unwrap();
+        let held = open_target_directory(&target).unwrap();
+        let initial_report = LinuxPlatformProbe
+            .inspect_path(&absolute(&target).unwrap())
+            .unwrap();
+        let (volume, mount) = btrfs_identity(&initial_report).unwrap();
+
+        let error = require_btrfs_mount_with_hook(&held, volume, mount, || {
+            std::fs::rename(&target, &displaced).unwrap();
+            std::fs::create_dir(&target).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+        let replacement = open_target_directory(&target).unwrap();
+        assert_eq!(replacement.device, held.device);
+        assert_ne!(replacement.file_identity(), held.file_identity());
+        assert!(displaced.is_dir());
     }
 
     #[test]

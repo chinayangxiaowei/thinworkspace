@@ -166,15 +166,16 @@ impl LinuxHostAdapter {
         workspace_id: WorkspaceId,
         target: &AbsolutePath,
     ) -> Result<LinuxPreparedWorkspace, PortError> {
-        self.prepare_workspace_with_hook(lock, layout, workspace_id, target, || {})
+        self.prepare_workspace_with_hooks(lock, layout, workspace_id, target, || {}, || {})
     }
 
-    fn prepare_workspace_with_hook(
+    fn prepare_workspace_with_hooks(
         &self,
         lock: &LinuxLockGuard,
         layout: &LinuxDataRootLayout,
         workspace_id: WorkspaceId,
         target: &AbsolutePath,
+        after_parent_open: impl FnOnce(),
         before_ownership_publish: impl FnOnce(),
     ) -> Result<LinuxPreparedWorkspace, PortError> {
         validate_data_root_lock(self, lock, layout)?;
@@ -187,6 +188,7 @@ impl LinuxHostAdapter {
             PortError::new(PortErrorKind::InvalidData, "target has no final component")
         })?;
         let parent = open_target_directory(parent_path)?;
+        after_parent_open();
         let parent_report = LinuxPlatformProbe.inspect_path(&absolute(parent_path)?)?;
         if parent_report.resolution() != PathResolution::ExistingDirectory
             || parent_report
@@ -1629,6 +1631,83 @@ mod tests {
     }
 
     #[test]
+    fn changed_target_parent_is_layout_error_before_writability_classification() {
+        let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let control_fixture = tempfile::Builder::new()
+            .prefix("thinws-parent-probe-control-")
+            .tempdir_in(control_root)
+            .unwrap();
+        let target_fixture = tempfile::Builder::new()
+            .prefix("thinws-parent-probe-target-")
+            .tempdir_in(target_root)
+            .unwrap();
+        let control = control_fixture.path().join("control");
+        for path in [&control, &control.join("metadata"), &control.join("logs")] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let database = control.join("metadata/state.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let control_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&control).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let identity = InstallationIdentity::new(
+            "01890a5d-ac96-774b-bd5b-55c7b8d09f42"
+                .parse::<InstanceId>()
+                .unwrap(),
+            absolute(&control).unwrap(),
+            control_volume,
+        );
+        let layout = adapter.validate_layout(&identity).unwrap();
+        let lock = adapter
+            .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+            .unwrap();
+        let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f43"
+            .parse::<WorkspaceId>()
+            .unwrap();
+        let parent = target_fixture.path().join("parent");
+        let displaced = target_fixture.path().join("displaced-parent");
+        let target = parent.join("copy");
+        std::fs::create_dir(&parent).unwrap();
+
+        let result = adapter.prepare_workspace_with_hooks(
+            &lock,
+            &layout,
+            workspace_id,
+            &absolute(&target).unwrap(),
+            || {
+                std::fs::rename(&parent, &displaced).unwrap();
+                std::fs::create_dir(&parent).unwrap();
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+            },
+            || panic!("parent change must fail before ownership publication"),
+        );
+        std::fs::remove_dir(&parent).unwrap();
+        std::fs::rename(&displaced, &parent).unwrap();
+        let error = match result {
+            Ok(_) => panic!("changed target parent must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+        assert!(!target.exists());
+        assert!(
+            !control
+                .join(format!("metadata/ownership-{workspace_id}.toml"))
+                .exists()
+        );
+    }
+
+    #[test]
     fn ownership_publish_collision_reports_workspace_id_conflict() {
         let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
             .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
@@ -1677,11 +1756,12 @@ mod tests {
         let proof = control.join(format!("metadata/ownership-{workspace_id}.toml"));
         let target = target_fixture.path().join("copy");
 
-        let error = match adapter.prepare_workspace_with_hook(
+        let error = match adapter.prepare_workspace_with_hooks(
             &lock,
             &layout,
             workspace_id,
             &absolute(&target).unwrap(),
+            || {},
             || std::fs::write(&proof, b"other process").unwrap(),
         ) {
             Ok(_) => panic!("another owner's proof must not be replaced"),

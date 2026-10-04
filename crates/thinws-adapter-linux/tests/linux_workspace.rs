@@ -244,6 +244,83 @@ fn ext4_target_is_rejected_before_creating_any_workspace_directories() {
 }
 
 #[test]
+#[ignore = "requires a real Btrfs bind mount with both source and child test roots"]
+fn bind_alias_inside_control_root_is_rejected_before_target_creation() {
+    let bind_source = env::var_os("THINWS_LINUX_BIND_MOUNT_SOURCE")
+        .expect("set THINWS_LINUX_BIND_MOUNT_SOURCE to the bind source test root");
+    let bind_child = env::var_os("THINWS_LINUX_BIND_MOUNT_CHILD")
+        .expect("set THINWS_LINUX_BIND_MOUNT_CHILD to its other mounted path");
+    let control_fixture = tempfile::Builder::new()
+        .prefix("thinws-control-bind-alias-")
+        .tempdir_in(bind_source)
+        .unwrap();
+    let control = control_fixture.path().join("control");
+    for path in [&control, &control.join("metadata"), &control.join("logs")] {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let database = control.join("metadata/state.db");
+    std::fs::write(&database, b"").unwrap();
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let alias_control = Path::new(&bind_child)
+        .join(control_fixture.path().file_name().unwrap())
+        .join("control");
+    assert_eq!(
+        std::fs::metadata(&control).unwrap().ino(),
+        std::fs::metadata(&alias_control).unwrap().ino()
+    );
+    let target = alias_control.join("working-copy");
+    assert!(!target.starts_with(&control));
+    assert!(!control.starts_with(&target));
+
+    let adapter = LinuxHostAdapter::new(&control).unwrap();
+    let control_volume = LinuxPlatformProbe
+        .inspect_path(&absolute(&control))
+        .unwrap()
+        .filesystem()
+        .volume_id()
+        .known()
+        .copied()
+        .unwrap();
+    let identity = InstallationIdentity::new(
+        "01890a5d-ac96-774b-bd5b-55c7b8d09f33"
+            .parse::<InstanceId>()
+            .unwrap(),
+        absolute(&control),
+        control_volume,
+    );
+    let layout = adapter.validate_layout(&identity).unwrap();
+    let lock = adapter
+        .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+        .unwrap();
+    let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f34"
+        .parse::<WorkspaceId>()
+        .unwrap();
+    assert_eq!(
+        adapter
+            .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target))
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert!(!target.exists());
+    let ancestor = control_fixture.path();
+    assert_eq!(
+        adapter
+            .prepare_workspace(&lock, &layout, workspace_id, &absolute(ancestor))
+            .unwrap_err()
+            .kind(),
+        PortErrorKind::InvalidLayout
+    );
+    assert!(
+        !control
+            .join(format!("metadata/ownership-{workspace_id}.toml"))
+            .exists()
+    );
+}
+
+#[test]
 fn changed_durable_ownership_invalidates_the_prepared_workspace() {
     let (control, target_fixture, adapter, identity) = fixture();
     let layout = adapter.validate_layout(&identity).unwrap();

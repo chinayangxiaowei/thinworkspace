@@ -30,6 +30,10 @@ use crate::tree::{
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn staged_file_write_flags() -> OFlags {
+    OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
 /// Real `FICLONE` materializer for one proven same-mount Btrfs path set.
 #[derive(Clone, Copy, Default)]
 pub struct BtrfsReflinkMaterializer;
@@ -518,11 +522,7 @@ fn materialize_directory(
                         rustix::fs::openat(
                             parent,
                             stage_name,
-                            OFlags::CREATE
-                                | OFlags::EXCL
-                                | OFlags::RDWR
-                                | OFlags::NOFOLLOW
-                                | OFlags::CLOEXEC,
+                            OFlags::CREATE | OFlags::EXCL | staged_file_write_flags(),
                             Mode::from_bits_retain(0o600),
                         )
                         .map(|_| ())
@@ -531,7 +531,7 @@ fn materialize_directory(
                         let destination = rustix::fs::openat(
                             parent,
                             stage_name,
-                            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                            staged_file_write_flags(),
                             Mode::empty(),
                         )
                         .map_err(|error| TreeFailure::io("open staged Btrfs file", error))?;
@@ -1073,6 +1073,15 @@ mod tests {
     fn elapsed_millis_reports_elapsed_time() {
         let started = Instant::now() - Duration::from_millis(10);
         assert!(elapsed_millis(started) >= 10);
+    }
+
+    #[test]
+    fn staged_file_write_flags_retain_every_required_bit() {
+        let flags = staged_file_write_flags();
+        for required in [OFlags::RDWR, OFlags::NOFOLLOW, OFlags::CLOEXEC] {
+            assert!(flags.contains(required));
+        }
+        assert!(!flags.intersects(OFlags::CREATE | OFlags::EXCL));
     }
 
     #[test]

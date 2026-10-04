@@ -2137,6 +2137,56 @@ mod tests {
         assert_eq!(fs::read_dir(&paths[3]).unwrap().count(), 1);
     }
 
+    struct ReplaceTrashAndChangeTargetMode {
+        target: PathBuf,
+        trash: PathBuf,
+    }
+
+    impl ExecutionHook for ReplaceTrashAndChangeTargetMode {
+        fn after_published(&self, _relative: &[u8], _count: usize) -> Result<(), TreeFailure> {
+            fs::set_permissions(&self.target, fs::Permissions::from_mode(0o500))
+                .map_err(|error| TreeFailure::io("change target mode for test", error))?;
+            fs::rename(&self.trash, self.trash.with_file_name("displaced-trash"))
+                .map_err(|error| TreeFailure::io("displace trash for test", error))?;
+            fs::create_dir(&self.trash)
+                .map_err(|error| TreeFailure::io("replace trash for test", error))?;
+            Err(injected_failure())
+        }
+    }
+
+    #[test]
+    fn rollback_does_not_modify_target_when_bound_trash_was_replaced() {
+        let (fixture, paths, request, plan) = fixture("thinws-btrfs-trash-replacement-");
+        let failure = BtrfsReflinkMaterializer::new()
+            .materialize_with_hook(
+                &request,
+                &plan,
+                &ReplaceTrashAndChangeTargetMode {
+                    target: paths[1].clone(),
+                    trash: paths[3].clone(),
+                },
+            )
+            .unwrap_err();
+        let rollback = failure.receipt().rollback();
+        let observed_mode = fs::metadata(&paths[1]).unwrap().permissions().mode() & 0o777;
+        let target_contents = fs::read(paths[1].join("a")).unwrap();
+        let replacement_trash_empty = fs::read_dir(&paths[3]).unwrap().next().is_none();
+        let displaced_trash_empty = fs::read_dir(paths[3].with_file_name("displaced-trash"))
+            .unwrap()
+            .next()
+            .is_none();
+        fs::set_permissions(&paths[1], fs::Permissions::from_mode(0o700)).unwrap();
+        fixture.close().unwrap();
+
+        assert_eq!(rollback.status(), RollbackStatus::Incomplete);
+        assert!(rollback.removed().is_empty());
+        assert_eq!(rollback.remaining().len(), 1);
+        assert_eq!(observed_mode, 0o500);
+        assert_eq!(target_contents, b"first file");
+        assert!(replacement_trash_empty);
+        assert!(displaced_trash_empty);
+    }
+
     struct ReplaceTargetRoot {
         target: PathBuf,
     }

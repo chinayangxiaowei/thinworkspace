@@ -8,6 +8,8 @@
 # https://github.com/chinayangxiaowei/thinworkspace/issues/10#issuecomment-5656789234
 # P1-15 proof, reviewer decisions, and invalidation conditions are in:
 # docs/development/planning/ThinWorkspace_Phase1实施计划_v1.0.md
+# Linux/Btrfs exact adjudications, proof boundaries, and invalidation triggers are in:
+# docs/development/implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md
 exclude_re = [
     '^experiments/p0/probe/src/lib\.rs:1410:57: replace \| with \^ in decode_hex$',
     '^experiments/p0/probe/src/ffi\.rs:61:(32|52): replace \| with \^ in open_root_directory$',
@@ -55,4 +57,25 @@ exclude_re = [
     # Positive internal buffer size changes chunking, not the Phase 1 result contract.
     '^crates/thinws-adapter-macos/src/materializer\.rs:899:32: replace \* with \+ in digest_file$',
     '^crates/thinws-adapter-macos/src/materializer\.rs:1134:32: replace \* with \+ in copy_file_bytes$',
+    # Linux fuzz-only bridges/oracles are absent from ordinary cargo-mutants builds;
+    # their dedicated libFuzzer campaigns remain mandatory.
+    '^crates/thinws-adapter-linux/src/lib\.rs:31:5: replace fuzz_workspace_ownership_document with \(\)$',
+    '^crates/thinws-adapter-linux/src/mountinfo\.rs:58:5: replace fuzz_mountinfo with \(\)$',
+    '^crates/thinws-adapter-linux/src/mountinfo\.rs:65:37: replace \+ with (-|\*) in fuzz_mountinfo$',
+    '^crates/thinws-adapter-linux/src/mountinfo\.rs:65:45: replace % with (/|\+) in fuzz_mountinfo$',
+    # The paired Linux access/open flags, UUID mask/version bits, and hex
+    # nibbles are disjoint at these exact sites on pinned AArch64 Linux deps.
+    '^crates/thinws-adapter-linux/src/probe\.rs:(229:25|236:30|273:34|274:34): replace \| with \^ in (directory_access|ext4_volume_id)$',
+    '^crates/thinws-adapter-linux/src/control\.rs:187:(20|38|57): replace \| with \^ in private_document_open_flags$',
+    '^crates/thinws-adapter-linux/src/document\.rs:355:51: replace \| with \^ in decode_hex$',
+    '^crates/thinws-adapter-linux/src/layout\.rs:209:(20|38|57): replace \| with \^ in database_open_flags$',
+    '^crates/thinws-adapter-linux/src/publication\.rs:(438|439|440|441|442):21: replace \| with \^ in PrivateTemp::create$',
+    '^crates/thinws-adapter-linux/src/materializer\.rs:(34:(18|37)|525:(44|59)): replace \| with \^ in (staged_file_write_flags|materialize_directory)$',
+    '^crates/thinws-adapter-linux/src/operation_log\.rs:136:(26|43): replace \| with \^ in open_or_create_log$',
+    # Only the positive digest read-buffer length changes; Phase 1 callers
+    # require a stable source and compare byte length plus BLAKE3 digest.
+    '^crates/thinws-adapter-linux/src/tree\.rs:446:32: replace \* with \+ in digest_file$',
+    # This inner guard stats the same held directory FD used for its baseline;
+    # path substitution is checked separately by revalidate_target_trash.
+    '^crates/thinws-adapter-linux/src/materializer\.rs:793:52: replace \|\| with && in rollback_created$',
 ]

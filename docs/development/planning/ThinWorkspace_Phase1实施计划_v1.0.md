@@ -856,7 +856,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：维护者已将 Linux 资格基线从原计划的 Debian 11.7 改为现有 VM 实测的 Debian 12 bookworm/aarch64、`5.10.0-24-arm64` 内核；VM 名称不作为版本证据。Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。当前测试候选 `a1a8e90` 的静态 musl Linux E2E 在 Docker 真实 Btrfs 和该 Debian 12 VM 均为 10/10，其中一个用例启动实际 `thinws` 二进制覆盖 init、doctor、create/dry-run、list、path、status、remove 基本命令链，其余九个为 CLI 库入口与失败边界测试；不把 10 项全称为进程级黑盒。L01–L05 仍为 In Progress：剩余变异处置、规定审核及人工验收尚未闭合；此前共用构建缓存的定向变异计数不得用于放行。逐次命令、计数、失败与复测证据统一保存在[Linux/Btrfs 适配实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不再复制测试日志。
+当前证据：维护者已将 Linux 资格基线从原计划的 Debian 11.7 改为现有 VM 实测的 Debian 12 bookworm/aarch64、`5.10.0-24-arm64` 内核；VM 名称不作为版本证据。Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。当前测试候选 `a1a8e90` 的静态 musl Linux E2E 在 Docker 真实 Btrfs 和该 Debian 12 VM 均为 10/10，其中一个用例启动实际 `thinws` 二进制覆盖 init、doctor、create/dry-run、list、path、status、remove 基本命令链，其余九个为 CLI 库入口与失败边界测试；不把 10 项全称为进程级黑盒。**36 项旧 Linux Adapter 变异账本审定：Done**；当前 Adapter 包的变异结果亦已逐项对账，证据见[实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)。这不覆盖 Core、Application、SQLite、CLI 等共享层的适用门禁。L01–L05 仍为 In Progress：整体终审发现 Linux 末级符号链接目标的公开错误码与手册不一致，共享层变更范围的有效变异证据也未对齐；此前共用构建缓存的定向变异计数不得用于放行，人工阶段验收亦未进行。逐次命令、计数、失败与复测证据统一保存在实施记录，本计划不再复制测试日志。
 
 ---
 

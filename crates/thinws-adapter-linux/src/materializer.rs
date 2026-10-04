@@ -1927,6 +1927,7 @@ mod tests {
                 identity: Some(file.identity()),
             },
         ];
+        assert!(rollback_set_matches(&target, &created));
         let (parent, name) = open_rollback_parent(&target, &created[2], &created)
             .unwrap_or_else(|_| panic!("matching rollback parent must resolve"));
         assert_eq!(name.as_bytes(), b"file");

@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -31,6 +31,69 @@ fn execute_json(control: &Path, arguments: Vec<OsString>) -> (i32, Value) {
     let (status, stdout, stderr) = execute(control, arguments);
     assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
     (status, serde_json::from_slice(&stdout).unwrap())
+}
+
+#[test]
+fn occupied_target_symlink_returns_target_exists_without_following_it() {
+    let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+        .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test root");
+    let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+        .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test root");
+    let control_fixture = Builder::new()
+        .prefix("thinws-cli-linux-symlink-control-")
+        .tempdir_in(ext4)
+        .unwrap();
+    let data_fixture = Builder::new()
+        .prefix("thinws-cli-linux-symlink-data-")
+        .tempdir_in(btrfs)
+        .unwrap();
+    let control = control_fixture.path().join(".thinws");
+    let source = data_fixture.path().join("source");
+    let target = data_fixture.path().join("existing-link");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("note.txt"), b"keep source").unwrap();
+    symlink("source", &target).unwrap();
+
+    let (status, initialized) = execute_json(
+        &control,
+        vec!["thinws".into(), "--json".into(), "init".into()],
+    );
+    assert_eq!(status, 0, "{initialized}");
+
+    for dry_run in [true, false] {
+        let mut args = vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "create".into(),
+            "--source".into(),
+            source.as_os_str().to_owned(),
+            "--target".into(),
+            target.as_os_str().to_owned(),
+            "--name".into(),
+            "occupied-link".into(),
+        ];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+        let (status, error) = execute_json(&control, args);
+        assert_eq!(status, 43, "{error}");
+        assert_eq!(error["error"]["code"], "E_TARGET_EXISTS");
+        assert_eq!(fs::read_link(&target).unwrap(), Path::new("source"));
+        assert_eq!(fs::read(source.join("note.txt")).unwrap(), b"keep source");
+    }
+
+    let (status, listed) = execute_json(
+        &control,
+        vec![
+            "thinws".into(),
+            "--json".into(),
+            "workspace".into(),
+            "list".into(),
+        ],
+    );
+    assert_eq!(status, 0, "{listed}");
+    assert!(listed["data"]["workspaces"].as_array().unwrap().is_empty());
 }
 
 #[test]

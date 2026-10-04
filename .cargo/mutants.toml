@@ -65,7 +65,7 @@ exclude_re = [
     '^crates/thinws-adapter-linux/src/mountinfo\.rs:65:45: replace % with (/|\+) in fuzz_mountinfo$',
     # The paired Linux access/open flags, UUID mask/version bits, and hex
     # nibbles are disjoint at these exact sites on pinned AArch64 Linux deps.
-    '^crates/thinws-adapter-linux/src/probe\.rs:(229:25|236:30|273:34|274:34): replace \| with \^ in (directory_access|ext4_volume_id)$',
+    '^crates/thinws-adapter-linux/src/probe\.rs:(236:25|243:30|280:34|281:34): replace \| with \^ in (directory_access|ext4_volume_id)$',
     '^crates/thinws-adapter-linux/src/control\.rs:187:(20|38|57): replace \| with \^ in private_document_open_flags$',
     '^crates/thinws-adapter-linux/src/document\.rs:355:51: replace \| with \^ in decode_hex$',
     '^crates/thinws-adapter-linux/src/layout\.rs:209:(20|38|57): replace \| with \^ in database_open_flags$',

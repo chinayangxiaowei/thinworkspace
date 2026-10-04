@@ -41,23 +41,23 @@ impl PlatformProbe for LinuxPlatformProbe {
     }
 
     fn inspect_path(&self, path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> {
-        inspect_path(path)
+        inspect_path(path, false)
     }
 
     fn inspect_materialization_paths(
         &self,
         request: &MaterializationPathProbeRequest,
     ) -> Result<MaterializationPathReport, PortError> {
-        let source = inspect_path(request.source()).map_err(|error| {
+        let source = inspect_path(request.source(), false).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::Source)
         })?;
-        let target = inspect_path(request.target_root()).map_err(|error| {
+        let target = inspect_path(request.target_root(), true).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::TargetRoot)
         })?;
-        let staging = inspect_path(request.staging()).map_err(|error| {
+        let staging = inspect_path(request.staging(), false).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::Staging)
         })?;
-        let trash = inspect_path(request.trash()).map_err(|error| {
+        let trash = inspect_path(request.trash(), false).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::Trash)
         })?;
         let (cow_state, cow_reasons) = combined_support(&source, &target, &staging, &trash);
@@ -75,7 +75,10 @@ impl PlatformProbe for LinuxPlatformProbe {
     }
 }
 
-fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> {
+fn inspect_path(
+    path: &AbsolutePath,
+    occupied_target_leaf: bool,
+) -> Result<PathCapabilityReport, PortError> {
     let mut fd = rustix::fs::open("/", DIRECTORY_FLAGS, Mode::empty())
         .map_err(|error| port_io("open filesystem root", error))?;
     let root = AbsolutePath::try_from_bytes(b"/".to_vec())
@@ -132,7 +135,11 @@ fn inspect_path(path: &AbsolutePath) -> Result<PathCapabilityReport, PortError> 
                     .map_err(|error| port_io("inspect occupied path leaf", error))?;
                 if leaf.st_mode & libc::S_IFMT == libc::S_IFLNK {
                     return Err(PortError::new(
-                        PortErrorKind::InvalidLayout,
+                        if occupied_target_leaf {
+                            PortErrorKind::NotEmpty
+                        } else {
+                            PortErrorKind::InvalidLayout
+                        },
                         "path leaf is a symbolic link",
                     ));
                 }
@@ -529,7 +536,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
 
@@ -756,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn occupied_leaf_and_intermediate_file_have_distinct_failures() {
+    fn occupied_target_leaf_and_intermediate_links_have_distinct_failures() {
         let root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
             .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to the dedicated Btrfs mount");
         let fixture = tempfile::Builder::new()
@@ -778,6 +785,26 @@ mod tests {
         assert_eq!(
             LinuxPlatformProbe
                 .inspect_path(&absolute(&occupied.join("child")))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        let link = fixture.path().join("occupied-link");
+        symlink("occupied", &link).unwrap();
+        assert_eq!(
+            inspect_path(&absolute(&link), true).unwrap_err().kind(),
+            PortErrorKind::NotEmpty
+        );
+        assert_eq!(
+            LinuxPlatformProbe
+                .inspect_path(&absolute(&link))
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            LinuxPlatformProbe
+                .inspect_path(&absolute(&link.join("child")))
                 .unwrap_err()
                 .kind(),
             PortErrorKind::InvalidLayout

@@ -1087,6 +1087,44 @@ mod portable_path_tests {
             );
         }
     }
+
+    #[test]
+    fn plan_error_classes_keep_distinct_public_codes() {
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::CandidateUnsupported)
+                .diagnostic()
+                .code(),
+            ErrorCode::CowUnavailable
+        );
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::FullCopyUnavailable)
+                .diagnostic()
+                .code(),
+            ErrorCode::CapabilityUnavailable
+        );
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::UnknownVolume)
+                .diagnostic()
+                .code(),
+            ErrorCode::CapabilityUnavailable
+        );
+        assert_eq!(
+            map_plan_error(MaterializationPlanError::UnknownMount)
+                .diagnostic()
+                .code(),
+            ErrorCode::CapabilityUnavailable
+        );
+        for cause in [
+            MaterializationPlanError::WrongFilesystem,
+            MaterializationPlanError::DifferentVolume,
+            MaterializationPlanError::DifferentMount,
+        ] {
+            assert_eq!(
+                map_plan_error(cause).diagnostic().code(),
+                ErrorCode::TargetLayout
+            );
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1365,43 +1403,5 @@ mod tests {
             preview.fallback_reason(),
             Some(FallbackReason::CloneUnsupportedAtPreflight)
         );
-    }
-
-    #[test]
-    fn plan_error_classes_keep_distinct_public_codes() {
-        assert_eq!(
-            map_plan_error(MaterializationPlanError::CandidateUnsupported)
-                .diagnostic()
-                .code(),
-            ErrorCode::CowUnavailable
-        );
-        assert_eq!(
-            map_plan_error(MaterializationPlanError::FullCopyUnavailable)
-                .diagnostic()
-                .code(),
-            ErrorCode::CapabilityUnavailable
-        );
-        assert_eq!(
-            map_plan_error(MaterializationPlanError::UnknownVolume)
-                .diagnostic()
-                .code(),
-            ErrorCode::CapabilityUnavailable
-        );
-        assert_eq!(
-            map_plan_error(MaterializationPlanError::UnknownMount)
-                .diagnostic()
-                .code(),
-            ErrorCode::CapabilityUnavailable
-        );
-        for cause in [
-            MaterializationPlanError::WrongFilesystem,
-            MaterializationPlanError::DifferentVolume,
-            MaterializationPlanError::DifferentMount,
-        ] {
-            assert_eq!(
-                map_plan_error(cause).diagnostic().code(),
-                ErrorCode::TargetLayout
-            );
-        }
     }
 }

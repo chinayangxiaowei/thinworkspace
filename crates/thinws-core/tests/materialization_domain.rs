@@ -556,6 +556,28 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         SupportState::Supported,
     );
 
+    let switched_backend = MaterializationPathReport::new(
+        fresh.source().clone(),
+        fresh.target_root().clone(),
+        fresh.staging().clone(),
+        fresh.trash().clone(),
+        CandidateEvidence::new(
+            MaterializerKind::BtrfsReflink,
+            SupportState::Unknown,
+            vec!["clone_capability_unknown".to_owned()],
+        ),
+        fresh.full_copy().clone(),
+        fresh.evidence_digest(),
+    );
+    assert_eq!(
+        MaterializationPlan::for_full_copy_after_cow_unavailable(
+            &switched_backend,
+            &prior_plan,
+            &clean_failure,
+        ),
+        Err(MaterializationPlanError::PreviousAttemptMismatch)
+    );
+
     let unconfirmed_staging =
         clean_failure
             .clone()

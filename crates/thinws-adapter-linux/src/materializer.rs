@@ -1070,6 +1070,12 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_millis_reports_elapsed_time() {
+        let started = Instant::now() - Duration::from_millis(10);
+        assert!(elapsed_millis(started) >= 10);
+    }
+
+    #[test]
     fn clone_errno_classification_keeps_cross_device_and_no_space_distinct() {
         for (errno, failure, port) in [
             (

@@ -166,6 +166,17 @@ impl LinuxHostAdapter {
         workspace_id: WorkspaceId,
         target: &AbsolutePath,
     ) -> Result<LinuxPreparedWorkspace, PortError> {
+        self.prepare_workspace_with_hook(lock, layout, workspace_id, target, || {})
+    }
+
+    fn prepare_workspace_with_hook(
+        &self,
+        lock: &LinuxLockGuard,
+        layout: &LinuxDataRootLayout,
+        workspace_id: WorkspaceId,
+        target: &AbsolutePath,
+        before_ownership_publish: impl FnOnce(),
+    ) -> Result<LinuxPreparedWorkspace, PortError> {
         validate_data_root_lock(self, lock, layout)?;
         layout.revalidate()?;
         let target_path = PathBuf::from(OsStr::from_bytes(target.as_bytes()));
@@ -277,19 +288,20 @@ impl LinuxHostAdapter {
             isolated_path: None,
         };
         let bytes = encode_workspace_ownership(&ownership).map_err(document_error)?;
-        let (ownership_file, ownership_file_identity) =
-            PrivateTemp::create(&metadata, "workspace-ownership", &bytes)?
-                .publish_noreplace(&ownership_name(workspace_id))
-                .map_err(|error| {
-                    if error.kind() == PortErrorKind::Conflict {
-                        PortError::conflict(
-                            "Workspace ownership proof already exists",
-                            PortConflict::WorkspaceId,
-                        )
-                    } else {
-                        error
-                    }
-                })?;
+        let temporary = PrivateTemp::create(&metadata, "workspace-ownership", &bytes)?;
+        before_ownership_publish();
+        let (ownership_file, ownership_file_identity) = temporary
+            .publish_noreplace(&ownership_name(workspace_id))
+            .map_err(|error| {
+                if error.kind() == PortErrorKind::Conflict {
+                    PortError::conflict(
+                        "Workspace ownership proof already exists",
+                        PortConflict::WorkspaceId,
+                    )
+                } else {
+                    error
+                }
+            })?;
         let prepared = LinuxPreparedWorkspace {
             parent,
             root,
@@ -1614,6 +1626,71 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, [OsString::from("copy")]);
+    }
+
+    #[test]
+    fn ownership_publish_collision_reports_workspace_id_conflict() {
+        let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
+            .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
+        let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let control_fixture = tempfile::Builder::new()
+            .prefix("thinws-ownership-publish-control-")
+            .tempdir_in(control_root)
+            .unwrap();
+        let target_fixture = tempfile::Builder::new()
+            .prefix("thinws-ownership-publish-target-")
+            .tempdir_in(target_root)
+            .unwrap();
+        let control = control_fixture.path().join("control");
+        for path in [&control, &control.join("metadata"), &control.join("logs")] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let database = control.join("metadata/state.db");
+        std::fs::write(&database, b"").unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let adapter = LinuxHostAdapter::new(&control).unwrap();
+        let control_volume = LinuxPlatformProbe
+            .inspect_path(&absolute(&control).unwrap())
+            .unwrap()
+            .filesystem()
+            .volume_id()
+            .known()
+            .copied()
+            .unwrap();
+        let identity = InstallationIdentity::new(
+            "01890a5d-ac96-774b-bd5b-55c7b8d09f40"
+                .parse::<InstanceId>()
+                .unwrap(),
+            absolute(&control).unwrap(),
+            control_volume,
+        );
+        let layout = adapter.validate_layout(&identity).unwrap();
+        let lock = adapter
+            .acquire_data_root(identity.data_root(), Duration::from_millis(200))
+            .unwrap();
+        let workspace_id = "ws_01890a5d-ac96-774b-bd5b-55c7b8d09f41"
+            .parse::<WorkspaceId>()
+            .unwrap();
+        let proof = control.join(format!("metadata/ownership-{workspace_id}.toml"));
+        let target = target_fixture.path().join("copy");
+
+        let error = match adapter.prepare_workspace_with_hook(
+            &lock,
+            &layout,
+            workspace_id,
+            &absolute(&target).unwrap(),
+            || std::fs::write(&proof, b"other process").unwrap(),
+        ) {
+            Ok(_) => panic!("another owner's proof must not be replaced"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), PortErrorKind::Conflict);
+        assert_eq!(error.conflict_kind(), Some(PortConflict::WorkspaceId));
+        assert_eq!(std::fs::read(&proof).unwrap(), b"other process");
+        assert!(target.is_dir());
     }
 
     #[test]

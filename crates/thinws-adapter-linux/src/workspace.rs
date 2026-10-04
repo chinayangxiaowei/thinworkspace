@@ -1176,6 +1176,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn target_parent_sync_propagates_a_real_descriptor_error() {
+        let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
+            .expect("set THINWS_LINUX_BTRFS_TEST_ROOT to a writable Btrfs test directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("thinws-target-sync-")
+            .tempdir_in(target_root)
+            .unwrap();
+        let mut parent = open_target_directory(fixture.path()).unwrap();
+        parent.fd = rustix::fs::open(
+            fixture.path(),
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        assert!(rustix::fs::fsync(&parent.fd).is_err());
+        assert_eq!(
+            sync_target_parent(&parent).unwrap_err().kind(),
+            PortErrorKind::Io
+        );
+    }
+
+    #[test]
     fn directory_birthtime_requires_each_independent_evidence_field() {
         let birthtime = StatxFlags::BTIME.bits();
         let unrelated = StatxFlags::SIZE.bits();

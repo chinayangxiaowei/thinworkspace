@@ -1226,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_scope_rejects_changed_ownership_proof_after_target_selection() {
+    fn deletion_scope_rejects_changed_proof_and_replaced_isolation() {
         let control_root = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT")
             .expect("set THINWS_LINUX_EXT4_TEST_ROOT to a writable ext4 test directory");
         let target_root = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT")
@@ -1296,7 +1296,7 @@ mod tests {
             false,
             UnixMillis::new(1_700_000_000_000).unwrap(),
         );
-        let registered = registered_target(&layout, &reservation).unwrap();
+        let mut registered = registered_target(&layout, &reservation).unwrap();
         let (selected, _) = locate_target(&registered).unwrap().unwrap();
         verify_selected_target(&adapter, &lock, &layout, &registered, &selected).unwrap();
 
@@ -1315,6 +1315,36 @@ mod tests {
             PortErrorKind::InvalidLayout
         );
         assert!(target.is_dir());
+
+        std::fs::write(
+            &ownership_path,
+            encode_workspace_ownership(&registered.ownership).unwrap(),
+        )
+        .unwrap();
+        let mut isolated_ownership = registered.ownership.clone();
+        isolated_ownership.isolated_path = Some(absolute(&registered.isolated_path).unwrap());
+        persist_workspace_ownership(&layout, &isolated_ownership).unwrap();
+        registered.ownership = isolated_ownership;
+        std::fs::rename(&target, &registered.isolated_path).unwrap();
+        let original = open_target_directory(&registered.isolated_path).unwrap();
+        let displaced = target_fixture.path().join("displaced-copy");
+        std::fs::rename(&registered.isolated_path, &displaced).unwrap();
+        std::fs::create_dir(&registered.isolated_path).unwrap();
+        std::fs::write(registered.isolated_path.join("foreign"), b"keep").unwrap();
+        let replacement = open_target_directory(&registered.isolated_path).unwrap();
+        assert_eq!(replacement.device, original.device);
+        assert_ne!(replacement.identity, original.identity);
+        assert_eq!(
+            verify_selected_target(&adapter, &lock, &layout, &registered, &replacement)
+                .unwrap_err()
+                .kind(),
+            PortErrorKind::InvalidLayout
+        );
+        assert_eq!(
+            std::fs::read(registered.isolated_path.join("foreign")).unwrap(),
+            b"keep"
+        );
+        assert!(displaced.is_dir());
     }
 
     #[test]

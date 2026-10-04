@@ -597,7 +597,7 @@ fn tracked_git_changes_require_explicit_force_and_keep_the_cleanup_log() {
 }
 
 #[test]
-fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() {
+fn installed_binary_covers_all_public_linux_commands_with_an_ordinary_target_path() {
     let ext4 = env::var_os("THINWS_LINUX_EXT4_TEST_ROOT").unwrap();
     let btrfs = env::var_os("THINWS_LINUX_BTRFS_TEST_ROOT").unwrap();
     let home = Builder::new()
@@ -621,6 +621,16 @@ fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() 
             .output()
             .unwrap()
     };
+    let invoke_json = |args: &[&std::ffi::OsStr]| {
+        let output = invoke(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
     let init = invoke(&["init".as_ref()]);
     assert!(
         init.status.success(),
@@ -628,6 +638,26 @@ fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() 
         String::from_utf8_lossy(&init.stderr)
     );
     assert!(home.path().join(".thinws").is_dir());
+    let doctor = invoke_json(&["--json".as_ref(), "doctor".as_ref()]);
+    assert_eq!(doctor["data"]["status"], "ready");
+    assert_eq!(doctor["data"]["host"]["platform"], "linux");
+
+    let preview = invoke_json(&[
+        "--json".as_ref(),
+        "workspace".as_ref(),
+        "create".as_ref(),
+        "--source".as_ref(),
+        source.as_os_str(),
+        "--target".as_ref(),
+        target.as_os_str(),
+        "--name".as_ref(),
+        "binary-copy".as_ref(),
+        "--dry-run".as_ref(),
+    ]);
+    assert_eq!(preview["data"]["dry_run"], true);
+    assert!(preview["data"]["workspace_id"].is_null());
+    assert!(!target.exists());
+
     let created = invoke(&[
         "workspace".as_ref(),
         "create".as_ref(),
@@ -644,6 +674,21 @@ fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() 
         String::from_utf8_lossy(&created.stderr)
     );
     assert_eq!(fs::read(target.join("example.txt")).unwrap(), b"contents");
+
+    let listed = invoke_json(&["--json".as_ref(), "workspace".as_ref(), "list".as_ref()]);
+    let workspaces = listed["data"]["workspaces"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0]["name"], "binary-copy");
+    let status = invoke_json(&[
+        "--json".as_ref(),
+        "workspace".as_ref(),
+        "status".as_ref(),
+        "binary-copy".as_ref(),
+    ]);
+    assert_eq!(status["data"]["state"], "ready");
+    assert_eq!(status["data"]["git"]["state"], "not-applicable");
+    assert_eq!(status["data"]["space"]["state"], "complete");
+
     let nested_target = target.join("nested target");
     for dry_run in [true, false] {
         let mut args = vec![
@@ -684,6 +729,13 @@ fn installed_binary_uses_an_isolated_home_and_accepts_an_ordinary_target_path() 
         String::from_utf8_lossy(&removed.stderr)
     );
     assert!(!target.exists());
+    let listed_after = invoke_json(&["--json".as_ref(), "workspace".as_ref(), "list".as_ref()]);
+    assert!(
+        listed_after["data"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

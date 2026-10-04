@@ -1399,11 +1399,44 @@ mod tests {
             .parse::<WorkspaceId>()
             .unwrap();
         let target = target_fixture.path().join("working-copy");
-        let prepared = adapter
+        let mut prepared = adapter
             .prepare_workspace(&lock, &layout, workspace_id, &absolute(&target).unwrap())
             .unwrap();
         let original = prepared.ownership.clone();
         let proof = control.join(format!("metadata/ownership-{workspace_id}.toml"));
+        prepared.revalidate().unwrap();
+
+        for case in 0..7 {
+            let mut altered = original.clone();
+            match case {
+                0 => altered.parent.inode += 1,
+                1 => altered.target.inode += 1,
+                2 => altered.staging.identity.inode += 1,
+                3 => altered.trash.identity.inode += 1,
+                4 => {
+                    altered.target_path =
+                        absolute(&target_fixture.path().join("different-target")).unwrap()
+                }
+                5 => {
+                    altered.staging.path =
+                        absolute(&target_fixture.path().join("different-staging")).unwrap()
+                }
+                6 => {
+                    altered.trash.path =
+                        absolute(&target_fixture.path().join("different-trash")).unwrap()
+                }
+                _ => unreachable!(),
+            }
+            prepared.ownership = altered;
+            let error = prepared.revalidate().unwrap_err();
+            assert_eq!(error.kind(), PortErrorKind::InvalidLayout);
+            assert_eq!(
+                error.operation(),
+                "Workspace ownership no longer matches the held directories",
+                "single mismatched held proof field {case} must be refused before reading the persisted proof"
+            );
+        }
+        prepared.ownership = original.clone();
         prepared.revalidate().unwrap();
 
         adapter

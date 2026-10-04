@@ -72,6 +72,9 @@ trait ExecutionHook {
     #[cfg(test)]
     fn before_staged_prepare(&self, _name: &OsStr) {}
 
+    #[cfg(test)]
+    fn before_source_symlink_read(&self, _relative: &[u8]) {}
+
     fn before_staged_publish(&self, _relative: &[u8]) -> Result<(), TreeFailure> {
         Ok(())
     }
@@ -544,6 +547,8 @@ fn materialize_directory(
                 }
             }
             NodeKind::Symlink => {
+                #[cfg(test)]
+                hook.before_source_symlink_read(&relative);
                 let text = rustix::fs::readlinkat(source, &name, Vec::new())
                     .map_err(|error| TreeFailure::io("read source symbolic link", error))?;
                 if entry.link_text.as_deref() != Some(text.to_bytes())
@@ -1165,6 +1170,65 @@ mod tests {
             b"first file"
         );
         assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    }
+
+    struct ReplaceSourceSymlinkWithIdenticalText {
+        source_link: PathBuf,
+        replacement: PathBuf,
+        original_inode: u64,
+    }
+
+    impl ExecutionHook for ReplaceSourceSymlinkWithIdenticalText {
+        fn before_source_symlink_read(&self, relative: &[u8]) {
+            assert_eq!(relative, b"link");
+            fs::rename(&self.replacement, &self.source_link).unwrap();
+            assert_eq!(
+                fs::read_link(&self.source_link).unwrap(),
+                Path::new("destination")
+            );
+            assert_ne!(
+                fs::symlink_metadata(&self.source_link).unwrap().ino(),
+                self.original_inode
+            );
+        }
+    }
+
+    #[test]
+    fn replaced_source_symlink_with_identical_text_is_rejected_before_publish() {
+        let (fixture, paths, _, _) = fixture("thinws-btrfs-source-symlink-race-");
+        fs::remove_file(paths[0].join("a")).unwrap();
+        fs::remove_file(paths[0].join("b")).unwrap();
+        let source_link = paths[0].join("link");
+        let replacement = fixture.path().join("replacement-link");
+        std::os::unix::fs::symlink("destination", &source_link).unwrap();
+        std::os::unix::fs::symlink("destination", &replacement).unwrap();
+        let original_inode = fs::symlink_metadata(&source_link).unwrap().ino();
+        let source = rustix::fs::open(&paths[0], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let staging = rustix::fs::open(&paths[2], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let expected = snapshot(&source).unwrap_or_else(|_| panic!("source must be inspectable"));
+        let mut context = ExecutionContext::default();
+        let hook = ReplaceSourceSymlinkWithIdenticalText {
+            source_link,
+            replacement,
+            original_inode,
+        };
+        let failure = match materialize_directory(
+            &source,
+            &target,
+            &staging,
+            &[],
+            &expected,
+            &mut context,
+            &hook,
+        ) {
+            Ok(()) => panic!("replaced source symlink must be rejected"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.kind, MaterializationFailureKind::SourceChanged);
+        assert!(context.created.is_empty());
+        assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+        assert!(fs::read_dir(&paths[2]).unwrap().next().is_none());
     }
 
     struct ReplacePublishedWithIdenticalBytes {

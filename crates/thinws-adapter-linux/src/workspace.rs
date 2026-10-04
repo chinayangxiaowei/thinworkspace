@@ -46,6 +46,10 @@ struct RegisteredTarget {
 }
 
 impl TargetDirectory {
+    fn same_identity_and_device(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.device == other.device
+    }
+
     fn revalidate(&self) -> Result<(), PortError> {
         let reopened = open_target_directory(&self.path)?;
         if self.device != reopened.device || self.identity != reopened.identity {
@@ -580,7 +584,7 @@ impl LinuxHostAdapter {
             .map_err(|error| io_error("isolate Workspace target without replacement", error))?;
             sync_target_parent(&registered.parent)?;
             let moved = open_target_directory(&registered.isolated_path)?;
-            if moved.identity != target.identity || moved.device != target.device {
+            if !moved.same_identity_and_device(&target) {
                 return Err(PortError::new(
                     PortErrorKind::InvalidLayout,
                     "isolated Workspace target identity changed",
@@ -742,9 +746,7 @@ fn verify_selected_target(
 }
 
 fn selected_target_matches(selected: &TargetDirectory, current: &TargetDirectory) -> bool {
-    selected.path == current.path
-        && selected.identity == current.identity
-        && selected.device == current.device
+    selected.path == current.path && selected.same_identity_and_device(current)
 }
 
 fn remove_operation_directory(
@@ -1327,6 +1329,8 @@ mod tests {
         registered.ownership = isolated_ownership;
         std::fs::rename(&target, &registered.isolated_path).unwrap();
         let original = open_target_directory(&registered.isolated_path).unwrap();
+        let reopened = open_target_directory(&registered.isolated_path).unwrap();
+        assert!(reopened.same_identity_and_device(&original));
         let displaced = target_fixture.path().join("displaced-copy");
         std::fs::rename(&registered.isolated_path, &displaced).unwrap();
         std::fs::create_dir(&registered.isolated_path).unwrap();
@@ -1334,6 +1338,7 @@ mod tests {
         let replacement = open_target_directory(&registered.isolated_path).unwrap();
         assert_eq!(replacement.device, original.device);
         assert_ne!(replacement.identity, original.identity);
+        assert!(!replacement.same_identity_and_device(&original));
         assert_eq!(
             verify_selected_target(&adapter, &lock, &layout, &registered, &replacement)
                 .unwrap_err()

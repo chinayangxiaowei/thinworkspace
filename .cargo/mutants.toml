@@ -81,8 +81,7 @@ exclude_re = [
     # MaterializationPlan has private fields and only CoW/FullCopy constructors.
     # Both valid states couple effective mode to backend; the first runtime
     # fallback clause is always false, while FullCopy is rejected by the next
-    # backend clause. The backend helper is also checked by the layout match.
+    # backend clause. Successful receipt sees only coupled valid Plan states.
     '^crates/thinws-core/src/materialization\.rs:882:13: replace \|\| with && in MaterializationPlan::for_full_copy_after_cow_unavailable$',
-    '^crates/thinws-core/src/materialization\.rs:1064:5: replace require_cow_backend .* with Ok\(\(\)\)$',
     '^crates/thinws-core/src/materialization\.rs:1528:13: replace \|\| with && in MaterializationReceipt::successful_cow_clone$',
 ]

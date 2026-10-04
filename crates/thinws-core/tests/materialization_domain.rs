@@ -578,6 +578,28 @@ fn runtime_full_copy_requires_cow_unavailable_and_a_confirmed_clean_baseline() {
         Err(MaterializationPlanError::PreviousAttemptMismatch)
     );
 
+    let invalid_backend = MaterializationPathReport::new(
+        fresh.source().clone(),
+        fresh.target_root().clone(),
+        fresh.staging().clone(),
+        fresh.trash().clone(),
+        CandidateEvidence::new(
+            MaterializerKind::FullCopy,
+            SupportState::Unknown,
+            Vec::new(),
+        ),
+        fresh.full_copy().clone(),
+        fresh.evidence_digest(),
+    );
+    assert_eq!(
+        MaterializationPlan::for_full_copy_after_cow_unavailable(
+            &invalid_backend,
+            &prior_plan,
+            &clean_failure,
+        ),
+        Err(MaterializationPlanError::WrongCandidate)
+    );
+
     let unconfirmed_staging =
         clean_failure
             .clone()

@@ -67,6 +67,8 @@ docker start -a "$container_id"
 
 使用 `git archive HEAD` 快照与 `cargo-mutants --in-place` 时，跨源码批次复用编译卷可能让归档文件的旧 mtime 命中上一批变异产物，使“未变异基线”误用旧代码。换用新的独立变异编译卷，或先明确清除该批受影响的 Cargo 产物；只有基线按本批确定源码重新构建并通过，变异结果才有效。执行器测试参数中的额外 `--` 须按实际生成的 `cargo test` argv 核对，例如要运行 ignored 测试，应传 `cargo mutants … -- -- --include-ignored`，不能把 `--include-ignored` 误传给 Cargo 本身。
 
+一次性快照由 `docker cp` 建立时源码通常归 root；在该**容器私有快照**上运行 `cargo mutants --in-place`，须在切换到 `thinws` 测试用户前，仅将待变异 crate 的源码目录交给该用户，否则未变异基线通过后会因无法覆盖源码而失败。不得对宿主 bind mount 做这项归属修改。`--in-place` 不可同时指定 `-j/--jobs`，应省略并发参数；参数或快照权限错误属于测试布置失败，不计作变异结果。
+
 Linux Release 候选使用静态 musl 目标。用与普通测试分开的编译卷，避免 GNU 与 musl 产物或变异测试缓存混用：
 
 ```bash

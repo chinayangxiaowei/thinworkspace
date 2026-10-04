@@ -2157,7 +2157,7 @@ mod tests {
 
     #[test]
     fn rollback_does_not_touch_a_replaced_target_root() {
-        let (_fixture, paths, request, plan) = fixture("thinws-btrfs-root-replacement-");
+        let (fixture, paths, request, plan) = fixture("thinws-btrfs-root-replacement-");
         let failure = BtrfsReflinkMaterializer::new()
             .materialize_with_hook(
                 &request,
@@ -2189,6 +2189,14 @@ mod tests {
             0o500
         );
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+        // Preserve the permission assertion above, then let TempDir remove this
+        // deliberately displaced test directory instead of leaking the fixture.
+        fs::set_permissions(
+            paths[1].with_file_name("displaced-target"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fixture.close().unwrap();
     }
 
     struct SaturateRollbackQuarantine {

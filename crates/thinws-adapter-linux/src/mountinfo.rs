@@ -52,6 +52,32 @@ fn parse_filesystem_type(content: &str, mount_id: u64) -> io::Result<Option<Stri
     Ok(found)
 }
 
+/// Exercises bounded Linux mountinfo parsing without reading the host's `/proc`.
+#[cfg(fuzzing)]
+pub fn fuzz_mountinfo(bytes: &[u8]) {
+    use std::io::Cursor;
+
+    let _ = parse_bounded_mountinfo(Cursor::new(bytes), 41);
+
+    let generated = bytes
+        .iter()
+        .take(24)
+        .map(|byte| char::from(b'a' + *byte % 26))
+        .collect::<String>();
+    let kind = if generated.is_empty() {
+        "btrfs"
+    } else {
+        &generated
+    };
+    let valid = format!("41 1 0:43 / / rw - {kind} /dev/sdd rw\n");
+    assert_eq!(
+        parse_bounded_mountinfo(Cursor::new(valid.as_bytes()), 41)
+            .expect("generated mountinfo is valid")
+            .as_deref(),
+        Some(kind)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -89,6 +115,17 @@ mod tests {
                 41
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn fuzz_corpus_contains_a_valid_btrfs_mount() {
+        let seed = include_bytes!("../../../fuzz/corpus/thinws_linux_mountinfo/valid-btrfs");
+        assert_eq!(
+            parse_bounded_mountinfo(Cursor::new(seed), 41)
+                .unwrap()
+                .as_deref(),
+            Some("btrfs")
         );
     }
 

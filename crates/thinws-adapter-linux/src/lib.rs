@@ -8,6 +8,8 @@
 mod ffi;
 #[cfg(target_os = "linux")]
 mod mountinfo;
+#[cfg(all(target_os = "linux", fuzzing))]
+pub use mountinfo::fuzz_mountinfo;
 #[cfg(target_os = "linux")]
 mod probe;
 

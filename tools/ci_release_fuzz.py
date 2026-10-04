@@ -30,12 +30,9 @@ def eligible_target_names(manifest_path: Path, platform: str) -> list[str]:
         raise ValueError(f"unsupported fuzz platform: {platform}")
     names = target_names(manifest_path)
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
-    macos_only = (
-        manifest.get("package", {})
-        .get("metadata", {})
-        .get("thinws", {})
-        .get("macos_only_fuzz_targets")
-    )
+    classifications = manifest.get("package", {}).get("metadata", {}).get("thinws", {})
+    macos_only = classifications.get("macos_only_fuzz_targets")
+    linux_only = classifications.get("linux_only_fuzz_targets")
     if not isinstance(macos_only, list) or not all(
         isinstance(name, str) for name in macos_only
     ):
@@ -44,8 +41,18 @@ def eligible_target_names(manifest_path: Path, platform: str) -> list[str]:
         raise ValueError("duplicate macOS-only fuzz target")
     if unknown := set(macos_only) - set(names):
         raise ValueError(f"unknown macOS-only fuzz target: {sorted(unknown)}")
+    if not isinstance(linux_only, list) or not all(
+        isinstance(name, str) for name in linux_only
+    ):
+        raise ValueError("missing Linux-only fuzz target classification")
+    if len(linux_only) != len(set(linux_only)):
+        raise ValueError("duplicate Linux-only fuzz target")
+    if unknown := set(linux_only) - set(names):
+        raise ValueError(f"unknown Linux-only fuzz target: {sorted(unknown)}")
+    if overlap := set(macos_only) & set(linux_only):
+        raise ValueError(f"fuzz target is both macOS-only and Linux-only: {sorted(overlap)}")
     if platform == "darwin":
-        return names
+        return [name for name in names if name not in linux_only]
     return [name for name in names if name not in macos_only]
 
 

@@ -24,18 +24,19 @@ class ReleaseFuzzTests(unittest.TestCase):
     def test_all_manifest_targets_are_selected_once(self) -> None:
         manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"
         targets = ci_release_fuzz.target_names(manifest)
-        self.assertEqual(len(targets), 11)
+        self.assertEqual(len(targets), 12)
         self.assertEqual(len(targets), len(set(targets)))
         self.assertIn("thinws_bootstrap_document", targets)
         self.assertIn("thinws_materialization_path", targets)
         self.assertIn("thinws_platform_ownership_document", targets)
+        self.assertIn("thinws_linux_mountinfo", targets)
 
-    def test_platform_selection_does_not_count_macos_only_targets_on_linux(self) -> None:
+    def test_platform_selection_excludes_targets_for_the_other_system(self) -> None:
         manifest = ci_release_fuzz.REPO_ROOT / "fuzz/Cargo.toml"
         all_targets = ci_release_fuzz.target_names(manifest)
         macos_targets = ci_release_fuzz.eligible_target_names(manifest, "darwin")
         linux_targets = ci_release_fuzz.eligible_target_names(manifest, "linux")
-        self.assertEqual(macos_targets, all_targets)
+        self.assertEqual(set(all_targets) - set(macos_targets), {"thinws_linux_mountinfo"})
         self.assertEqual(
             set(all_targets) - set(linux_targets),
             {
@@ -45,6 +46,7 @@ class ReleaseFuzzTests(unittest.TestCase):
             },
         )
         self.assertIn("thinws_platform_ownership_document", linux_targets)
+        self.assertIn("thinws_linux_mountinfo", linux_targets)
 
     def test_linux_git_status_target_has_its_shared_cleanup_dependency(self) -> None:
         manifest = tomllib.loads(
@@ -67,6 +69,7 @@ class ReleaseFuzzTests(unittest.TestCase):
             invalid.write_text(
                 '[package.metadata.thinws]\n'
                 'macos_only_fuzz_targets = ["missing"]\n'
+                'linux_only_fuzz_targets = []\n'
                 '[[bin]]\nname = "present"\n',
                 encoding="utf-8",
             )
@@ -84,10 +87,49 @@ class ReleaseFuzzTests(unittest.TestCase):
             invalid.write_text(
                 '[package.metadata.thinws]\n'
                 'macos_only_fuzz_targets = ["present", "present"]\n'
+                'linux_only_fuzz_targets = []\n'
                 '[[bin]]\nname = "present"\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "duplicate macOS-only fuzz target"):
+                ci_release_fuzz.eligible_target_names(invalid, "linux")
+
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = []\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "missing Linux-only fuzz target classification"
+            ):
+                ci_release_fuzz.eligible_target_names(invalid, "darwin")
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = []\n'
+                'linux_only_fuzz_targets = ["present", "present"]\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate Linux-only fuzz target"):
+                ci_release_fuzz.eligible_target_names(invalid, "darwin")
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = []\n'
+                'linux_only_fuzz_targets = ["missing"]\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown Linux-only fuzz target"):
+                ci_release_fuzz.eligible_target_names(invalid, "darwin")
+            invalid.write_text(
+                '[package.metadata.thinws]\n'
+                'macos_only_fuzz_targets = ["present"]\n'
+                'linux_only_fuzz_targets = ["present"]\n'
+                '[[bin]]\nname = "present"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "both macOS-only and Linux-only"):
                 ci_release_fuzz.eligible_target_names(invalid, "linux")
 
     def test_duplicate_manifest_target_is_rejected(self) -> None:

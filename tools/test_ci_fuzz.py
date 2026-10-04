@@ -11,9 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FuzzWorkflowCoverageTests(unittest.TestCase):
-    def test_every_declared_target_has_one_ci_smoke(self) -> None:
+    def test_every_macos_applicable_target_has_one_ci_smoke(self) -> None:
         manifest = tomllib.loads((ROOT / "fuzz/Cargo.toml").read_text(encoding="utf-8"))
-        targets = Counter(binary["name"] for binary in manifest["bin"])
+        linux_only = set(
+            manifest["package"]["metadata"]["thinws"]["linux_only_fuzz_targets"]
+        )
+        targets = Counter(
+            binary["name"] for binary in manifest["bin"] if binary["name"] not in linux_only
+        )
         workflow = (ROOT / ".github/workflows/p0.yml").read_text(encoding="utf-8")
         invoked = Counter(
             re.findall(

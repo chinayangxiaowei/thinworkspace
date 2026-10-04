@@ -1894,6 +1894,56 @@ mod tests {
         assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
     }
 
+    #[test]
+    fn rollback_parent_uses_the_matching_registered_sibling_directory() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-rollback-parent-");
+        fs::create_dir(paths[1].join("first")).unwrap();
+        fs::create_dir(paths[1].join("second")).unwrap();
+        fs::write(paths[1].join("second/file"), b"owned file").unwrap();
+        let target = rustix::fs::open(&paths[1], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let first = node_at(&target, OsStr::new("first"))
+            .unwrap_or_else(|_| panic!("first directory must remain inspectable"));
+        let second = node_at(&target, OsStr::new("second"))
+            .unwrap_or_else(|_| panic!("second directory must remain inspectable"));
+        let second_directory = open_directory(&target, OsStr::new("second"))
+            .unwrap_or_else(|_| panic!("second directory must remain openable"));
+        let file = node_at(&second_directory, OsStr::new("file"))
+            .unwrap_or_else(|_| panic!("second directory file must remain inspectable"));
+        assert_ne!(first.identity(), second.identity());
+        let created = [
+            TrackedCreated {
+                path: b"first".to_vec(),
+                kind: NodeKind::Directory,
+                identity: Some(first.identity()),
+            },
+            TrackedCreated {
+                path: b"second".to_vec(),
+                kind: NodeKind::Directory,
+                identity: Some(second.identity()),
+            },
+            TrackedCreated {
+                path: b"second/file".to_vec(),
+                kind: NodeKind::File,
+                identity: Some(file.identity()),
+            },
+        ];
+        let (parent, name) = open_rollback_parent(&target, &created[2], &created)
+            .unwrap_or_else(|_| panic!("matching rollback parent must resolve"));
+        assert_eq!(name.as_bytes(), b"file");
+        assert_eq!(
+            node(&parent)
+                .unwrap_or_else(|_| panic!("rollback parent must remain inspectable"))
+                .identity(),
+            second.identity()
+        );
+        assert_eq!(
+            node_at(&parent, &name)
+                .unwrap_or_else(|_| panic!("rollback file must remain inspectable"))
+                .identity(),
+            file.identity()
+        );
+    }
+
     struct ReplaceTargetBeforeFinalPathCheck {
         target: PathBuf,
     }

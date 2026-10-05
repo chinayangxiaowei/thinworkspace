@@ -60,9 +60,13 @@ if [[ $(findmnt -n -o TARGET -T "$ext4_root") == $(findmnt -n -o TARGET -T "$btr
     echo "control and workspace test roots must be on different mounts" >&2
     exit 2
 fi
-for tool in file readelf sha256sum git tee; do
+for tool in file readelf sha256sum git tee realpath; do
     command -v "$tool" >/dev/null || { echo "missing test tool: $tool" >&2; exit 2; }
 done
+if [[ "$other_file" != "$(realpath -e -- "$other_file")" ]]; then
+    echo "comparison file path must be canonical without symlink components" >&2
+    exit 2
+fi
 
 mkdir -- "$report_dir"
 chmod 700 -- "$report_dir"

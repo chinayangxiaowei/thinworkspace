@@ -18,10 +18,10 @@ CLI 参数、JSON 和错误码仍只由[用户操作手册](../../project/refere
 2. `e2e_linux` 可执行文件；
 3. 专用、可写的 ext4 测试根，用于隔离 `HOME/.thinws`；
 4. 专用、可写的真实 Btrfs 测试根，用于 source 和 target；
-5. Parallels `prl_fs` 共享盘上一个已存在的普通非符号链接文件，仅供测试取其父目录作为只读对照；
+5. Parallels `prl_fs` 共享盘上专用极小夹具内已存在的普通文件，路径及其各级父目录不得含符号链接，仅供测试取其父目录作为只读对照；
 6. 尚不存在、父目录已存在的报告目录。
 
-两个测试根不得是用户实际项目目录。脚本只让测试程序在它们内部创建随机临时子目录，不删除提供的根；报告目录只新建一次，不覆盖既有报告。普通用户权限、Debian 12/aarch64、资格内核 `5.10.0-24-arm64`、ext4 与 Btrfs 不同挂载、对照文件确在 `prl_fs`、Git 和必要检查工具、两个产物的静态 ARM64 ELF 与无 GLIBC 依赖均由脚本在测试前检查。不满足时退出非零，不能把 Docker 或其他内核、文件系统的结果当成这台 VM 的合格结果。
+两个测试根和共享对照源都不得是用户实际项目目录。脚本只让测试程序在两个可写根内创建随机临时子目录，不删除提供的根；共享对照源仅用于应拒绝的来源路径，不应包含其他数据；报告目录只新建一次，不覆盖既有报告。普通用户权限、Debian 12/aarch64、资格内核 `5.10.0-24-arm64`、ext4 与 Btrfs 不同挂载、对照文件及其父目录确在 `prl_fs`、其路径无符号链接组件、Git 和必要检查工具、两个产物的静态 ARM64 ELF 与无 GLIBC 依赖均由脚本在测试前检查。不满足时退出非零，不能把 Docker 或其他内核、文件系统的结果当成这台 VM 的合格结果。
 
 ## 一条命令执行
 
@@ -33,11 +33,11 @@ bash /path/to/worktree/tools/linux-btrfs-acceptance.sh \
   /home/user/thinws-acceptance/bin/e2e_linux \
   /home/user/thinws-acceptance/ext4 \
   /media/user/thinws/thinws-acceptance-btrfs \
-  /media/psf/data/code/my-project/README.md \
+  /media/psf/data/thinws-acceptance-fixture/source/marker.txt \
   /home/user/thinws-acceptance/report-001
 ```
 
-示例中的共享盘文件必须替换为 VM 中实际存在的普通文件；测试只把其父目录作为应拒绝的 `prl_fs` 来源，不复制或改写该文件。脚本先用哨兵程序替换 CLI 做一次**必须失败**的负控制，并要求日志确实看到哨兵标记；这可防止测试悄悄走库入口却宣称黑盒通过。随后同一 `e2e_linux` 套件以 `THINWS_LINUX_E2E_BINARY` 指向指定 Release CLI，逐项启动真实进程，要求全部列出的测试执行、零失败、零忽略。这个变量仅供测试程序选择被验收的二进制，不是 ThinWorkspace 的产品配置项。
+示例中的共享盘文件必须替换为 VM 中实际存在的专用小夹具文件；不得直接指向项目源码。测试只把其父目录作为应拒绝的 `prl_fs` 来源，不复制或改写该文件。脚本先用哨兵程序替换 CLI 做一次**必须失败**的负控制，并要求日志确实看到哨兵标记；这可防止测试悄悄走库入口却宣称黑盒通过。随后同一 `e2e_linux` 套件以 `THINWS_LINUX_E2E_BINARY` 指向指定 Release CLI，逐项启动真实进程，要求全部列出的测试执行、零失败、零忽略。这个变量仅供测试程序选择被验收的二进制，不是 ThinWorkspace 的产品配置项。
 
 验收场景按既有测试维护，不另复制命令、字段和错误码常量：
 

@@ -27,8 +27,8 @@ if [[ ! -f "$cli" || ! -x "$cli" || ! -f "$suite" || ! -x "$suite" ]]; then
     echo "the CLI and E2E test binaries must be executable regular files" >&2
     exit 2
 fi
-if [[ ! -d "$ext4_root" || ! -w "$ext4_root" || ! -d "$btrfs_root" || ! -w "$btrfs_root" || ! -f "$other_file" ]]; then
-    echo "test roots must be writable directories and the comparison file must exist" >&2
+if [[ ! -d "$ext4_root" || ! -w "$ext4_root" || ! -d "$btrfs_root" || ! -w "$btrfs_root" || ! -f "$other_file" || -L "$other_file" ]]; then
+    echo "test roots must be writable directories and the comparison file must be a regular non-symlink file" >&2
     exit 2
 fi
 if [[ -e "$report_dir" || -L "$report_dir" || ! -d $(dirname -- "$report_dir") ]]; then
@@ -40,15 +40,20 @@ if [[ $(uname -m) != aarch64 ]]; then
     echo "this acceptance run requires aarch64" >&2
     exit 2
 fi
+if [[ $(uname -r) != 5.10.0-24-arm64 ]]; then
+    echo "this acceptance run requires the qualified 5.10.0-24-arm64 kernel" >&2
+    exit 2
+fi
 # The target qualification is Debian 12; the VM's display name is not evidence.
 if ! grep -qx 'ID=debian' /etc/os-release || ! grep -qx 'VERSION_ID="12"' /etc/os-release; then
     echo "this acceptance run requires Debian 12" >&2
     exit 2
 fi
 if [[ $(findmnt -n -o FSTYPE -T "$ext4_root") != ext4 ||
-      $(findmnt -n -o FSTYPE -T "$other_file") != ext4 ||
+      $(findmnt -n -o FSTYPE -T "$other_file") != prl_fs ||
+      $(findmnt -n -o FSTYPE -T "$(dirname -- "$other_file")") != prl_fs ||
       $(findmnt -n -o FSTYPE -T "$btrfs_root") != btrfs ]]; then
-    echo "expected ext4 control/comparison roots and a real Btrfs workspace root" >&2
+    echo "expected ext4 control root, prl_fs comparison file and real Btrfs workspace root" >&2
     exit 2
 fi
 if [[ $(findmnt -n -o TARGET -T "$ext4_root") == $(findmnt -n -o TARGET -T "$btrfs_root") ]]; then
@@ -72,6 +77,7 @@ trap 'printf "status=%s\n" "$result" > "$report_dir/summary.txt"' EXIT
         "$ext4_root" "$btrfs_root" "$other_file"
     findmnt -n -o TARGET,FSTYPE,SOURCE -T "$ext4_root"
     findmnt -n -o TARGET,FSTYPE,SOURCE -T "$btrfs_root"
+    findmnt -n -o TARGET,FSTYPE,SOURCE -T "$other_file"
     "$cli" --version
 } > "$report_dir/environment.txt"
 sha256sum "$cli" "$suite" "$0" > "$report_dir/artifacts.sha256"

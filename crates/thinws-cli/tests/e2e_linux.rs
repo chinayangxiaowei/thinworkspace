@@ -13,6 +13,21 @@ use tempfile::Builder;
 use thinws_cli::{LocalCommands, run};
 
 fn execute(control: &Path, arguments: Vec<OsString>) -> (i32, Vec<u8>, Vec<u8>) {
+    if let Some(binary) = env::var_os("THINWS_LINUX_E2E_BINARY") {
+        let mut args = arguments.into_iter();
+        assert_eq!(args.next(), Some(OsString::from("thinws")));
+        let output = Command::new(binary)
+            .env("HOME", control.parent().unwrap())
+            .args(args)
+            .output()
+            .unwrap();
+        return (
+            output.status.code().unwrap_or(1),
+            output.stdout,
+            output.stderr,
+        );
+    }
+
     let commands = LocalCommands::new(Some(control.to_path_buf()))
         .with_timeouts(Duration::from_secs(1), Duration::from_secs(1));
     let mut stdout = Vec::new();
@@ -676,9 +691,10 @@ fn installed_binary_covers_all_public_linux_commands_with_an_ordinary_target_pat
     fs::create_dir(&source).unwrap();
     fs::write(source.join("example.txt"), b"contents").unwrap();
 
-    let binary = env!("CARGO_BIN_EXE_thinws");
+    let binary = env::var_os("THINWS_LINUX_E2E_BINARY")
+        .unwrap_or_else(|| OsString::from(env!("CARGO_BIN_EXE_thinws")));
     let invoke = |args: &[&std::ffi::OsStr]| {
-        Command::new(binary)
+        Command::new(&binary)
             .env("HOME", home.path())
             .args(args)
             .output()

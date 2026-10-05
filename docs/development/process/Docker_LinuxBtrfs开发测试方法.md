@@ -14,7 +14,7 @@
 - 常规开发命令把仓库以只读 `/work` 挂载；两个同名 target 挂载指向同一个 Docker 命名卷，让 Cargo 的 `/target` 和测试程序内嵌的 `/work/target` 路径均指向同一产物，避免测试写入宿主仓库。Cargo registry 另用命名卷缓存；宿主 bind mount 失效时采用下文的一次性容器源码快照。Debian 11 补充测试也须把同一 musl 产物卷挂到这两个路径；runner 会对 `/work/target` 执行 `chown`，因此该挂载必须可写，不使用匿名空卷或只读挂载。
 - `tools/docker-linux-btrfs/run.sh` 仅在一次性容器内部创建稀疏 Btrfs/ext4 镜像并挂载，预检 Btrfs reflink，随后以普通用户运行传入的命令。退出时卸载；`docker run --rm` 删除容器及其临时镜像文件，不删除挂载的命名缓存卷。
 - 镜像内含 `btrfs-progs`。需要真实子卷的测试以普通用户在临时 Btrfs 夹具内创建空子卷，并用 `rmdir` 清理；该挂载布局下普通用户执行 `btrfs subvolume delete` 可能返回 `EPERM`，不能把夹具清理失败当作产品删除失败。
-- 默认开发镜像是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核；下文的运行镜像换成 Debian 11 用户态，但仍共用 LinuxKit 内核。两者都不是当前资格基线的 Debian 12/5.10 VM，也不提供 Parallels `prl_fs`。容器能验证真实 Btrfs/ext4、Linux 编译及生命周期行为；目标内核、`prl_fs`、VM 挂载拓扑及维护者人工验收仍需在目标环境完成。
+- 默认开发镜像是 Debian 12 用户态加 Docker Desktop 的 LinuxKit 内核；下文的运行镜像换成 Debian 11 用户态，但仍共用 LinuxKit 内核。两者都不是当前资格基线的 Debian 12/5.10 VM，也不提供 Parallels `prl_fs`。容器能验证真实 Btrfs/ext4、Linux 编译及生命周期行为；目标内核、`prl_fs` 与 VM 挂载拓扑须由目标 VM 的自动验收核对。
 - 本文的 Linux Release 目标是 ARM64 musl；示例按本机 Docker 的 `linux/arm64` 镜像运行。其他架构不能直接沿用 `musl-gcc` 与 `aarch64-unknown-linux-musl` 的组合，必须另行验证交叉链接器和目标运行环境。
 
 ## 构建与运行
@@ -133,7 +133,7 @@ docker rm "$container_id"
 shasum -a 256 target/linux-musl/thinws
 ```
 
-Debian 11 容器冒烟及黑盒测试只证明该用户态与 Docker LinuxKit 内核下的行为，不证明目标 Debian 12/5.10 VM、`prl_fs` 或实际挂载拓扑资格；静态 musl 也不使不支持的文件系统自动具备 reflink。目标 VM 的全命令黑盒已单独通过，剩余质量门禁与维护者人工验收仍须补齐。
+Debian 11 容器冒烟及黑盒测试只证明该用户态与 Docker LinuxKit 内核下的行为，不证明目标 Debian 12/5.10 VM、`prl_fs` 或实际挂载拓扑资格；静态 musl 也不使不支持的文件系统自动具备 reflink。目标 VM 的 Release CLI 自动黑盒验收由[Linux/Btrfs 自动验收流程](Linux_Btrfs自动验收流程.md)单独管理，剩余阶段质量门禁与最终放行授权仍须补齐。
 
 ## 证据使用
 

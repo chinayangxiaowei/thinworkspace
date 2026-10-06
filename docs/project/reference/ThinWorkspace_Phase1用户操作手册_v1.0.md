@@ -129,13 +129,19 @@ Git setup:       not performed
 
 ### 4.3 CoW 与显式完整复制
 
-默认要求 CoW，不能静默改为完整复制。macOS 仅在同卷 clone 已证实不支持时，可显式允许 Full Copy：
+默认要求 CoW，不能静默改为完整复制。macOS 同一 APFS 卷、Linux 同一 Btrfs 挂载中，只有 clone 已证实不支持且用户显式授权时，才可降级为 Full Copy：
 
 ```bash
 thinws workspace create --source /Volumes/data/code/my-app --target /Volumes/data/workspaces/auth-refresh --name auth-refresh --allow-copy
 ```
 
-Linux/Btrfs 当前没有 Full Copy 后端：`--allow-copy` 不会把不支持的来源、目标或失败的 `FICLONE` 变成可复制；同挂载 CoW 可用时仍执行 reflink。若实际 reflink 失败且带 `--allow-copy`，返回 `E_CAPABILITY_UNAVAILABLE`（没有可用的 Full Copy 后端），不带该参数则返回 `E_COW_UNAVAILABLE`；已登记的非 Ready 工作区只按第九节显式清理。输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。
+Linux 同一 Btrfs 挂载示例（路径须替换为本机实际目录）：
+
+```bash
+thinws workspace create --source /mnt/btrfs/my-app --target /mnt/btrfs/my-app-copy --name my-app-copy --allow-copy
+```
+
+Linux/Btrfs 的 Full Copy 不放宽布局边界：ext4、`prl_fs`、不同 Btrfs 挂载或路径身份不明，即使指定 `--allow-copy` 也不能据此成功；同挂载 CoW 可用时仍执行 reflink。当前 Btrfs 预检不能预知逐文件 NOCOW，故 dry-run 通常仍计划 CoW；若真实 `FICLONE` 以可降级的能力错误失败，且前次目标回滚已确认、来源未变，则带 `--allow-copy` 可执行独立字节复制；不带该参数返回 `E_COW_UNAVAILABLE`。失败或回滚不完整的已登记非 Ready 工作区只按第九节显式清理。输出必须显示 actual mode、cow 和 fallback 原因。Full Copy 记为 `cow=not-used`；只有实际克隆与校验成功才是 confirmed。空树或只有目录/链接时记为 not-used，不把“没有文件需要克隆”当成已证实块共享。Linux Full Copy 新候选的资格与发行状态见第十二节；旧 CoW-only 验收不涵盖它。
 
 `--allow-copy` 不是跨卷开关；跨卷、卷身份变化、空间不足或普通 I/O 错误不触发复制降级。这里的“回滚”只指创建命令仍在运行时，核对并撤离本次已登记的目标副本项，尽力恢复创建前的目标位置；它不修改来源，也不撤销 Ready 工作区后续的用户改动。无法确认目标已恢复时保留 Error，不发布混合或不完整目录；已隔离对象可能仍留在目标父目录下的私有临时位置，不因此自动删除。进程中断后不自动续做或恢复，见第九节。
 已预留 Workspace 后的创建失败在错误 `context.workspace_id` 中标明受控对象；若物化已产生失败回执，还给出 `materialization_attempt_count`、`rollback_incomplete` 和 `unconfirmed_staging` 摘要。摘要不表示已自动清理，也不把 partial receipt 写成成功的 final receipt。
@@ -300,7 +306,7 @@ thinws doctor
 
 `workspace create --json` 成功时在 `data` 中返回 `command="workspace create"`、`dry_run=false`、`result=created|already-ready`、`workspace_id`、`name`、`state=ready`、`source/source_hex`、`path/path_hex`（即指定 target）和 `materialization`。后者包含 `requested_mode`、`effective_planned_mode`、`actual_mode`、`adapter`、`outcome=succeeded`、`cow`、`fallback={used,reason}`、`failed_attempt_count`；不执行 Git 初始化或检查。`--dry-run --json` 返回 `dry_run=true`、`workspace_id=null`、`name`、`source/source_hex`、`target/target_hex`、`source_volume_id`、`target_volume_id` 与 `same_volume`，以及只有请求模式、预选模式、Adapter 和 fallback 的 `materialization`；不出现 `actual_mode`、`cow` 或成功 Receipt。这里沿用字段名 `volume_id` 作为公开契约，值是平台文件系统身份，不表示 Linux 使用 APFS UUID。
 
-`materialization` 中的模式稳定值为 `cow-clone`、`full-copy`；`adapter` 稳定值为 macOS 的 `apfs-file-clone`、`full-copy` 及 Linux 的 `btrfs-reflink`。Linux 当前不产生 `full-copy` 成功回执。成功回执的 `cow` 为 `confirmed` 或 `not-used`。`fallback.used=false` 时 `reason=null`；为 true 时，`reason=clone-unsupported-at-preflight` 表示预检确认 clone 不支持，`reason=clone-unavailable-at-runtime` 表示实际 clone 不可用且已确认回滚后改用 Full Copy。dry-run 只能报告预检降级，不能预告运行时降级。以上取值也适用于 `workspace list/status` 展示的历史成功物化事实。
+`materialization` 中的模式稳定值为 `cow-clone`、`full-copy`；`adapter` 稳定值为 macOS 的 `apfs-file-clone`、`full-copy` 及 Linux 的 `btrfs-reflink`、`full-copy`。成功回执的 `cow` 为 `confirmed` 或 `not-used`。`fallback.used=false` 时 `reason=null`；为 true 时，`reason=clone-unsupported-at-preflight` 表示预检确认 clone 不支持，`reason=clone-unavailable-at-runtime` 表示实际 clone 不可用且已确认回滚后改用 Full Copy。dry-run 只能报告预检降级，不能预告运行时降级。以上取值也适用于 `workspace list/status` 展示的历史成功物化事实。
 
 `workspace list --json` 返回 `data.command="workspace list"` 和按名称排序的 `workspaces` 数组；每项有 `workspace_id`、`name`、`state`、`source/source_hex`、`target/target_hex`、`last_error_code` 和 `materialization`，不含 `git`、当前空间或未经当前核验的可用路径。已有成功最终回执时即使后来进入 Error，`materialization` 仍展示该历史成功事实，否则为 null。`workspace status --json` 返回同一记录字段、`path/path_hex`、`command="workspace status"`，以及 `git={scan_complete,state,issues,repositories}` 和 `space={state,logical_bytes,allocated_bytes_estimate}`；space.state 为 `complete` 或 `unknown`，unknown 时两个数值均为 null。每个 repository 包含 `relative_path/relative_path_hex`、`state`、`tracked_changes` 和 `issues`。非 Ready 的 `path/path_hex` 为 null；`target/target_hex` 始终是登记路径，不代表当前存在或可用；根仓库用 `.`；显示路径可能有损，无损字节在对应 hex 字段。空间字段是查询时的估算，不把创建时 Receipt 当成实时用量。
 
@@ -419,7 +425,7 @@ JSON 模式的成功或错误 envelope 均写入 stdout，且每次只输出一�
 |---|---|
 | macOS 15.7.2、Apple Silicon arm64、每次 source/target 同一 APFS 卷；按需使用 Apple Git 2.39.5 | 新布局已有本机真实 APFS 技术候选验证；阶段门禁与人工验收未完成，当前未放行 |
 | 其他 macOS/Git 版本或 Intel x86_64 | 未完成该组合的真实机资格验证，不纳入首发承诺 |
-| Debian 12 bookworm、`5.10.0-24-arm64` 内核、aarch64、ext4 控制目录、source/target 同一真实 Btrfs 挂载 | 候选已验收：现有 VM 的静态 musl Release 自动黑盒验收 11/11 已通过，适用的本地质量门禁及独立证据审核已完成。维护者最终放行授权尚未完成，不列为正式支持 |
+| Debian 12 bookworm、`5.10.0-24-arm64` 内核、aarch64、ext4 控制目录、source/target 同一真实 Btrfs 挂载 | CoW-only 候选已验收：现有 VM 的静态 musl Release 自动黑盒验收 11/11 已通过，适用的本地质量门禁及独立证据审核已完成。新增 Full Copy 尚在 P1-L06 单独验收，不继承此结论；维护者最终放行授权尚未完成，不列为正式支持 |
 | 其他 Linux 文件系统/发行版、Windows 或 source/target 跨卷/跨挂载 | 当前未实现或未完成资格验证 |
 
-已知限制按本手册各节的详细契约执行：每次来源与指定 target 必须同一 APFS 卷（macOS）或同一 Btrfs 挂载（当前 Linux 扩展），`~/.thinws` 可在其他卷或文件系统；`--allow-copy` 不是跨卷开关，Linux 当前没有 Full Copy 后端（第四节）。普通路径可直接使用，但没有用户命令包装、构建缓存策略或 Sandbox（第一、二、六节）；Git 只用于按需的已跟踪变更检查，不代办分支、提交或 PR，未跟踪内容会随副本清理（第五至七节）；没有 GC、自动回收或中断续做，外部进程占用扫描也只能提供尽力证据（第六、八、九节）。系统 Git 不可用时，创建仍可进行，但依赖 Git 检查的普通清理可能因检查不完整而拒绝；是否显式强制清理仍由用户决定，且强制清理仍须验证目标存在与身份。
+已知限制按本手册各节的详细契约执行：每次来源与指定 target 必须同一 APFS 卷（macOS）或同一 Btrfs 挂载（当前 Linux 扩展），`~/.thinws` 可在其他卷或文件系统；`--allow-copy` 不是跨卷或跨文件系统开关，Linux Full Copy 新候选仍需独立验收（第四节）。普通路径可直接使用，但没有用户命令包装、构建缓存策略或 Sandbox（第一、二、六节）；Git 只用于按需的已跟踪变更检查，不代办分支、提交或 PR，未跟踪内容会随副本清理（第五至七节）；没有 GC、自动回收或中断续做，外部进程占用扫描也只能提供尽力证据（第六、八、九节）。系统 Git 不可用时，创建仍可进行，但依赖 Git 检查的普通清理可能因检查不完整而拒绝；是否显式强制清理仍由用户决定，且强制清理仍须验证目标存在与身份。

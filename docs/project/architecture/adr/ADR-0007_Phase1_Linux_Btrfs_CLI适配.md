@@ -1,6 +1,6 @@
 # ADR-0007：Phase 1 Linux/Btrfs CLI 适配
 
-**状态：Accepted｜日期：2026-09-29，资格基线修订：2026-09-30｜适用范围：Phase 1 的 Linux/Btrfs 扩展**
+**状态：Accepted｜日期：2026-09-29，资格基线修订：2026-09-30，Full Copy 范围修订：2026-10-06｜适用范围：Phase 1 的 Linux/Btrfs 扩展**
 
 ## 职责与非职责
 
@@ -20,6 +20,7 @@
 4. Linux 的持久归属必须有可重验的文件系统与目录身份；身份不足、挂载变化、birthtime 缺失或控制目录布局无法证明时安全失败。任何持久格式更改须明确版本化，不静默读取或迁移不兼容数据。Linux 删除必须与 macOS 一样先确认登记 target 存在、身份匹配和占用边界；`--force` 不越过这些检查。
    Linux 新建 Workspace 的归属文档使用独立的 `schema_version = 3`：沿用 ADR-0006 的实例、Workspace、Btrfs FSID、规范路径及父/目标/操作目录历史身份，并额外持久记录创建时 mount ID；重验要求 FSID、mount ID、inode 和 birthtime 均匹配。macOS 的既有版本 2 归属文档及两平台的版本 2 bootstrap 文档不变；Linux 不把 macOS 归属文档当作 Linux 可清理证明，也不隐式迁移。
 5. 平台资格顺序为：可移植 Core/持久模型 → Linux Host/Path Probe 与控制目录/锁 → Linux Btrfs 物化 → 删除、进程与空间边界 → CLI 装配及黑盒生命周期。只有真实 Btrfs、故障注入、CLI 契约和适用质量门禁通过后，用户手册才把 Linux 组合从“未实现”改为“候选已验收”；人工阶段放行仍另行决定。
+6. 维护者随后要求增加 Linux Full Copy：只在上述**同一 Btrfs 挂载**布局中，用户显式使用 `--allow-copy` 且 CoW 被证实不可用时，沿用现有 Core/Application 的降级计划、确认回滚、来源重验和 Receipt 语义，增加 Linux 字节复制执行器。不能把 ext4、`prl_fs`、不同 Btrfs 挂载或身份不明的路径借此纳入支持范围；默认仍要求 CoW，不静默复制。Full Copy 的新增行为须单独经过真实 Btrfs、失败边界、CLI 契约与质量门禁，不能沿用先前 CoW-only 候选验收结果直接放行。
 
 ## 备选方案与代价
 

@@ -10,10 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
-use thinws_adapter_linux::{BtrfsReflinkMaterializer, LinuxPlatformProbe};
+use thinws_adapter_linux::{
+    BtrfsReflinkMaterializer, LinuxFullCopyMaterializer, LinuxPlatformProbe,
+};
 use thinws_core::{
-    AbsolutePath, CowEvidence, FallbackPolicy, MaterializationFailureKind, MaterializationOutcome,
-    MaterializationPlan, MaterializeRequest, RollbackStatus,
+    AbsolutePath, CowEvidence, FallbackPolicy, FallbackReason, MaterializationAttemptEvidence,
+    MaterializationFailureKind, MaterializationOutcome, MaterializationPlan,
+    MaterializationReceipt, MaterializeRequest, RollbackEvidence, RollbackStatus,
 };
 use thinws_ports::{MaterializationPathProbeRequest, PlatformProbe, WorkspaceMaterializer};
 
@@ -196,6 +199,276 @@ fn nocow_source_file_fails_closed_when_target_inherits_cow() {
     );
     assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
     assert_eq!(fs::read(nocow.join("file")).unwrap(), b"NOCOW source bytes");
+}
+
+fn full_copy_fallback_fixture(
+    prefix: &str,
+    nocow_at_root: bool,
+) -> (
+    tempfile::TempDir,
+    [PathBuf; 4],
+    MaterializeRequest,
+    MaterializationPlan,
+    MaterializationPlan,
+    MaterializationReceipt,
+) {
+    let (fixture, paths) = fixture(prefix);
+    fs::write(paths[0].join("a-first"), b"cloned before failure").unwrap();
+    if nocow_at_root {
+        assert!(
+            Command::new("chattr")
+                .arg("+C")
+                .arg(&paths[0])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(paths[0].join("z-nocow"), b"NOCOW bytes").unwrap();
+    } else {
+        let nocow = paths[0].join("z-nocow");
+        fs::create_dir(&nocow).unwrap();
+        assert!(
+            Command::new("chattr")
+                .arg("+C")
+                .arg(&nocow)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(nocow.join("file"), b"NOCOW bytes").unwrap();
+    }
+    let request = MaterializeRequest::new(
+        absolute(&paths[0]),
+        absolute(&paths[1]),
+        absolute(&paths[2]),
+        absolute(&paths[3]),
+    );
+    let probe = LinuxPlatformProbe;
+    let report = probe
+        .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+        .unwrap();
+    let cow_plan =
+        MaterializationPlan::for_cow_clone(&report, FallbackPolicy::AllowFullCopyOnCowUnsupported)
+            .unwrap();
+    let failed = BtrfsReflinkMaterializer::new()
+        .materialize(&request, &cow_plan)
+        .unwrap_err();
+    assert_eq!(
+        failed.receipt().failure_kind(),
+        Some(MaterializationFailureKind::CowUnavailable)
+    );
+    assert_eq!(
+        failed.receipt().rollback().status(),
+        RollbackStatus::ConfirmedBaseline
+    );
+    assert!(!failed.receipt().rollback().quarantined().is_empty());
+    let fresh = probe
+        .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+        .unwrap();
+    let copy_plan = MaterializationPlan::for_full_copy_after_cow_unavailable(
+        &fresh,
+        &cow_plan,
+        failed.receipt(),
+    )
+    .unwrap();
+    (
+        fixture,
+        paths,
+        request,
+        copy_plan,
+        cow_plan,
+        failed.receipt().clone(),
+    )
+}
+
+#[test]
+fn full_copy_after_partial_reflink_clears_only_confirmed_quarantine() {
+    let (_fixture, paths, request, plan, _, _) =
+        full_copy_fallback_fixture("thinws-btrfs-copy-after-rollback-", false);
+    let receipt = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap();
+    assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
+    assert_eq!(receipt.cow_evidence(), CowEvidence::NotUsed);
+    assert_eq!(receipt.clone_calls_succeeded(), 0);
+    assert_eq!(
+        receipt.fallback_reason(),
+        Some(FallbackReason::CloneUnavailableAtRuntime)
+    );
+    assert_eq!(receipt.failed_attempts().len(), 1);
+    assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+    for name in ["a-first", "z-nocow/file"] {
+        assert_eq!(
+            fs::read(paths[1].join(name)).unwrap(),
+            fs::read(paths[0].join(name)).unwrap()
+        );
+        assert_ne!(
+            fs::metadata(paths[1].join(name)).unwrap().ino(),
+            fs::metadata(paths[0].join(name)).unwrap().ino()
+        );
+    }
+}
+
+#[test]
+fn full_copy_accepts_one_exact_confirmed_quarantine_entry() {
+    let (_fixture, paths, request, plan, _, _) =
+        full_copy_fallback_fixture("thinws-btrfs-copy-one-quarantine-", true);
+    assert_eq!(plan.failed_attempts()[0].rollback().quarantined().len(), 1);
+    let receipt = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap();
+    assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
+    assert_eq!(fs::read(paths[1].join("z-nocow")).unwrap(), b"NOCOW bytes");
+    assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+}
+
+#[test]
+fn full_copy_rejects_inconsistent_prior_rollback_without_deleting_quarantine() {
+    let (_fixture, paths, request, _plan, cow_plan, failed) =
+        full_copy_fallback_fixture("thinws-btrfs-copy-inconsistent-rollback-", false);
+    let mut removed = failed.rollback().removed().to_vec();
+    removed.push(removed[0].clone());
+    let forged_rollback =
+        RollbackEvidence::new(RollbackStatus::ConfirmedBaseline, removed, Vec::new())
+            .with_quarantined(failed.rollback().quarantined().to_vec());
+    let evidence = MaterializationAttemptEvidence::new(
+        failed.logical_bytes(),
+        failed.physical_bytes(),
+        failed.regular_file_count(),
+        failed.clone_calls_succeeded(),
+        failed.source_manifest_digest(),
+        failed.target_manifest_digest(),
+    );
+    let forged = MaterializationReceipt::failed_cow_clone(
+        &cow_plan,
+        MaterializationFailureKind::CowUnavailable,
+        failed.created().to_vec(),
+        true,
+        forged_rollback,
+        evidence,
+        failed.elapsed_millis(),
+    );
+    let report = LinuxPlatformProbe
+        .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+        .unwrap();
+    let plan =
+        MaterializationPlan::for_full_copy_after_cow_unavailable(&report, &cow_plan, &forged)
+            .unwrap();
+    let quarantined_before = fs::read_dir(&paths[3])
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    let failure = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap_err();
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::PlanStale)
+    );
+    assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    for entry in quarantined_before {
+        assert!(fs::symlink_metadata(paths[3].join(entry)).is_ok());
+    }
+}
+
+#[test]
+fn full_copy_after_cow_fails_before_first_entry_accepts_not_needed_rollback() {
+    let (_fixture, paths) = fixture("thinws-btrfs-copy-no-prior-output-");
+    assert!(
+        Command::new("chattr")
+            .arg("+C")
+            .arg(&paths[0])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let content = (0..(64 * 1024 + 257))
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    fs::write(paths[0].join("file"), &content).unwrap();
+    let request = MaterializeRequest::new(
+        absolute(&paths[0]),
+        absolute(&paths[1]),
+        absolute(&paths[2]),
+        absolute(&paths[3]),
+    );
+    let probe = LinuxPlatformProbe;
+    let report = probe
+        .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+        .unwrap();
+    let cow_plan =
+        MaterializationPlan::for_cow_clone(&report, FallbackPolicy::AllowFullCopyOnCowUnsupported)
+            .unwrap();
+    let failed = BtrfsReflinkMaterializer::new()
+        .materialize(&request, &cow_plan)
+        .unwrap_err();
+    assert_eq!(
+        failed.receipt().failure_kind(),
+        Some(MaterializationFailureKind::CowUnavailable)
+    );
+    assert_eq!(
+        failed.receipt().rollback().status(),
+        RollbackStatus::NotNeeded
+    );
+    assert!(failed.receipt().created().is_empty());
+    let fresh = probe
+        .inspect_materialization_paths(&MaterializationPathProbeRequest::from(&request))
+        .unwrap();
+    let copy_plan = MaterializationPlan::for_full_copy_after_cow_unavailable(
+        &fresh,
+        &cow_plan,
+        failed.receipt(),
+    )
+    .unwrap();
+    let receipt = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &copy_plan)
+        .unwrap();
+    assert_eq!(receipt.outcome(), MaterializationOutcome::Succeeded);
+    assert_eq!(receipt.cow_evidence(), CowEvidence::NotUsed);
+    assert_eq!(fs::read(paths[1].join("file")).unwrap(), content);
+    assert!(fs::read_dir(&paths[3]).unwrap().next().is_none());
+}
+
+#[test]
+fn full_copy_rejects_source_change_after_confirmed_reflink_rollback() {
+    let (_fixture, paths, request, plan, _, _) =
+        full_copy_fallback_fixture("thinws-btrfs-copy-source-change-", false);
+    fs::write(paths[0].join("z-nocow/file"), b"changed after failed clone").unwrap();
+    let failure = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap_err();
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::SourceChanged)
+    );
+    assert_eq!(
+        failure.receipt().rollback().status(),
+        RollbackStatus::NotNeeded
+    );
+    assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
+    assert!(
+        !fs::read_dir(&paths[3])
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn full_copy_keeps_foreign_trash_entry_and_does_not_publish_success() {
+    let (_fixture, paths, request, plan, _, _) =
+        full_copy_fallback_fixture("thinws-btrfs-copy-foreign-trash-", false);
+    fs::write(paths[3].join("foreign"), b"must remain").unwrap();
+    let failure = LinuxFullCopyMaterializer::new()
+        .materialize(&request, &plan)
+        .unwrap_err();
+    assert_eq!(
+        failure.receipt().failure_kind(),
+        Some(MaterializationFailureKind::TargetChanged)
+    );
+    assert_eq!(fs::read(paths[3].join("foreign")).unwrap(), b"must remain");
+    assert!(fs::read_dir(&paths[1]).unwrap().next().is_none());
 }
 
 #[test]

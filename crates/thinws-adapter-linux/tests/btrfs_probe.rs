@@ -129,7 +129,7 @@ fn actual_btrfs_paths_have_one_known_mount_and_a_btrfs_candidate() {
     assert_eq!(report.source().writability(), SupportState::Supported);
     assert_eq!(report.cow_clone().kind(), MaterializerKind::BtrfsReflink);
     assert_ne!(report.cow_clone().state(), SupportState::Unsupported);
-    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unknown);
     let volume = report
         .source()
         .filesystem()
@@ -185,6 +185,7 @@ fn same_btrfs_filesystem_on_a_different_mount_is_rejected() {
         report.target_root().mount().mount_id()
     );
     assert_eq!(report.cow_clone().state(), SupportState::Unsupported);
+    assert_eq!(report.full_copy().state(), SupportState::Unsupported);
     assert!(
         report
             .cow_clone()

@@ -81,7 +81,7 @@ pub use layout::LinuxDataRootLayout;
 pub use publication::LinuxInitializingProof;
 
 #[cfg(target_os = "linux")]
-pub use materializer::BtrfsReflinkMaterializer;
+pub use materializer::{BtrfsReflinkMaterializer, LinuxFullCopyMaterializer};
 
 #[cfg(target_os = "linux")]
 pub use workspace::LinuxPreparedWorkspace;

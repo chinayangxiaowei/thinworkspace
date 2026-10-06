@@ -156,6 +156,7 @@ fn debian_cli_completes_an_ext4_control_and_btrfs_workspace_lifecycle() {
             target.as_os_str().to_owned(),
             "--name".into(),
             "linux-copy".into(),
+            "--allow-copy".into(),
         ]
     };
     let mut preview_args = create();
@@ -173,6 +174,11 @@ fn debian_cli_completes_an_ext4_control_and_btrfs_workspace_lifecycle() {
     assert_eq!(
         created["data"]["materialization"]["adapter"],
         "btrfs-reflink"
+    );
+    assert_eq!(created["data"]["materialization"]["cow"], "confirmed");
+    assert_eq!(
+        created["data"]["materialization"]["fallback"]["used"],
+        false
     );
     let (status, repeated) = execute_json(&control, create());
     assert_eq!(status, 0, "{repeated}");
@@ -409,13 +415,16 @@ fn runtime_nocow_failures_keep_policy_and_cleanup_boundaries() {
     let source = data_fixture.path().join("source");
     let target = data_fixture.path().join("copy");
     fs::create_dir(&source).unwrap();
+    fs::write(source.join("a-cloned-first"), b"first clone then rollback").unwrap();
+    let nocow = source.join("z-nocow");
+    fs::create_dir(&nocow).unwrap();
     let chattr = Command::new("chattr")
         .arg("+C")
-        .arg(&source)
+        .arg(&nocow)
         .status()
         .expect("chattr must be installed for the Btrfs NOCOW test");
     assert!(chattr.success(), "Btrfs test root must permit NOCOW");
-    fs::write(source.join("file"), b"NOCOW source bytes").unwrap();
+    fs::write(nocow.join("file"), b"NOCOW source bytes").unwrap();
     assert_eq!(
         execute_json(
             &control,
@@ -424,7 +433,7 @@ fn runtime_nocow_failures_keep_policy_and_cleanup_boundaries() {
         .0,
         0
     );
-    let (status, rejected) = execute_json(
+    let (status, created) = execute_json(
         &control,
         vec![
             "thinws".into(),
@@ -440,18 +449,32 @@ fn runtime_nocow_failures_keep_policy_and_cleanup_boundaries() {
             "--allow-copy".into(),
         ],
     );
-    assert_eq!(status, 11, "{rejected}");
-    assert_eq!(rejected["error"]["code"], "E_CAPABILITY_UNAVAILABLE");
+    assert_eq!(status, 0, "{created}");
     assert_eq!(
-        rejected["error"]["message"],
-        "Full Copy is unavailable for this path combination"
+        created["data"]["materialization"]["actual_mode"],
+        "full-copy"
+    );
+    assert_eq!(created["data"]["materialization"]["cow"], "not-used");
+    assert_eq!(created["data"]["materialization"]["fallback"]["used"], true);
+    assert_eq!(
+        created["data"]["materialization"]["failed_attempt_count"],
+        1
     );
     assert!(target.is_dir());
-    assert!(fs::read_dir(&target).unwrap().next().is_none());
-    assert_eq!(
-        fs::read(source.join("file")).unwrap(),
-        b"NOCOW source bytes"
-    );
+    for relative in ["a-cloned-first", "z-nocow/file"] {
+        let original = source.join(relative);
+        let copied = target.join(relative);
+        assert_eq!(fs::read(&copied).unwrap(), fs::read(&original).unwrap());
+        assert_ne!(
+            fs::metadata(&copied).unwrap().ino(),
+            fs::metadata(&original).unwrap().ino()
+        );
+        assert_eq!(
+            fs::metadata(&copied).unwrap().mtime(),
+            fs::metadata(&original).unwrap().mtime()
+        );
+    }
+    assert_eq!(fs::read(nocow.join("file")).unwrap(), b"NOCOW source bytes");
 
     let other_target = data_fixture.path().join("copy-without-fallback");
     let (status, denied) = execute_json(

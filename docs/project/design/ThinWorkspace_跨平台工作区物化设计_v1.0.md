@@ -189,7 +189,7 @@ Application 将组合 Probe 证据交给 Core 生成 Plan；选中的 Materializ
 Core 再依当前产品阶段和用户显式政策决定是否执行
 ```
 
-Phase 1 产品政策比 Full Copy 的底层能力更严：macOS 首发要求本次 source、最终 target 与同卷临时 staging/trash 位于同一 APFS Volume；ADR-0007 准入的 Linux/Btrfs 扩展要求本次四类路径满足 §6.1 的同一 Btrfs 挂载布局。固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 不是跨卷开关；Linux 扩展当前不承诺跨文件系统 Full Copy，实际支持资格以用户手册为准。source 与 target 不得互相包含。
+Phase 1 产品政策比 Full Copy 的底层能力更严：macOS 首发要求本次 source、最终 target 与同卷临时 staging/trash 位于同一 APFS Volume；ADR-0007 准入的 Linux/Btrfs 扩展要求本次四类路径满足 §6.1 的同一 Btrfs 挂载布局，新增 Full Copy 亦不放宽这一点。固定 `~/.thinws` 控制目录可以位于另一卷，不决定 clone 能力。`--allow-copy` 不是跨卷开关；Linux 扩展不承诺跨文件系统 Full Copy，实际支持资格以用户手册为准。source 与 target 不得互相包含。
 
 ### 6.1 Linux reflink 候选后端的适用条件
 
@@ -206,6 +206,12 @@ Phase 1 产品政策比 Full Copy 的底层能力更严：macOS 首发要求本�
 组合 Probe 的 `supported` 只表示本次路径组合及已知卷特性**预检合格**，不证明目录树内每个普通文件都可克隆，更不等于 `cow=confirmed`。若挂载/卷特性或逐文件属性尚无法核实，须保留 `unknown` 或在执行时按具体失败记录；已知为 ext4、Parallels 共享文件系统 `prl_fs`、XFS `reflink=0`，或源与目标位于不同文件系统时，对 Btrfs/XFS reflink 候选后端为 `unsupported`。只有各应克隆普通文件的真实 reflink 调用和最终树核验全部成功，才可按 §7.1 同一 CoW 证据规则记录 `confirmed`，不能静默改用 Full Copy。
 
 例如，在 Debian VM 中，`/media/psf/data/code` 若由 Parallels 以 `prl_fs` 挂载，即使把 target 放在 VM 内的 Btrfs/XFS 卷，仍是跨文件系统，不能从该共享目录直接 reflink。要验证 Linux 薄克隆，原始 source 与 target/staging 必须同处一个可用的 VM 内 Btrfs/XFS 文件系统；从共享目录先做一次普通复制只能建立新的 VM 内 source，不会让后续宿主机对共享目录的编辑自动同步到它。
+
+### 6.2 Linux 同挂载 Full Copy
+
+Linux Full Copy 候选只在 source、target、staging、trash 均有可重验身份、位于同一真实 Btrfs 挂载且满足共同读写/不重叠约束时报告 `supported`；卷或挂载不明报告 `unknown`，已知跨文件系统、不同挂载、非 Btrfs 或不可写报告 `unsupported`。普通文件用持有的 no-follow 源 FD 向本次独占创建的 staging 文件逐字节写入，不调用 reflink，也不以 `copy_file_range` 充当独立字节复制；目录、链接、权限和 mtime 继续遵守 §3.4 的共同范围。Full Copy 的支持性不依赖 CoW 文件属性，预检合格也不证明写入或空间一定成功。
+
+仅在用户显式允许且 CoW 预检给出精确的 clone 不支持事实，或真实 `FICLONE` 以可降级的能力错误失败时选择 Full Copy。当前 Linux Probe 对 Btrfs 的逐文件 CoW 能力报告 `unknown`，不由文件系统类型推断 `unsupported`；因此本版的 NOCOW 情形走实际 `FICLONE` 后的运行时降级，dry-run 不预告 Full Copy。运行时降级必须先以失败回执确认 target 恢复创建前基线、没有未确认 staging；重新 Probe/Plan，并比较本次来源清单与失败 CoW 尝试的来源摘要。卷变化、`EXDEV`、`ENOSPC`、普通 I/O 错误、来源变化或回滚不完整均不得降级。成功回执为 `actual_mode=full-copy`、`adapter=full-copy`、`cow=not-used`，保留真实 fallback 原因和失败尝试；失败回执不得宣称 Ready 或 CoW confirmed。若首次 CoW 失败已把对象确认摘取到私有 trash，Full Copy 成功发布前只可根据失败回执逐项核验这些隔离对象的名称、类型和身份，并在无额外对象时清理；任何无法核实的对象均保留，创建保持非 Ready，不覆盖或误删。
 
 ---
 
@@ -263,6 +269,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 
 - 真实平台上的同卷成功与跨卷拒绝；
 - 当前 Linux/Btrfs Adapter 验收须覆盖同一挂载的 Btrfs 合格路径、ext4/`prl_fs` 拒绝、不同文件系统或不同挂载拒绝、Btrfs 文件属性不兼容及低于 5.18 内核的跨挂载点场景；不得用 Full Copy 成功代替 reflink 成功。XFS 合格路径与 `reflink=0` 拒绝属于将来 XFS Adapter 的验收，不作为本次 Btrfs CLI 适配的放行条件；
+- Linux Full Copy 新增验收须覆盖真实 NOCOW/可降级失败后的确认回滚与独立字节复制、未授权时继续拒绝、来源变化/部分复制失败与不完整回滚不发布、跨挂载及非 Btrfs 即使带 `--allow-copy` 仍拒绝，并逐项核对 JSON、Receipt 和显式清理；原 CoW-only 资格结果不得替代这些新场景；
 - Linux Btrfs 真实文件系统测试由 `THINWS_LINUX_BTRFS_TEST_ROOT` 显式指定已存在、可写、无路径符号链接的绝对目录；测试先确认实际文件系统为 Btrfs，只在该目录内创建并清理随机命名的私有子目录，不删除配置的根目录，也不默认使用系统临时目录或源码共享目录。未配置或验证失败须记为未执行/失败，不得冒充真实 Btrfs 已通过。先用 `python3 -B tools/linux_btrfs_preflight.py` 在该环境下验证；此变量仅属于测试工具，不是产品 CLI 配置。Linux Adapter 的真实物化测试沿用该测试根约定；
 - supported/unsupported/unknown 三种 Probe 结果；
 - Probe 后路径、挂载点或 symlink 被替换的竞态；

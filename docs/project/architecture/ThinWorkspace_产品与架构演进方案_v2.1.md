@@ -157,7 +157,7 @@ Phase 1 不建立 ChangeObserver、WorkspaceCheckpointCodec、SourceSnapshotCode
 
 ### 5.2 Phase 1 决策
 
-Phase 1 当前 macOS 候选按下列规则实现；Linux/Btrfs CLI 扩展已按 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 完成适用的产品候选资格验证，但尚待维护者人工放行，不因候选验收通过就列为正式支持平台：
+Phase 1 当前 macOS 候选按下列规则实现；Linux/Btrfs CLI 的原 CoW-only 扩展已按 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 完成对应候选资格验证，但尚待维护者人工放行。新增的同挂载 Full Copy 是独立验收中的扩展，不继承此前资格，也不因旧候选通过就列为正式支持平台：
 
 - APFS File Clone 是主物化后端；
 - 配置、SQLite、锁、日志和归属证据位于固定用户控制目录 `~/.thinws`；用户为每个 Workspace 指定最终 target，控制目录与 target 不要求同卷；
@@ -431,7 +431,7 @@ Node Runtime 继续使用相同的 Platform Adapters。控制面只消费统一�
 
 跨阶段控制规则：
 
-Phase 1 表中的 macOS/APFS 退出控制点是原有首发基线；Linux/Btrfs 是 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 的独立平台资格扩展，不因本表的 macOS 验收自动放行，也不把尚待人工放行的 Linux 候选计为正式支持。
+Phase 1 表中的 macOS/APFS 退出控制点是原有首发基线；Linux/Btrfs 是 [ADR-0007](adr/ADR-0007_Phase1_Linux_Btrfs_CLI适配.md) 的独立平台资格扩展，新增 Full Copy 再单独验收，不因本表的 macOS 验收或原 CoW-only 候选自动放行，也不把尚待人工放行的 Linux 候选计为正式支持。
 
 1. 正式发布后的对象身份与 CLI 语义变更必须另行版本化决策。ADR-0006 是尚未正式发布的 Phase 1 技术候选的明确破坏性重订，不迁移或兼容旧 data root，且不得自动删除旧数据。
 2. Phase 1 代码中不得出现 Job、Node、Placement、远程租约等未来领域概念；只允许存在不依赖这些概念的窄 Port。

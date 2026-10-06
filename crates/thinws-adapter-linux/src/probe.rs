@@ -60,14 +60,11 @@ impl PlatformProbe for LinuxPlatformProbe {
         let trash = inspect_path(request.trash(), false).map_err(|error| {
             error.with_materialization_path_role(MaterializationPathRole::Trash)
         })?;
-        let (cow_state, cow_reasons) = combined_support(&source, &target, &staging, &trash);
+        let (cow_state, cow_reasons) = combined_support(&source, &target, &staging, &trash, true);
         let cow = CandidateEvidence::new(MaterializerKind::BtrfsReflink, cow_state, cow_reasons);
-        // Phase 1 Linux has no Full Copy executor or cross-filesystem fallback.
-        let copy = CandidateEvidence::new(
-            MaterializerKind::FullCopy,
-            SupportState::Unsupported,
-            vec!["linux_full_copy_not_implemented".to_owned()],
-        );
+        let (copy_state, copy_reasons) =
+            combined_support(&source, &target, &staging, &trash, false);
+        let copy = CandidateEvidence::new(MaterializerKind::FullCopy, copy_state, copy_reasons);
         let digest = digest(&source, &target, &staging, &trash, &cow, &copy);
         Ok(MaterializationPathReport::new(
             source, target, staging, trash, cow, copy, digest,
@@ -319,6 +316,7 @@ fn combined_support(
     target: &PathCapabilityReport,
     staging: &PathCapabilityReport,
     trash: &PathCapabilityReport,
+    require_clone: bool,
 ) -> (SupportState, Vec<String>) {
     let paths = [source, target, staging, trash];
     let mut unsupported = Vec::new();
@@ -373,12 +371,14 @@ fn combined_support(
             (None, _) | (_, None) => unknown.push("volume_unknown".to_owned()),
             _ => {}
         }
-        match path.cow_clone() {
-            SupportState::Supported => {}
-            SupportState::Unsupported => {
-                unsupported.push("clone_capability_unsupported".to_owned())
+        if require_clone {
+            match path.cow_clone() {
+                SupportState::Supported => {}
+                SupportState::Unsupported => {
+                    unsupported.push("clone_capability_unsupported".to_owned())
+                }
+                SupportState::Unknown => unknown.push("clone_capability_unknown".to_owned()),
             }
-            SupportState::Unknown => unknown.push("clone_capability_unknown".to_owned()),
         }
     }
     let has_unsupported = !unsupported.is_empty();
@@ -622,7 +622,7 @@ mod tests {
     }
 
     fn support(reports: &[PathCapabilityReport; 4]) -> (SupportState, Vec<String>) {
-        combined_support(&reports[0], &reports[1], &reports[2], &reports[3])
+        combined_support(&reports[0], &reports[1], &reports[2], &reports[3], true)
     }
 
     #[test]
@@ -921,7 +921,7 @@ mod tests {
 
         let reports = same_mount_reports();
         let (state, reasons) =
-            combined_support(&source, &lexical_only_child, &reports[2], &reports[3]);
+            combined_support(&source, &lexical_only_child, &reports[2], &reports[3], true);
         assert_eq!(state, SupportState::Unsupported);
         assert!(
             reasons

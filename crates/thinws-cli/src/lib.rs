@@ -14,7 +14,9 @@ use clap::{Parser, Subcommand, error::ErrorKind};
 use serde_json::{Map, Value, json};
 use thinws_adapter_git_cli::SystemGitInspector;
 #[cfg(target_os = "linux")]
-use thinws_adapter_linux::{BtrfsReflinkMaterializer, LinuxHostAdapter as NativeHostAdapter};
+use thinws_adapter_linux::{
+    BtrfsReflinkMaterializer, LinuxFullCopyMaterializer, LinuxHostAdapter as NativeHostAdapter,
+};
 #[cfg(target_os = "macos")]
 use thinws_adapter_macos::{
     ApfsCloneMaterializer, FullCopyMaterializer, MacOsHostAdapter as NativeHostAdapter,
@@ -385,7 +387,11 @@ impl Commands for LocalCommands {
                 .map_err(use_case_error_view)?;
             #[cfg(target_os = "linux")]
             let outcome = service
-                .create_cow_only(request, &BtrfsReflinkMaterializer::new())
+                .create(
+                    request,
+                    &BtrfsReflinkMaterializer::new(),
+                    &LinuxFullCopyMaterializer::new(),
+                )
                 .map_err(use_case_error_view)?;
             let reservation = outcome.record().reservation();
             let facts = outcome.materialization();

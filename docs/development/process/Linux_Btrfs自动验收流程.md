@@ -44,7 +44,7 @@ bash /path/to/worktree/tools/linux-btrfs-acceptance.sh \
 | 场景组 | 自动判别的关键结果 |
 |---|---|
 | 普通使用 | init、doctor、dry-run 无副作用、真实 reflink 创建、普通路径直接使用、list/path/status、空间统计及删除；普通目录和 Btrfs 子卷来源均覆盖 |
-| 能力与布局拒绝 | ext4 或共享盘来源不被偷偷完整复制；NOCOW 的真实失败及非 Ready 清理；已存在 target 符号链接、活动 target 内嵌路径被拒绝且不跟随、不覆盖 |
+| 能力与布局拒绝 | ext4 或共享盘来源即使显式 `--allow-copy` 仍拒绝；NOCOW 默认失败并显式清理，授权时在确认回滚后 Full Copy 成功，JSON 标记真实降级；已存在 target 符号链接、活动 target 内嵌路径被拒绝且不跟随、不覆盖 |
 | Git 与清理 | 未跟踪内容不阻塞；已跟踪修改普通清理拒绝且保留目录；显式 force 后删除并保留拒绝、开始和完成日志 |
 | 归属与占用 | 登记 target 缺失时即使 force 仍保留关联；已确认外部进程占用不被 force 绕过；活动删除隔离目录与新 target 冲突时拒绝 |
 

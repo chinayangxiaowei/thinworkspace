@@ -844,7 +844,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 ### 4.8 Linux/Btrfs CLI 扩展（ADR-0007）
 
-本扩展由维护者要求在 Debian VM 与显式指定的真实 Btrfs 测试根上推进；当前产品候选已完成实现、验证和规定独立审核，仍待人工放行，不改变 macOS 候选既有任务状态和手册中的资格结论。实验 `FICLONE` 和文件对预检本身不构成以下产品任务的 Done 证据；任务完成依据后述实际 CLI 验收与质量证据。每项任务以对应设计文档的完整契约为准，不在此复制系统调用或测试矩阵。
+本扩展由维护者要求在 Debian VM 与显式指定的真实 Btrfs 测试根上推进；P1-L01–L05 的 CoW-only 候选已完成实现、验证和规定独立审核，仍待人工放行。新增 P1-L06 Full Copy 是独立在研任务，不继承该结论，不改变 macOS 候选既有任务状态和手册中的资格结论。实验 `FICLONE` 和文件对预检本身不构成以下产品任务的 Done 证据；任务完成依据后述实际 CLI 验收与质量证据。每项任务以对应设计文档的完整契约为准，不在此复制系统调用或测试矩阵。
 
 | 任务 | 可验收结果 | 前置 | 风险 | 状态 |
 |---|---|---|---|---|
@@ -853,6 +853,7 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 | P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | Done |
 | P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | Done |
 | P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在实际运行 Debian 12 bookworm 的 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | Done |
+| P1-L06 Linux 同挂载 Full Copy | 显式 `--allow-copy` 下的预检候选判定、NOCOW 运行时降级、真实字节复制、失败回滚与来源连续性均在 Btrfs 通过；跨挂载与非 Btrfs 仍拒绝；完成定向质量门禁和 Debian VM 复验 | P1-L05、ADR-0007 范围修订 | R4 | In Review |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
@@ -862,7 +863,7 @@ P1-L01–L05 是已完成的功能开发任务，不是新增五项待实现功�
 
 #### Linux/Btrfs 候选收口看板
 
-本表只跟踪 P1-L01–L05 **实现后的收口工作**，不新增产品能力；完整测试原始结果与过程证据仍归入[实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)。维护者已确认本轮保持 ADR-0007 的 CoW 范围，Linux Full Copy 不纳入此次资格验收；若以后增加，先修改对应设计与公开契约，再单独排期。每项只在完成判据有证据时更新状态；主 Agent 每次进度消息按下列编号报告结果、下一项和阻断，不用笼统的完成百分比。
+本表只跟踪 P1-L01–L05 **实现后的 CoW 候选收口工作**；完整测试原始结果与过程证据仍归入[实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)。维护者随后要求新增 Linux Full Copy，已另列 P1-L06；旧 LQ-01–LQ-06 的 Done 仅证明旧 CoW-only 候选，不能迁移为新功能的验收。P1-L06 独立核对实现、真实 Btrfs 和拒绝边界、定向变异、CLI/JSON、静态 musl 与 Debian VM 复验及只读审核后，才可更新新候选资格；人工放行依旧由维护者决定。
 
 | 编号 | 单一交付结果 | 完成判据 | 状态 | 当前证据或下一步 |
 |---|---|---|---|---|

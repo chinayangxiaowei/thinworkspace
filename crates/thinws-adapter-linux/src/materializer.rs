@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::str::FromStr;
@@ -10,11 +12,11 @@ use std::time::Instant;
 
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_OMIT};
 use thinws_core::{
-    AbsolutePath, CreatedObjectEvidence, FileIdentity, MaterializationAttemptEvidence,
-    MaterializationFailureKind, MaterializationMode, MaterializationPathReport,
-    MaterializationPlan, MaterializationReceipt, MaterializeRequest, MaterializedEntryKind,
-    MaterializerKind, PathCapabilityReport, PathResolution, RelativePath, RollbackEvidence,
-    RollbackStatus, SupportState, TreeDigest, VolumeId,
+    AbsolutePath, CreatedObjectEvidence, FallbackReason, FileIdentity,
+    MaterializationAttemptEvidence, MaterializationFailureKind, MaterializationMode,
+    MaterializationPathReport, MaterializationPlan, MaterializationReceipt, MaterializeRequest,
+    MaterializedEntryKind, MaterializerKind, PathCapabilityReport, PathResolution, RelativePath,
+    RollbackEvidence, RollbackStatus, SupportState, TreeDigest, VolumeId,
 };
 use thinws_ports::{
     MaterializationFailure, MaterializationPathProbeRequest, PlatformProbe, PortErrorKind,
@@ -38,6 +40,38 @@ fn staged_file_write_flags() -> OFlags {
 #[derive(Clone, Copy, Default)]
 pub struct BtrfsReflinkMaterializer;
 
+/// Independent byte-copy materializer constrained to the same Btrfs mount.
+#[derive(Clone, Copy, Default)]
+pub struct LinuxFullCopyMaterializer;
+
+impl LinuxFullCopyMaterializer {
+    /// Creates a materializer; capability and identity are rechecked per call.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl WorkspaceMaterializer for LinuxFullCopyMaterializer {
+    fn kind(&self) -> MaterializerKind {
+        MaterializerKind::FullCopy
+    }
+
+    fn materialize(
+        &self,
+        request: &MaterializeRequest,
+        plan: &MaterializationPlan,
+    ) -> Result<MaterializationReceipt, MaterializationFailure> {
+        materialize_with_hook(request, plan, Backend::FullCopy, &NoopHook)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Backend {
+    Cow,
+    FullCopy,
+}
+
 impl BtrfsReflinkMaterializer {
     /// Creates a materializer; capability and identity are rechecked per call.
     #[must_use]
@@ -51,7 +85,7 @@ impl BtrfsReflinkMaterializer {
         plan: &MaterializationPlan,
         hook: &dyn ExecutionHook,
     ) -> Result<MaterializationReceipt, MaterializationFailure> {
-        materialize_with_hook(request, plan, hook)
+        materialize_with_hook(request, plan, Backend::Cow, hook)
     }
 }
 
@@ -109,13 +143,14 @@ impl ExecutionHook for NoopHook {}
 fn materialize_with_hook(
     request: &MaterializeRequest,
     plan: &MaterializationPlan,
+    backend: Backend,
     hook: &dyn ExecutionHook,
 ) -> Result<MaterializationReceipt, MaterializationFailure> {
     let started = Instant::now();
     let mut context = ExecutionContext::default();
     let mut bound = None;
     let result = (|| {
-        validate_request_plan(request, plan)?;
+        validate_request_plan(request, plan, backend)?;
         let fresh = LinuxPlatformProbe
             .inspect_materialization_paths(&MaterializationPathProbeRequest::from(request))
             .map_err(|error| {
@@ -127,15 +162,30 @@ fn materialize_with_hook(
                 )
             })?;
         if fresh.evidence_digest() != plan.probe_evidence_digest()
-            || fresh.cow_clone().state() == SupportState::Unsupported
+            || match backend {
+                Backend::Cow => fresh.cow_clone().state(),
+                Backend::FullCopy => fresh.full_copy().state(),
+            } == SupportState::Unsupported
         {
             return Err(stale_plan());
         }
         let paths = BoundPaths::open(request, fresh)?;
         ensure_empty(&paths.target)?;
         ensure_empty(&paths.staging)?;
-        ensure_empty(&paths.trash)?;
+        if backend == Backend::Cow {
+            ensure_empty(&paths.trash)?;
+        }
         let source_snapshot = snapshot(&paths.source)?;
+        if backend == Backend::FullCopy
+            && plan.fallback_reason() == Some(FallbackReason::CloneUnavailableAtRuntime)
+            && plan
+                .failed_attempts()
+                .first()
+                .and_then(|attempt| attempt.evidence().source_manifest_digest())
+                != Some(source_snapshot.manifest.digest())
+        {
+            return Err(TreeFailure::source_changed());
+        }
         context.source_manifest = Some(source_snapshot.manifest.digest());
         context.regular_files = Some(source_snapshot.manifest.regular_files);
         context.logical_bytes = Some(source_snapshot.manifest.logical_bytes);
@@ -148,6 +198,7 @@ fn materialize_with_hook(
             &[],
             &source_snapshot,
             &mut context,
+            backend,
             hook,
         )?;
         context.target_modified = true;
@@ -192,21 +243,37 @@ fn materialize_with_hook(
             ));
         }
         paths.revalidate(request)?;
-        MaterializationReceipt::successful_cow_clone(
-            plan,
-            source_snapshot.manifest.regular_files,
-            context.clone_calls,
-            context
-                .created
-                .iter()
-                .map(TrackedCreated::evidence)
-                .collect(),
-            source_snapshot.manifest.digest(),
-            target_after.manifest.digest(),
-            elapsed_millis(started),
-            source_snapshot.manifest.logical_bytes,
-            Some(target_after.manifest.physical_bytes),
-        )
+        if backend == Backend::FullCopy {
+            clear_confirmed_prior_quarantine(paths, plan)?;
+        }
+        let created = context
+            .created
+            .iter()
+            .map(TrackedCreated::evidence)
+            .collect();
+        match backend {
+            Backend::Cow => MaterializationReceipt::successful_cow_clone(
+                plan,
+                source_snapshot.manifest.regular_files,
+                context.clone_calls,
+                created,
+                source_snapshot.manifest.digest(),
+                target_after.manifest.digest(),
+                elapsed_millis(started),
+                source_snapshot.manifest.logical_bytes,
+                Some(target_after.manifest.physical_bytes),
+            ),
+            Backend::FullCopy => MaterializationReceipt::successful_full_copy(
+                plan,
+                source_snapshot.manifest.regular_files,
+                created,
+                source_snapshot.manifest.digest(),
+                target_after.manifest.digest(),
+                elapsed_millis(started),
+                source_snapshot.manifest.logical_bytes,
+                Some(target_after.manifest.physical_bytes),
+            ),
+        }
         .map_err(|error| {
             TreeFailure::with_source(
                 MaterializationFailureKind::ManifestMismatch,
@@ -234,19 +301,31 @@ fn materialize_with_hook(
                 context.source_manifest,
                 context.target_manifest,
             );
-            let mut receipt = MaterializationReceipt::failed_cow_clone(
-                plan,
-                error.kind,
-                context
-                    .created
-                    .iter()
-                    .map(TrackedCreated::evidence)
-                    .collect(),
-                context.target_modified,
-                rollback,
-                evidence,
-                elapsed_millis(started),
-            );
+            let created = context
+                .created
+                .iter()
+                .map(TrackedCreated::evidence)
+                .collect();
+            let mut receipt = match backend {
+                Backend::Cow => MaterializationReceipt::failed_cow_clone(
+                    plan,
+                    error.kind,
+                    created,
+                    context.target_modified,
+                    rollback,
+                    evidence,
+                    elapsed_millis(started),
+                ),
+                Backend::FullCopy => MaterializationReceipt::failed_full_copy(
+                    plan,
+                    error.kind,
+                    created,
+                    context.target_modified,
+                    rollback,
+                    evidence,
+                    elapsed_millis(started),
+                ),
+            };
             if let Some(staged) = context.active_staging {
                 receipt = receipt.with_unconfirmed_staging(staged.evidence());
             }
@@ -265,9 +344,17 @@ fn elapsed_millis(started: Instant) -> u64 {
 fn validate_request_plan(
     request: &MaterializeRequest,
     plan: &MaterializationPlan,
+    backend: Backend,
 ) -> Result<(), TreeFailure> {
-    if plan.selected_adapter() != MaterializerKind::BtrfsReflink
-        || plan.effective_mode() != MaterializationMode::CowClone
+    let (adapter, mode) = match backend {
+        Backend::Cow => (
+            MaterializerKind::BtrfsReflink,
+            MaterializationMode::CowClone,
+        ),
+        Backend::FullCopy => (MaterializerKind::FullCopy, MaterializationMode::FullCopy),
+    };
+    if plan.selected_adapter() != adapter
+        || plan.effective_mode() != mode
         || request.source() != plan.source_path()
         || request.target() != plan.target_path()
         || request.staging() != plan.staging_path()
@@ -413,6 +500,81 @@ fn ensure_empty(directory: &OwnedFd) -> Result<(), TreeFailure> {
     }
 }
 
+fn clear_confirmed_prior_quarantine(
+    paths: &BoundPaths,
+    plan: &MaterializationPlan,
+) -> Result<(), TreeFailure> {
+    let Some(attempt) = plan.failed_attempts().first() else {
+        return ensure_empty(&paths.trash);
+    };
+    if plan.failed_attempts().len() != 1 {
+        return Err(stale_plan());
+    }
+    if attempt.rollback().status() == RollbackStatus::NotNeeded {
+        if !attempt.created().is_empty()
+            || !attempt.rollback().removed().is_empty()
+            || !attempt.rollback().quarantined().is_empty()
+            || !attempt.rollback().unconfirmed_quarantined().is_empty()
+        {
+            return Err(stale_plan());
+        }
+        return ensure_empty(&paths.trash);
+    }
+    if attempt.rollback().status() != RollbackStatus::ConfirmedBaseline
+        || !attempt.rollback().unconfirmed_quarantined().is_empty()
+        || attempt.rollback().removed().len() != attempt.rollback().quarantined().len()
+    {
+        return Err(stale_plan());
+    }
+    let mut confirmed = Vec::new();
+    for (removed, quarantine) in attempt
+        .rollback()
+        .removed()
+        .iter()
+        .zip(attempt.rollback().quarantined())
+    {
+        let created = attempt
+            .created()
+            .iter()
+            .find(|entry| entry.path() == removed)
+            .ok_or_else(stale_plan)?;
+        let identity = created.identity().ok_or_else(stale_plan)?;
+        let kind = match created.kind() {
+            MaterializedEntryKind::Directory => NodeKind::Directory,
+            MaterializedEntryKind::RegularFile => NodeKind::File,
+            MaterializedEntryKind::SymbolicLink => NodeKind::Symlink,
+        };
+        if quarantine.as_bytes().contains(&b'/') {
+            return Err(stale_plan());
+        }
+        let name = OsString::from_vec(quarantine.as_bytes().to_vec());
+        ensure_identity(node_at(&paths.trash, &name)?, identity, kind)?;
+        if kind == NodeKind::Directory {
+            let directory = open_directory(&paths.trash, &name)?;
+            ensure_empty(&directory)?;
+        }
+        confirmed.push((name, kind));
+    }
+    let actual = directory_names(&paths.trash)?;
+    if actual.len() != confirmed.len()
+        || actual
+            .iter()
+            .any(|name| !confirmed.iter().any(|(expected, _)| name == expected))
+    {
+        return Err(TreeFailure::target_changed());
+    }
+    for (name, kind) in confirmed {
+        let flags = if kind == NodeKind::Directory {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        rustix::fs::unlinkat(&paths.trash, &name, flags)
+            .map_err(|error| TreeFailure::io("clear confirmed Btrfs rollback quarantine", error))?;
+    }
+    ensure_empty(&paths.trash)
+}
+
 #[derive(Default)]
 struct ExecutionContext {
     created: Vec<TrackedCreated>,
@@ -447,6 +609,8 @@ impl TrackedCreated {
     }
 }
 
+// Traversal carries independent bound descriptors and the frozen backend policy.
+#[allow(clippy::too_many_arguments)]
 fn materialize_directory(
     source: &OwnedFd,
     target: &OwnedFd,
@@ -454,6 +618,7 @@ fn materialize_directory(
     prefix: &[u8],
     expected: &TreeSnapshot,
     context: &mut ExecutionContext,
+    backend: Backend,
     hook: &dyn ExecutionHook,
 ) -> Result<(), TreeFailure> {
     for name in directory_names(source)? {
@@ -498,6 +663,7 @@ fn materialize_directory(
                     &relative,
                     expected,
                     context,
+                    backend,
                     hook,
                 )?;
                 set_preserved_metadata(&target_child, identity, before, hook)?;
@@ -535,8 +701,17 @@ fn materialize_directory(
                             Mode::empty(),
                         )
                         .map_err(|error| TreeFailure::io("open staged Btrfs file", error))?;
-                        reflink_clone(&source_file, &destination).map_err(classify_clone_error)?;
-                        Ok(1)
+                        match backend {
+                            Backend::Cow => {
+                                reflink_clone(&source_file, &destination)
+                                    .map_err(classify_clone_error)?;
+                                Ok(1)
+                            }
+                            Backend::FullCopy => {
+                                copy_file_bytes(&source_file, destination)?;
+                                Ok(0)
+                            }
+                        }
                     },
                 )?;
                 let target_file = open_file(target, &name)?;
@@ -594,6 +769,47 @@ fn classify_clone_error(error: std::io::Error) -> TreeFailure {
         _ => (MaterializationFailureKind::Filesystem, PortErrorKind::Io),
     };
     TreeFailure::with_source(kind, port_kind, "clone Btrfs file with FICLONE", error)
+}
+
+fn copy_file_bytes(source: &OwnedFd, destination: OwnedFd) -> Result<(), TreeFailure> {
+    let source = rustix::io::dup(source)
+        .map_err(|error| TreeFailure::io("duplicate Btrfs source file", error))?;
+    let mut source = File::from(source);
+    let mut destination = File::from(destination);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = source.read(&mut buffer).map_err(|error| {
+            TreeFailure::with_source(
+                MaterializationFailureKind::Filesystem,
+                PortErrorKind::Io,
+                "read Btrfs source file",
+                error,
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..count]).map_err(|error| {
+            TreeFailure::with_source(
+                if error.raw_os_error() == Some(libc::ENOSPC) {
+                    MaterializationFailureKind::NoSpace
+                } else {
+                    MaterializationFailureKind::Filesystem
+                },
+                PortErrorKind::Io,
+                "write Btrfs staged file",
+                error,
+            )
+        })?;
+    }
+    destination.flush().map_err(|error| {
+        TreeFailure::with_source(
+            MaterializationFailureKind::Filesystem,
+            PortErrorKind::Io,
+            "flush Btrfs staged file",
+            error,
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,9 +1331,22 @@ mod tests {
     }
 
     #[test]
+    fn full_copy_write_to_full_device_reports_no_space() {
+        let (_fixture, paths, _request, _plan) = fixture("thinws-btrfs-copy-no-space-");
+        let source_dir = rustix::fs::open(&paths[0], DIRECTORY_FLAGS, Mode::empty()).unwrap();
+        let source = open_file(&source_dir, OsStr::new("a"))
+            .unwrap_or_else(|_| panic!("fixture file must open"));
+        let full =
+            rustix::fs::open("/dev/full", OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty()).unwrap();
+        let error = copy_file_bytes(&source, full).unwrap_err();
+        assert_eq!(error.kind, MaterializationFailureKind::NoSpace);
+        assert_eq!(error.port_kind, PortErrorKind::Io);
+    }
+
+    #[test]
     fn frozen_plan_rejects_each_changed_request_path() {
         let (fixture, paths, request, plan) = fixture("thinws-btrfs-plan-roles-");
-        assert!(validate_request_plan(&request, &plan).is_ok());
+        assert!(validate_request_plan(&request, &plan, Backend::Cow).is_ok());
         for role in 0..4 {
             let mut changed = paths.clone();
             changed[role] = fixture.path().join(format!("other-{role}"));
@@ -1128,7 +1357,7 @@ mod tests {
                 absolute(&changed[3]),
             );
             assert_eq!(
-                validate_request_plan(&changed_request, &plan)
+                validate_request_plan(&changed_request, &plan, Backend::Cow)
                     .unwrap_err()
                     .kind,
                 MaterializationFailureKind::PlanStale,
@@ -1235,6 +1464,7 @@ mod tests {
             &[],
             &expected,
             &mut context,
+            Backend::Cow,
             &hook,
         ) {
             Ok(()) => panic!("replaced source symlink must be rejected"),
@@ -1506,7 +1736,7 @@ mod tests {
         let wrong_plan =
             MaterializationPlan::for_cow_clone(&other_backend, FallbackPolicy::Deny).unwrap();
         assert_eq!(
-            validate_request_plan(&request, &wrong_plan)
+            validate_request_plan(&request, &wrong_plan, Backend::Cow)
                 .unwrap_err()
                 .kind,
             MaterializationFailureKind::PlanStale

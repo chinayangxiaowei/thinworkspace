@@ -868,8 +868,8 @@ P1-L01–L05 是功能开发任务，当前实现与自测已提交，按《任�
 |---|---|---|---|---|
 | LQ-01 | Linux 功能与候选产物对齐 | P1-L01–L05 的代码入口存在；当前产品源码/依赖与已验收静态 CLI 一致，Debian 12 真实 VM 的 11/11 进程级报告和产物哈希可核验 | Done | 已核对；见实施记录第四十七至五十组。此项不代表正式支持 |
 | LQ-02 | 普通门禁与本地供应链核查 | 当前候选的本机及真实 Btrfs/ext4 Docker 全 workspace 测试、格式、严格 Clippy 和适用的离线 deny/audit 退出 0；未执行的线上检查如实注明 | Done | 已核对；离线 audit 不冒充最新在线公告，线上 CI 未执行 |
-| LQ-03 | Linux 长预算 fuzz 证据核对 | 九个适用目标各有 300 秒、无 crash/hang 的记录；逐项目核对 harness、调用代码、工具与当前候选差异，缺失证据则列明补跑范围 | In Progress | 既有八目标与新增 mountinfo 的记录已定位；下一步检查原始证据和复用前提 |
-| LQ-04 | Linux 与共享层变异证据核对 | 对当前枚举的 Linux Adapter、Core、Application、SQLite、CLI、Git 候选逐项关联有效结果或精确排除；无未解释的 missed/timeout/空缺 | Backlog | 主 Agent 已初核 Adapter 1148 项、共享层 1420 项；LQ-03 后复核原始报告及失效条件 |
+| LQ-03 | Linux 长预算 fuzz 证据核对 | 九个适用目标各有 300 秒、无 crash/hang 的记录；逐项目核对 harness、调用代码、工具与当前候选差异，缺失证据则列明补跑范围 | Done | 主 Agent 已整理九项记录及候选差异；旧八项只有历史会话摘要、没有另存原始报告，须由 LQ-05 审定是否可复用 |
+| LQ-04 | Linux 与共享层变异证据核对 | 对当前枚举的 Linux Adapter、Core、Application、SQLite、CLI、Git 候选逐项关联有效结果或精确排除；无未解释的 missed/timeout/空缺 | In Progress | 主 Agent 已初核 Adapter 1148 项、共享层 1420 项；现在复核原始报告及受限排除的失效条件 |
 | LQ-05 | 规定的独立只读审核 | GPT-6 Astra / `xhigh` 对冻结候选及 LQ-03、LQ-04 证据给出结论；阻断 finding 修复并复审，不能以主 Agent 自查代替 | Backlog | LQ-03、LQ-04 完成后确认只读审核安排；既有局部 Approve 不等于整体 Approve |
 | LQ-06 | Linux 退出条件与公开契约收口 | 逐项核对 P1-L01–L05 验收、真实平台红线、用户手册支持矩阵及未执行项；阻断缺陷为零，形成供维护者判断的明确结论 | Backlog | 依赖 LQ-05；不提前更改“未正式支持”资格 |
 | LQ-07 | 人工放行 | 维护者审阅 LQ-06 的候选、证据、遗留风险并明确确认；其后才按发布策略处理 tag | Blocked | 等待 LQ-06；Agent 不代签、不预先打 tag |

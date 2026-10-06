@@ -8,8 +8,13 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::Value;
-use tempfile::Builder;
+use tempfile::{Builder, TempDir};
 use thinws_cli::{LocalCommands, run};
+
+fn cli_test_dir(prefix: &str) -> TempDir {
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap();
+    Builder::new().prefix(prefix).tempdir_in(root).unwrap()
+}
 
 fn execute(bootstrap: &Path, args: Vec<OsString>) -> (i32, Value) {
     let commands = LocalCommands::new(Some(bootstrap.to_path_buf()))
@@ -23,12 +28,7 @@ fn execute(bootstrap: &Path, args: Vec<OsString>) -> (i32, Value) {
 
 #[test]
 fn real_cli_remove_plain_copy_preserves_source_and_keeps_log_outside_copy() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-remove-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-remove-");
     let bootstrap = temp.path().join("bootstrap");
     let data_root = bootstrap.clone();
     let source = temp.path().join("source");
@@ -107,12 +107,7 @@ fn fixture_git(path: &Path, args: &[&str]) {
 
 #[test]
 fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-remove-git-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-remove-git-");
     let bootstrap = temp.path().join("bootstrap");
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -236,12 +231,7 @@ fn real_cli_ignores_untracked_but_refuses_tracked_changes_until_explicit_force()
 
 #[test]
 fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-remove-busy-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-remove-busy-");
     let bootstrap = temp.path().join("bootstrap");
     let source = temp.path().join("source");
     let target = temp.path().join("busy-target");
@@ -303,12 +293,7 @@ fn real_cli_confirmed_cwd_process_blocks_force_until_the_process_exits() {
 
 #[test]
 fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-remove-unknown-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-remove-unknown-");
     let bootstrap = temp.path().join("bootstrap");
     let source = temp.path().join("source");
     let target = temp.path().join("unknown-git-target");
@@ -384,12 +369,7 @@ fn real_cli_git_incomplete_refusal_exposes_the_specific_issue() {
 
 #[test]
 fn real_cli_force_never_releases_a_missing_or_replaced_target() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-remove-target-identity-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-remove-target-identity-");
     let control = temp.path().join(".thinws");
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -482,12 +462,7 @@ fn real_cli_force_never_releases_a_missing_or_replaced_target() {
 
 #[test]
 fn real_cli_keeps_registration_while_the_target_parent_is_unavailable() {
-    let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/p1-12-cli-tests");
-    fs::create_dir_all(&controlled).unwrap();
-    let temp = Builder::new()
-        .prefix("cli-target-parent-unavailable-")
-        .tempdir_in(fs::canonicalize(controlled).unwrap())
-        .unwrap();
+    let temp = cli_test_dir("cli-target-parent-unavailable-");
     let control = temp.path().join(".thinws");
     let source = temp.path().join("source");
     let parent = temp.path().join("removable-parent");

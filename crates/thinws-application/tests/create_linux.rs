@@ -78,8 +78,8 @@ fn request(source: AbsolutePath, target: AbsolutePath, allow_copy: bool) -> Crea
 }
 
 #[test]
-fn same_name_reuse_requires_the_same_copy_policy() {
-    let (_control, _data, service, source, target) = fixture();
+fn same_name_reuse_requires_the_same_creation_inputs() {
+    let (_control, data, service, source, target) = fixture();
     let clone = BtrfsReflinkMaterializer::new();
     let original = request(source.clone(), target.clone(), false);
     assert!(
@@ -89,6 +89,16 @@ fn same_name_reuse_requires_the_same_copy_policy() {
             .created()
     );
     assert!(!service.create_cow_only(original, &clone).unwrap().created());
+
+    let other_target = data.path().join("other-target");
+    let error = service
+        .create_cow_only(
+            request(source.clone(), absolute(&other_target), false),
+            &clone,
+        )
+        .unwrap_err();
+    assert_eq!(error.diagnostic().code(), ErrorCode::NameConflict);
+    assert!(!other_target.exists());
 
     let error = service
         .create_cow_only(request(source, target, true), &clone)

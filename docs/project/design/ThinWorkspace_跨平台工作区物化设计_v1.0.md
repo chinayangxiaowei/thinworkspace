@@ -247,7 +247,7 @@ API 签名依据 [Apple XNU clonefile 手册](https://github.com/apple-oss-distr
 | 平台后端 | 历史能力起点 | 额外条件 | 产品状态 |
 |---|---|---|---|
 | macOS APFS File Clone | macOS 10.13/APFS | 同一 APFS Volume | Phase 1 首发；实际发布以真实机资格矩阵为准 |
-| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE`；Btrfs 更早已有专用接口 | 源与克隆落点在同一个 Btrfs 文件系统；挂载及 NOCOW/校验约束见 §6.1 | Phase 1 扩展实施中；尚未完成 CLI 资格验收 |
+| Linux Btrfs reflink | Linux 4.5 通用 `FICLONE`；Btrfs 更早已有专用接口 | 源与克隆落点在同一个 Btrfs 文件系统；挂载及 NOCOW/校验约束见 §6.1 | Phase 1 扩展；候选资格与正式支持状态以用户手册为准 |
 | Linux XFS reflink | Linux 4.9 开始引入 | 源与克隆落点在同一个创建时启用 `reflink=1`、`crc=1` 的 XFS 文件系统；DAX 约束见 §6.1 | 后续阶段 Adapter |
 | Linux OverlayFS | Linux 3.18 进入主线 | 内核、挂载权限和上层文件系统组合合法 | 后续阶段 Adapter |
 | Windows Server ReFS Block Clone | Windows Server 2016 | 支持块克隆的 ReFS 卷格式 | 未排期 |

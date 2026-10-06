@@ -844,21 +844,21 @@ P1-17–P1-21 本地技术收口（2026-09-28 UTC）：GPT-6 Astra / `xhigh` 对
 
 ### 4.8 Linux/Btrfs CLI 扩展（ADR-0007）
 
-本扩展由维护者要求在 Debian VM 与显式指定的真实 Btrfs 测试根上推进；当前仍是实施中，不改变 macOS 候选的既有 Done/放行事实。实验 `FICLONE` 和文件对预检已通过，但不构成以下产品任务的 Done 证据。每项任务以对应设计文档的完整契约为准，不在此复制系统调用或测试矩阵。
+本扩展由维护者要求在 Debian VM 与显式指定的真实 Btrfs 测试根上推进；当前产品候选已完成实现、验证和规定独立审核，仍待人工放行，不改变 macOS 候选既有任务状态和手册中的资格结论。实验 `FICLONE` 和文件对预检本身不构成以下产品任务的 Done 证据；任务完成依据后述实际 CLI 验收与质量证据。每项任务以对应设计文档的完整契约为准，不在此复制系统调用或测试矩阵。
 
 | 任务 | 可验收结果 | 前置 | 风险 | 状态 |
 |---|---|---|---|---|
-| P1-L01 通用物化身份与持久编解码 | Core/Port 不再把唯一 CoW 候选写死为 APFS；旧 macOS 记录和测试保持可读 | ADR-0007 | R3 | In Review |
-| P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | In Review |
-| P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | In Review |
-| P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | In Review |
-| P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在实际运行 Debian 12 bookworm 的 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | In Review |
+| P1-L01 通用物化身份与持久编解码 | Core/Port 不再把唯一 CoW 候选写死为 APFS；旧 macOS 记录和测试保持可读 | ADR-0007 | R3 | Done |
+| P1-L02 Linux 控制目录、锁与路径 Probe | ext4 控制根可初始化；Btrfs 实际路径组合有结构化身份和支持性证据；`prl_fs` 明确拒绝 | P1-L01 | R4 | Done |
+| P1-L03 Linux Btrfs 物化 | 同挂载目录原样镜像、真实 `FICLONE`、Receipt、失败回滚和保真范围通过 | P1-L02 | R4 | Done |
+| P1-L04 Linux 查询、占用与安全清理 | 已登记 target 的路径/空间/Git 查询及普通/强制删除满足现有生命周期边界 | P1-L03 | R4 | Done |
+| P1-L05 CLI 装配与真实机验收 | ARM64 静态 musl `thinws` 可编译，并在实际运行 Debian 12 bookworm 的 VM 完成 Btrfs 全命令黑盒生命周期；用户支持矩阵如实更新 | P1-L04 | R4 | Done |
 
 此表只管理任务顺序和状态；平台机制由物化设计、单机 CLI 详细设计与技术栈维护。Linux 真实测试根使用 `THINWS_LINUX_BTRFS_TEST_ROOT`；ext4 控制身份只读测试根使用 `THINWS_LINUX_EXT4_TEST_ROOT`；跨文件系统只读对照使用 `THINWS_LINUX_OTHER_TEST_FILE`。缺失环境时不将 macOS 或 mock 测试冒充 Linux 验收。发布仍需《任务流程》规定的门禁和人工确认。
 
-当前证据：维护者已将 Linux 资格基线从原计划的 Debian 11.7 改为现有 VM 实测的 Debian 12 bookworm/aarch64、`5.10.0-24-arm64` 内核；VM 名称不作为版本证据。Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过主要生命周期、跨挂载和失败边界测试；Linux 适用的 fuzz 目标有记录化长预算结果。`c4b58cd` 产品源码的静态 musl CLI 与本轮重编的 `e2e_linux` 在该 VM 按[自动验收流程](../process/Linux_Btrfs自动验收流程.md)执行：脚本强制核对资格内核、ext4/Btrfs 与真实 `prl_fs` 对照，先以哨兵二进制确认旧测试入口会被正确识别为假绿色，再以真实 Release CLI 完成 **11/11 全进程黑盒测试**，现行资格报告为 PASS。此前末级目标符号链接的错误码已修正；**36 项旧 Linux Adapter 变异账本审定：Done**，当前 Adapter 包已对账；共享层改动行的定向变异漏测已补测或有边界地排除，错误等价判断已纠正。共享层未改行的历史证据与当前新增位置现已由主 Agent 逐项对账、只对缺口定向补测，并为真实漏测补了单因素测试；详细分类与原始报告见[实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不复制测试日志或把主 Agent 对账冒称独立审核。
+当前证据：维护者已将 Linux 资格基线从原计划的 Debian 11.7 改为现有 VM 实测的 Debian 12 bookworm/aarch64、`5.10.0-24-arm64` 内核；VM 名称不作为版本证据。Linux Adapter 与 CLI 已在真实 Btrfs/ext4 上通过生命周期、跨挂载和失败边界测试；Linux 适用的九个 fuzz 目标各有记录化长预算结果。`c4b58cd` 产品源码的静态 musl CLI 与相应 `e2e_linux` 在该 VM 按[自动验收流程](../process/Linux_Btrfs自动验收流程.md)执行：脚本强制核对资格内核、ext4/Btrfs 与真实 `prl_fs` 对照，先以哨兵二进制确认旧测试入口会被正确识别为假绿色，再以真实 Release CLI 完成 **11/11 全进程黑盒测试**，现行资格报告为 PASS。此前末级目标符号链接的错误码已修正，旧 Linux Adapter 变异账本及当前包级覆盖已审定；共享层历史与新增位置的组合证据经规定 GPT-6 Astra / `xhigh` 独立只读审核为 Approve。详细分类、证据留存限制和原始报告见[实施记录](../implementation/ThinWorkspace_LinuxBtrfs适配实施记录.md)，本计划不复制测试日志。
 
-P1-L01–L05 是功能开发任务，当前实现与自测已提交，按《任务流程》任务状态进入 In Review；这不是新增五项待实现功能，也不表示资格放行。当前补测候选的本机与 Docker 通用门禁已通过；共享层历史证据适用性的规定独立审核及阶段证据最终核对尚待收口。人工逐条操作测试已由 VM 自动验收替代，但最终放行授权仍按《任务流程》执行。此前共用构建缓存的计数不得用于放行。
+P1-L01–L05 是已完成的功能开发任务，不是新增五项待实现功能。当前候选的本机与 Docker 通用门禁、适用专项证据、规定独立审核及 Debian VM 自动验收已闭合；人工逐条操作测试由自动验收代替，但最终放行授权仍按《任务流程》执行。此前共用构建缓存的计数未用于放行。
 
 #### Linux/Btrfs 候选收口看板
 
@@ -868,11 +868,11 @@ P1-L01–L05 是功能开发任务，当前实现与自测已提交，按《任�
 |---|---|---|---|---|
 | LQ-01 | Linux 功能与候选产物对齐 | P1-L01–L05 的代码入口存在；当前产品源码/依赖与已验收静态 CLI 一致，Debian 12 真实 VM 的 11/11 进程级报告和产物哈希可核验 | Done | 已核对；见实施记录第四十七至五十组。此项不代表正式支持 |
 | LQ-02 | 普通门禁与本地供应链核查 | 当前候选的本机及真实 Btrfs/ext4 Docker 全 workspace 测试、格式、严格 Clippy 和适用的离线 deny/audit 退出 0；未执行的线上检查如实注明 | Done | 已核对；离线 audit 不冒充最新在线公告，线上 CI 未执行 |
-| LQ-03 | Linux 长预算 fuzz 证据核对 | 九个适用目标各有 300 秒、无 crash/hang 的记录；逐项目核对 harness、调用代码、工具与当前候选差异，缺失证据则列明补跑范围 | Done | 主 Agent 已整理九项记录及候选差异；旧八项只有历史会话摘要、没有另存原始报告，须由 LQ-05 审定是否可复用 |
-| LQ-04 | Linux 与共享层变异证据核对 | 对当前枚举的 Linux Adapter、Core、Application、SQLite、CLI、Git 候选逐项关联有效结果或精确排除；无未解释的 missed/timeout/空缺 | In Progress | 主 Agent 已初核 Adapter 1148 项、共享层 1420 项；现在复核原始报告及受限排除的失效条件 |
-| LQ-05 | 规定的独立只读审核 | GPT-6 Astra / `xhigh` 对冻结候选及 LQ-03、LQ-04 证据给出结论；阻断 finding 修复并复审，不能以主 Agent 自查代替 | Backlog | LQ-03、LQ-04 完成后确认只读审核安排；既有局部 Approve 不等于整体 Approve |
-| LQ-06 | Linux 退出条件与公开契约收口 | 逐项核对 P1-L01–L05 验收、真实平台红线、用户手册支持矩阵及未执行项；阻断缺陷为零，形成供维护者判断的明确结论 | Backlog | 依赖 LQ-05；不提前更改“未正式支持”资格 |
-| LQ-07 | 人工放行 | 维护者审阅 LQ-06 的候选、证据、遗留风险并明确确认；其后才按发布策略处理 tag | Blocked | 等待 LQ-06；Agent 不代签、不预先打 tag |
+| LQ-03 | Linux 长预算 fuzz 证据核对 | 九个适用目标各有 300 秒、无 crash/hang 的记录；逐项目核对 harness、调用代码、工具与当前候选差异，缺失证据则列明补跑范围 | Done | 旧八项只有历史会话摘要、无另存原始报告；LQ-05 已明示接受在当前候选复用 |
+| LQ-04 | Linux 与共享层变异证据核对 | 对当前枚举的 Linux Adapter、Core、Application、SQLite、CLI、Git 候选逐项关联有效结果或精确排除；无未解释的 missed/timeout/空缺 | Done | Adapter 1148 项、共享五包 1420 项组合证据经 LQ-05 审定；旧包级报告部分不在本机，保留留存限制 |
+| LQ-05 | 规定的独立只读审核 | GPT-6 Astra / `xhigh` 对冻结候选及 LQ-03、LQ-04 证据给出结论；阻断 finding 修复并复审，不能以主 Agent 自查代替 | Done | 对 `05af9f1` 为 Approve，Critical/High/Normal/Low 均 0；审核范围与受限证据见实施记录 |
+| LQ-06 | Linux 退出条件与公开契约收口 | 逐项核对 P1-L01–L05 验收、真实平台红线、用户手册支持矩阵及未执行项；阻断缺陷为零，形成供维护者判断的明确结论 | Done | 规定模型对最终文档与证据终核 Approve、未闭合 finding 为 0；手册仅标精确组合“候选已验收”，正式支持仍待 LQ-07 |
+| LQ-07 | 人工放行 | 维护者审阅 LQ-06 的候选、证据、遗留风险并明确确认；其后才按发布策略处理 tag | Blocked | 等待维护者确认；Agent 不代签、不预先打 tag |
 
 ---
 
